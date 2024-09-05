@@ -35,14 +35,18 @@ location_dict = {
     'L': 'Lounge (Ayangbure)'
 }
 
-#read data
-df = pd.read_csv("L-31.csv")
-
+df = pd.read_csv("/Users/kingp/development/code-scripts/F-29.csv")
+date_input = "29-08-2024"
+location_code = "F"
 #ask user to imput data
-date_input = input("Enter the date (DD-MM-YYYY): ")
+# date_input = input("Enter the date (DD-MM-YYYY): ")
+
+
 
 #as user to enter location code
-location_code = input("Enter the location Code (A-G): ")
+# location_code = input("Enter the location Code (A-G): ")
+
+
 
 file_name = location_code + date_input
 
