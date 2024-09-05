@@ -1,5 +1,6 @@
 
 #Creating a DataFrame from a dictionary 
+
 #You can use Python with the pandas library to achieve this. Here's a step-by-step guide:
 
 #1. Install pandas if you haven't already: `pip install pandas`
