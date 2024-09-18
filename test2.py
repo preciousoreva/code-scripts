@@ -25,7 +25,7 @@ if location_code.upper() not in location_dict:
     print("Invalid location code, please try again.")
 else:
     # Set the folder where CSV files are located
-    folder_path = '/Users/davidabejide/Documents/GitHub/code-scripts'
+    folder_path = '/Users/kingp/development/code-scripts'    
 
     # List to hold all processed DataFrames
     combined_df_list = []
