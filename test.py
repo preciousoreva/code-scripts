@@ -20,6 +20,7 @@
 # Here's a sample script:
 import os
 import pandas as pd
+import math
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,6 @@ update_folder_dir = os.path.join(current_dir, 'updates')
 
 # Specify the directory where your CSV files are stored
 directory = current_dir
-
 
 # Get a list of all files in the directory
 all_files = os.listdir(directory)
@@ -51,6 +51,8 @@ location_dict = {
     'H': 'Hotel (Ayangbure)',
     'L': 'Lounge (Ayangbure)'
 }
+
+data_frames = []
 
 # Loop through each CSV file
 for csv_file in csv_files:
@@ -100,8 +102,8 @@ for csv_file in csv_files:
         df['*ItemTaxAmount'] = ''
         df['Service Date'] = date_input
 
-        #Add the new column to the first position 
-        df.insert(0, 'Date', date_input)
+        # #Add the new column to the first position 
+        # df.insert(0, 'Date', date_input)
 
         # remove the last row 
         df = df.drop(df.index[-1])
@@ -109,18 +111,50 @@ for csv_file in csv_files:
         # get to 14 
         df_first_14_columns = df.iloc[:, :15] 
 
-        final_columns = df.iloc[:, 15:30]
+        final_columns = df.iloc[:, 14:30]
+
+        data_frames.append(final_columns)
 
         # # # create a new CSV 
         # final_columns.to_csv(f"{file_name}.csv", index=False)
+
+# Concatenate all DataFrames into a single DataFrame
+combined_data = pd.concat(data_frames, ignore_index=True)
     
-        DataDirectory = update_folder_dir  # Specify the directory where you want to save the file
+DataDirectory = update_folder_dir  # Specify the directory where you want to save the file
 
-        # Construct the full path including the file name
-        final_file_path = os.path.join(DataDirectory, f"{file_name}.csv")
+output_file_name = 'combined_data'
+# Construct the full path including the file name
+# final_file_path = os.path.join(DataDirectory, f"{output_file_name}.csv")
 
-        # Save the DataFrame to the specified directory
-        final_columns.to_csv(final_file_path, index=False)
+# Check if the number of rows is more than or equal to 1000
+row_count = len(combined_data)
+
+# Define the chunk size (number of rows per file)
+chunk_size = 1000
+
+# Calculate the total number of chunks/files required
+num_files = math.ceil(row_count / chunk_size)
+
+for i in range(num_files):
+    # Define the start and end row indices for this chunk
+    start_row = i * chunk_size
+    end_row = min((i + 1) * chunk_size, row_count)  # Ensure we don't exceed the total rows
+    
+    # Extract the chunk from the DataFrame
+    chunk = combined_data.iloc[start_row:end_row, :]
+    
+    # Construct the output file path
+    output_file_path = os.path.join(DataDirectory, f'{output_file_name}_part{i + 1}.csv')
+    
+    # Save the chunk to a CSV file
+    chunk.to_csv(output_file_path, index=False)
+    
+    print(f"Data saved to {output_file_path}")
+
+
+# # Save the DataFrame to the specified directory
+# combined_data.to_csv(final_file_path, index=False)
 
 
 print('here to test data')
