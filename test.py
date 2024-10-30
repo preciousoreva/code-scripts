@@ -111,7 +111,11 @@ for csv_file in csv_files:
         # get to 14 
         df_first_14_columns = df.iloc[:, :15] 
 
-        final_columns = df.iloc[:, 14:30]
+        start_col = '*InvoiceNo'
+        end_col = 'Service Date'
+        final_columns = df.loc[:, start_col:end_col]
+
+        # final_columns = df.iloc[:, 14:30]
 
         data_frames.append(final_columns)
 
