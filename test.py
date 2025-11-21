@@ -39,6 +39,7 @@ csv_files = [file for file in all_files if file.endswith('.csv')]
 csv_count = len(csv_files)
 print(f"Number of CSV files: {csv_count}")
 
+
 # Create a location dictionary 
 location_dict = {
     'A': 'Atlantic mall (Chevron)',
