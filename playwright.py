@@ -17,8 +17,10 @@ def run(playwright: Playwright) -> None:
         page.get_by_role("button", name="Export to .csv").click()
     download = download_info.value
 
+# Save downloaded file to a specific location. For ease, create a folder called epos_raw in C: drive
+
     filename = download.suggested_filename
-    download.save_as(f"C:/Users/MARVIN-DEV/Downloads/{filename}")
+    download.save_as(fr"C:/epos/raw/{filename}")
 
     # ---------------------
     context.close()
@@ -27,3 +29,5 @@ def run(playwright: Playwright) -> None:
 
 with sync_playwright() as playwright:
     run(playwright)
+
+
