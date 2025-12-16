@@ -1,12 +1,12 @@
 import os
 import glob
 import json
-from typing import Optional, Dict
+from typing import Optional, Dict, Callable, Any
 from urllib.parse import quote
 
 import pandas as pd
 import requests
-from qbo_auth import get_access_token
+from qbo_auth import get_access_token, refresh_access_token, load_tokens, save_tokens
 
 # === CONFIG: QBO company info (auth is handled in qbo_auth.py) ===
 REALM_ID = "9341455406194328"  # QBO Company ID as string
@@ -88,6 +88,54 @@ def _qbo_headers(access_token: str) -> dict:
     }
 
 
+def _refresh_token_and_get_new_access_token() -> str:
+    """Refresh the access token and return the new one."""
+    tokens = load_tokens()
+    if not tokens:
+        raise RuntimeError("Cannot refresh token: qbo_tokens.json not found or empty")
+    tokens = refresh_access_token(tokens)
+    return tokens["access_token"]
+
+
+def _make_qbo_request(
+    method: str,
+    url: str,
+    access_token: str,
+    **kwargs
+) -> requests.Response:
+    """
+    Make a QBO API request with automatic token refresh on 401 errors.
+    
+    Args:
+        method: HTTP method ('GET', 'POST', etc.)
+        url: Full URL for the request
+        access_token: Current access token (may be refreshed if 401)
+        **kwargs: Additional arguments to pass to requests (headers, json, data, etc.)
+    
+    Returns:
+        requests.Response object
+    """
+    # Ensure headers include the access token
+    headers = kwargs.pop("headers", {})
+    if "Authorization" not in headers:
+        headers.update(_qbo_headers(access_token))
+    kwargs["headers"] = headers
+    
+    # Make the request
+    resp = requests.request(method, url, **kwargs)
+    
+    # If we get a 401, refresh token and retry once
+    if resp.status_code == 401:
+        print("[INFO] Got 401, refreshing access token and retrying...")
+        new_access_token = _refresh_token_and_get_new_access_token()
+        # Update headers with new token
+        headers["Authorization"] = f"Bearer {new_access_token}"
+        kwargs["headers"] = headers
+        resp = requests.request(method, url, **kwargs)
+    
+    return resp
+
+
 def get_department_id(name: str, access_token: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
     """
     Resolve a Department (shown as "Location" in the QBO UI) name to a Department Id with simple caching.
@@ -107,7 +155,7 @@ def get_department_id(name: str, access_token: str, cache: Dict[str, Optional[st
     query = f"select Id from Department where Name = '{safe_name}'"
     url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
     
-    resp = requests.get(url, headers=_qbo_headers(access_token))
+    resp = _make_qbo_request("GET", url, access_token)
     department_id: Optional[str] = None
     if resp.status_code == 200:
         data = resp.json()
@@ -143,7 +191,7 @@ def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -
     query = f"select Id from Item where Name = '{safe_name}'"
     url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
 
-    resp = requests.get(url, headers=_qbo_headers(access_token))
+    resp = _make_qbo_request("GET", url, access_token)
     item_id: Optional[str] = None
     if resp.status_code == 200:
         data = resp.json()
@@ -158,9 +206,7 @@ def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -
             "Type": "Service",
             "IncomeAccountRef": {"value": DEFAULT_INCOME_ACCOUNT_ID},
         }
-        create_resp = requests.post(
-            create_url, headers=_qbo_headers(access_token), json=payload
-        )
+        create_resp = _make_qbo_request("POST", create_url, access_token, json=payload)
         if create_resp.status_code in (200, 201):
             created = create_resp.json().get("Item")
             if created:
@@ -300,9 +346,10 @@ def build_sales_receipt_payload(
 def send_sales_receipt(payload: dict, access_token: str):
     url = f"{BASE_URL}/v3/company/{REALM_ID}/salesreceipt?minorversion=70"
 
-    response = requests.post(
+    response = _make_qbo_request(
+        "POST",
         url,
-        headers=_qbo_headers(access_token),
+        access_token,
         data=json.dumps(payload),
     )
 
@@ -333,6 +380,10 @@ def main():
     department_cache: Dict[str, Optional[str]] = {}
 
     for group_key, group_df in grouped:
+        # Refresh token before each group to ensure it's still valid
+        # (token might expire during long-running operations)
+        access_token = get_access_token()
+        
         payload = build_sales_receipt_payload(group_df, access_token, item_cache, department_cache)
         print(f"\nSending SalesReceiptNo: {group_key}")
         send_sales_receipt(payload, access_token)

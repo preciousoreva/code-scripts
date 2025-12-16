@@ -8,7 +8,11 @@ from datetime import datetime
 import argparse
 
 from load_env import load_env_file
-from slack_notify import notify_pipeline_success
+from slack_notify import (
+    notify_pipeline_success,
+    notify_pipeline_failure,
+    notify_pipeline_start,
+)
 
 # Load .env file to make environment variables available
 load_env_file()
@@ -152,35 +156,47 @@ def main(from_date: str, to_date: str) -> None:
        - Creates Uploaded/<date>/ folder
        - Moves raw CSV, processed CSV(s), and metadata to archive folder
     """
-    logging.info(f"Starting EPOS → QuickBooks pipeline (Custom Range: {from_date} to {to_date})...\n")
-
-    # Phase 1: Download from EPOS with custom date range
-    run_step(
-        "Phase 1: Download EPOS CSV (epos_playwright_custom)",
-        "epos_playwright_custom.py",
-        ["--from-date", from_date, "--to-date", to_date]
-    )
-
-    # Phase 2: Transform to single QuickBooks-ready CSV
-    run_step("Phase 2: Transform to single CSV (epos_to_qb_single)", "epos_to_qb_single.py")
-
-    # Phase 3: Upload to QBO sandbox
-    run_step("Phase 3: Upload to QBO (qbo_upload)", "qbo_upload.py")
-
-    # Phase 4: Archive files after successful upload
-    logging.info("\n=== Phase 4: Archive Files ===")
-    try:
-        archive_files(repo_root)
-    except Exception as e:
-        logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
-        # Don't fail the pipeline if archiving fails - upload already succeeded
-        logging.warning("Continuing despite archive failure (upload was successful)")
-
-    # Send Slack notification on success
+    pipeline_name = "EPOS → QuickBooks Pipeline (Custom Range)"
     date_range_str = f"{from_date} to {to_date}"
-    notify_pipeline_success("EPOS → QuickBooks Pipeline (Custom Range)", log_file, date_range_str)
 
-    logging.info("\nPipeline completed successfully ✅")
+    logging.info(f"Starting EPOS → QuickBooks pipeline (Custom Range: {from_date} to {to_date})...\n")
+    notify_pipeline_start(pipeline_name, log_file, date_range_str)
+
+    try:
+        # Phase 1: Download from EPOS with custom date range
+        run_step(
+            "Phase 1: Download EPOS CSV (epos_playwright_custom)",
+            "epos_playwright_custom.py",
+            ["--from-date", from_date, "--to-date", to_date]
+        )
+
+        # Phase 2: Transform to single QuickBooks-ready CSV
+        run_step("Phase 2: Transform to single CSV (epos_to_qb_single)", "epos_to_qb_single.py")
+
+        # Phase 3: Upload to QBO sandbox
+        run_step("Phase 3: Upload to QBO (qbo_upload)", "qbo_upload.py")
+
+        # Phase 4: Archive files after successful upload
+        logging.info("\n=== Phase 4: Archive Files ===")
+        try:
+            archive_files(repo_root)
+        except Exception as e:
+            logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
+            # Don't fail the pipeline if archiving fails - upload already succeeded
+            logging.warning("Continuing despite archive failure (upload was successful)")
+
+        # Success notification
+        notify_pipeline_success(pipeline_name, log_file, date_range_str)
+        logging.info("\nPipeline completed successfully ✅")
+
+    except SystemExit as e:
+        logging.error("Custom-range pipeline failed", exc_info=True)
+        notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
+        raise
+    except Exception as e:
+        logging.error("Custom-range pipeline failed with unexpected error", exc_info=True)
+        notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
+        raise
 
 
 if __name__ == "__main__":

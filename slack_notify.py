@@ -55,3 +55,35 @@ def notify_pipeline_success(pipeline_name: str, log_file: Path, date_range: str 
     if date_range:
         message += f"\n• Date Range: {date_range}"
     send_slack_success(message)
+
+
+def notify_pipeline_start(
+    pipeline_name: str,
+    log_file: Path,
+    date_range: str = None,
+) -> None:
+    message = (
+        f"🚀 *{pipeline_name} started*\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Log: `{log_file.name}`"
+    )
+    if date_range:
+        message += f"\n• Date Range: {date_range}"
+    send_slack_success(message)
+
+
+def notify_pipeline_failure(
+    pipeline_name: str,
+    log_file: Path,
+    error: str,
+    date_range: str = None
+) -> None:
+    message = (
+        f"❌ *{pipeline_name} failed*\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Error: `{error}`\n"
+        f"• Log: `{log_file.name}`"
+    )
+    if date_range:
+        message += f"\n• Date Range: {date_range}"
+    send_slack_success(message)
