@@ -200,3 +200,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args.from_date, args.to_date)
+
+# Example usage:
+# python run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
+# use python3 for Mac OS
