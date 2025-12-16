@@ -6,6 +6,12 @@ from pathlib import Path
 import logging
 from datetime import datetime
 
+from load_env import load_env_file
+from slack_notify import notify_pipeline_success
+
+# Load .env file to make environment variables available
+load_env_file()
+
 
 def run_step(label: str, script_name: str) -> None:
     """
@@ -156,8 +162,17 @@ def main() -> None:
         # Don't fail the pipeline if archiving fails - upload already succeeded
         logging.warning("Continuing despite archive failure (upload was successful)")
 
+    # Send Slack notification on success
+    notify_pipeline_success("EPOS → QuickBooks Pipeline", log_file)
+
     logging.info("\nPipeline completed successfully ✅")
+    
+   
 
 
 if __name__ == "__main__":
     main()
+
+# Example usage:
+# python run_pipeline.py --from-date 2025-12-01 --to-date 2025-12-05
+# use python3 for Mac OS
