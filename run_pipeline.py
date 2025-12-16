@@ -3,6 +3,7 @@ import sys
 import json
 import shutil
 from pathlib import Path
+from typing import Optional
 import logging
 from datetime import datetime
 
@@ -89,31 +90,51 @@ def archive_files(repo_root: Path) -> None:
     
     # Move raw file
     raw_file_path_str = metadata.get("raw_file_path", "")
+    raw_file_path: Optional[Path] = None
+    
     if raw_file_path_str:
         raw_file_path = Path(raw_file_path_str)
         if not raw_file_path.is_absolute():
             raw_file_path = repo_root / raw_file_path
     else:
         # Fallback to basename if full path not available
-        raw_file_path = repo_root / metadata.get("raw_file", "")
+        raw_file_basename = metadata.get("raw_file", "")
+        if raw_file_basename:
+            raw_file_path = repo_root / raw_file_basename
     
-    if raw_file_path.exists():
-        dest_raw = archive_dir / raw_file_path.name
-        shutil.move(str(raw_file_path), str(dest_raw))
-        logging.info(f"Moved raw file: {raw_file_path.name} → Uploaded/{normalized_date}/")
+    if raw_file_path:
+        # Safety check: ensure we're not trying to move the repo root itself
+        if raw_file_path == repo_root or raw_file_path.parent == repo_root and not raw_file_path.name:
+            logging.warning(f"Invalid raw_file_path in metadata (points to repo root), skipping raw file archive")
+        elif raw_file_path.exists() and raw_file_path.is_file():
+            dest_raw = archive_dir / raw_file_path.name
+            shutil.move(str(raw_file_path), str(dest_raw))
+            logging.info(f"Moved raw file: {raw_file_path.name} → Uploaded/{normalized_date}/")
+        else:
+            logging.warning(f"Raw file not found or is not a file: {raw_file_path}")
     else:
-        logging.warning(f"Raw file not found: {raw_file_path}")
+        logging.warning("No raw_file_path or raw_file in metadata, skipping raw file archive")
     
     # Move processed file(s)
     processed_files = metadata.get("processed_files", [])
     for processed_file in processed_files:
+        if not processed_file or not processed_file.strip():
+            logging.warning("Empty processed_file entry in metadata, skipping")
+            continue
+        
         processed_path = repo_root / processed_file
-        if processed_path.exists():
+        
+        # Safety check: ensure we're not trying to move the repo root or a directory
+        if processed_path == repo_root:
+            logging.warning(f"Invalid processed_file path (points to repo root): {processed_file}, skipping")
+            continue
+        
+        if processed_path.exists() and processed_path.is_file():
             dest_processed = archive_dir / processed_file
             shutil.move(str(processed_path), str(dest_processed))
             logging.info(f"Moved processed file: {processed_file} → Uploaded/{normalized_date}/")
         else:
-            logging.warning(f"Processed file not found: {processed_file}")
+            logging.warning(f"Processed file not found or is not a file: {processed_file}")
     
     # Move metadata file to archive as well
     dest_metadata = archive_dir / "last_epos_transform.json"

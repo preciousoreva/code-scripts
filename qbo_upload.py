@@ -97,10 +97,28 @@ def _refresh_token_and_get_new_access_token() -> str:
     return tokens["access_token"]
 
 
+class TokenManager:
+    """
+    Manages QBO access token state during a run.
+    Automatically refreshes token on 401 errors.
+    """
+    def __init__(self):
+        self.access_token = get_access_token()
+    
+    def get(self) -> str:
+        """Get the current access token."""
+        return self.access_token
+    
+    def refresh(self) -> str:
+        """Refresh the access token and update internal state."""
+        self.access_token = _refresh_token_and_get_new_access_token()
+        return self.access_token
+
+
 def _make_qbo_request(
     method: str,
     url: str,
-    access_token: str,
+    token_mgr: TokenManager,
     **kwargs
 ) -> requests.Response:
     """
@@ -109,7 +127,7 @@ def _make_qbo_request(
     Args:
         method: HTTP method ('GET', 'POST', etc.)
         url: Full URL for the request
-        access_token: Current access token (may be refreshed if 401)
+        token_mgr: TokenManager instance to get/refresh tokens
         **kwargs: Additional arguments to pass to requests (headers, json, data, etc.)
     
     Returns:
@@ -118,7 +136,7 @@ def _make_qbo_request(
     # Ensure headers include the access token
     headers = kwargs.pop("headers", {})
     if "Authorization" not in headers:
-        headers.update(_qbo_headers(access_token))
+        headers.update(_qbo_headers(token_mgr.get()))
     kwargs["headers"] = headers
     
     # Make the request
@@ -127,16 +145,16 @@ def _make_qbo_request(
     # If we get a 401, refresh token and retry once
     if resp.status_code == 401:
         print("[INFO] Got 401, refreshing access token and retrying...")
-        new_access_token = _refresh_token_and_get_new_access_token()
+        token_mgr.refresh()
         # Update headers with new token
-        headers["Authorization"] = f"Bearer {new_access_token}"
+        headers["Authorization"] = f"Bearer {token_mgr.get()}"
         kwargs["headers"] = headers
         resp = requests.request(method, url, **kwargs)
     
     return resp
 
 
-def get_department_id(name: str, access_token: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+def get_department_id(name: str, token_mgr: TokenManager, cache: Dict[str, Optional[str]]) -> Optional[str]:
     """
     Resolve a Department (shown as "Location" in the QBO UI) name to a Department Id with simple caching.
 
@@ -155,7 +173,7 @@ def get_department_id(name: str, access_token: str, cache: Dict[str, Optional[st
     query = f"select Id from Department where Name = '{safe_name}'"
     url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
     
-    resp = _make_qbo_request("GET", url, access_token)
+    resp = _make_qbo_request("GET", url, token_mgr)
     department_id: Optional[str] = None
     if resp.status_code == 200:
         data = resp.json()
@@ -172,7 +190,7 @@ def get_department_id(name: str, access_token: str, cache: Dict[str, Optional[st
     return department_id
 
 
-def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -> str:
+def get_or_create_item_id(name: str, token_mgr: TokenManager, cache: Dict[str, str]) -> str:
     """
     Resolve an Item name to an Item Id with simple caching.
 
@@ -191,7 +209,7 @@ def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -
     query = f"select Id from Item where Name = '{safe_name}'"
     url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
 
-    resp = _make_qbo_request("GET", url, access_token)
+    resp = _make_qbo_request("GET", url, token_mgr)
     item_id: Optional[str] = None
     if resp.status_code == 200:
         data = resp.json()
@@ -206,7 +224,7 @@ def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -
             "Type": "Service",
             "IncomeAccountRef": {"value": DEFAULT_INCOME_ACCOUNT_ID},
         }
-        create_resp = _make_qbo_request("POST", create_url, access_token, json=payload)
+        create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
         if create_resp.status_code in (200, 201):
             created = create_resp.json().get("Item")
             if created:
@@ -227,7 +245,7 @@ def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -
 
 def build_sales_receipt_payload(
     group: pd.DataFrame,
-    access_token: str,
+    token_mgr: TokenManager,
     item_cache: Dict[str, str],
     department_cache: Dict[str, Optional[str]],
 ) -> dict:
@@ -253,7 +271,7 @@ def build_sales_receipt_payload(
     for _, row in group.iterrows():
         # Product/Service
         item_name = str(row.get(ITEM_NAME_COL, "")).strip()
-        item_ref_id = get_or_create_item_id(item_name, access_token, item_cache)
+        item_ref_id = get_or_create_item_id(item_name, token_mgr, item_cache)
 
         # Quantity (default to 1 if missing/NaN or <=0)
         try:
@@ -333,7 +351,7 @@ def build_sales_receipt_payload(
 
     # Location from CSV -> QBO Department (Location tracking)
     if location_name:
-        department_id = get_department_id(location_name, access_token, department_cache)
+        department_id = get_department_id(location_name, token_mgr, department_cache)
         if department_id:
             payload["DepartmentRef"] = {"value": department_id}
         else:
@@ -343,27 +361,72 @@ def build_sales_receipt_payload(
     return payload
 
 
-def send_sales_receipt(payload: dict, access_token: str):
+def send_sales_receipt(payload: dict, token_mgr: TokenManager):
+    """
+    Send a Sales Receipt to QuickBooks API.
+    
+    Raises RuntimeError if the API returns a non-2xx status code.
+    """
     url = f"{BASE_URL}/v3/company/{REALM_ID}/salesreceipt?minorversion=70"
 
     response = _make_qbo_request(
         "POST",
         url,
-        access_token,
-        data=json.dumps(payload),
+        token_mgr,
+        json=payload,
     )
 
     print("Status:", response.status_code)
+    
+    # Parse response body for logging/error messages
     try:
         body = response.json()
         print(json.dumps(body, indent=2))
     except Exception:
+        body = None
         print(response.text)
+    
+    # Validate response status - raise error if not successful
+    if not (200 <= response.status_code < 300):
+        error_msg = f"Failed to create Sales Receipt: HTTP {response.status_code}"
+        
+        # Extract error details from response if available
+        if body:
+            fault = body.get("fault")
+            if fault:
+                errors = fault.get("error", [])
+                if errors:
+                    error_details = []
+                    for err in errors:
+                        detail = err.get("message", err.get("detail", ""))
+                        if detail:
+                            error_details.append(detail)
+                    if error_details:
+                        error_msg += f"\nError details: {'; '.join(error_details)}"
+        
+        # Include response text if JSON parsing failed
+        if not body:
+            error_msg += f"\nResponse: {response.text[:500]}"  # Limit length
+        
+        raise RuntimeError(error_msg)
+    
+    # Success - verify we got a SalesReceipt back
+    if body:
+        sales_receipt = body.get("SalesReceipt")
+        if sales_receipt:
+            receipt_id = sales_receipt.get("Id")
+            doc_number = sales_receipt.get("DocNumber")
+            if receipt_id:
+                print(f"[OK] Sales Receipt created: ID={receipt_id}, DocNumber={doc_number}")
+            else:
+                print("[WARN] Sales Receipt response missing Id")
+        else:
+            print("[WARN] Sales Receipt response missing SalesReceipt object")
 
 
 def main():
-    # Get a valid access token from qbo_auth (will refresh if needed)
-    access_token = get_access_token()
+    # Initialize token manager once (will refresh automatically on 401)
+    token_mgr = TokenManager()
 
     repo_root = get_repo_root()
 
@@ -380,13 +443,9 @@ def main():
     department_cache: Dict[str, Optional[str]] = {}
 
     for group_key, group_df in grouped:
-        # Refresh token before each group to ensure it's still valid
-        # (token might expire during long-running operations)
-        access_token = get_access_token()
-        
-        payload = build_sales_receipt_payload(group_df, access_token, item_cache, department_cache)
+        payload = build_sales_receipt_payload(group_df, token_mgr, item_cache, department_cache)
         print(f"\nSending SalesReceiptNo: {group_key}")
-        send_sales_receipt(payload, access_token)
+        send_sales_receipt(payload, token_mgr)
 
 
 if __name__ == "__main__":

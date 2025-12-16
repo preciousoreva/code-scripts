@@ -33,11 +33,20 @@ The pipeline is designed to be run as a single command and take care of all four
    ```
 
 4. **Run the pipeline:**
+
+   **Standard (latest data):**
+
    ```bash
    python3 run_pipeline.py
    ```
 
-That's it! The pipeline will download, transform, upload, and archive automatically.
+   **Custom date range:**
+
+   ```bash
+   python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
+   ```
+
+That's it! The pipeline will download, transform, upload, and archive automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, and failure events.
 
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
 
@@ -48,16 +57,32 @@ That's it! The pipeline will download, transform, upload, and archive automatica
 ### Core Pipeline Scripts
 
 - `run_pipeline.py`  
-  **Main entry point** — Orchestration script that runs all four phases in order:
+  **Main entry point** — Orchestration script that runs all four phases in order for the latest available data:
 
-  1. Download EPOS CSV (`epos_playwright.py`)
+  1. Download EPOS CSV (`epos_playwright.py`) - downloads "Yesterday's" data
   2. Transform to single CSV (`epos_to_qb_single.py`)
   3. Upload to QuickBooks (`qbo_upload.py`)
   4. Archive files (`run_pipeline.py` - Phase 4)
 
+  Sends Slack notifications for start, success, and failure events.
+
+- `run_pipeline_custom.py`  
+  **Custom date range pipeline** — Same as `run_pipeline.py` but allows you to specify a custom date range:
+
+  ```bash
+  python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
+  ```
+
+  Downloads EPOS data for the specified date range instead of "Yesterday". Also sends Slack notifications with the date range included.
+
 - `epos_playwright.py`  
   Uses **Playwright** to log into EPOS Now, navigate to the BookKeeping report, and download the CSV directly to the repo root directory.  
+  Downloads data for "Yesterday" by default.  
   **Note:** EPOS credentials are loaded from `.env` file or environment variables (see [Initial Setup](#2-configure-credentials-required)).
+
+- `epos_playwright_custom.py`  
+  Custom date range version of `epos_playwright.py`. Accepts `--from-date` and `--to-date` arguments to download data for a specific date range.  
+  Automatically navigates the calendar to the correct month and selects the specified dates.
 
 - `epos_to_qb_single.py`  
   Reads the latest raw CSV from the repo root and transforms it into a single consolidated CSV for QuickBooks import.  
@@ -67,12 +92,24 @@ That's it! The pipeline will download, transform, upload, and archive automatica
 
 - `qbo_upload.py`  
   Reads the latest `single_sales_receipts_*.csv` from the repo root and uses the **QuickBooks Online REST API** to create Sales Receipts.  
-  Each `*SalesReceiptNo` group becomes one Sales Receipt, with the tender type stored in the memo and the **Payment method** automatically mapped from the memo.
+  Each `*SalesReceiptNo` group becomes one Sales Receipt, with the tender type stored in the memo and the **Payment method** automatically mapped from the memo.  
+  **Features:**
+  - Automatically refreshes expired access tokens on 401 errors
+  - Maps **Location** data from CSV to QuickBooks **Departments** (shown as "Location" in QBO UI)
+  - Auto-creates missing Items if `AUTO_CREATE_ITEMS = True`
+  - Validates API responses and raises errors on upload failures
+  - Uses efficient `TokenManager` to avoid redundant token checks
 
 ### Supporting Files
 
 - `qbo_auth.py`  
   Handles QuickBooks OAuth2 authentication and token management. Contains client ID, client secret, and refresh-token logic. Automatically refreshes expired access tokens.
+
+- `slack_notify.py`  
+  Sends Slack notifications for pipeline events (start, success, failure). Requires `SLACK_WEBHOOK_URL` environment variable. Uses SSL certificate verification with certifi support.
+
+- `load_env.py`  
+  Utility to automatically load environment variables from `.env` file. Makes credential management easier without modifying shell profiles.
 
 - `sales_recepit_script.py`  
   Core transformation library used by `epos_to_qb_single.py`. Converts raw EPOS CSV format into QuickBooks-compatible format.
@@ -157,6 +194,7 @@ playwright install chromium
    QBO_CLIENT_SECRET=your_actual_client_secret
    EPOS_USERNAME=your_actual_username
    EPOS_PASSWORD=your_actual_password
+   SLACK_WEBHOOK_URL=your_slack_webhook_url  # Optional: for pipeline notifications
    ```
 
 3. **That's it!** The pipeline will automatically load credentials from `.env` when you run it.
@@ -173,6 +211,7 @@ export QBO_CLIENT_ID="your_client_id"
 export QBO_CLIENT_SECRET="your_client_secret"
 export EPOS_USERNAME="your_username"
 export EPOS_PASSWORD="your_password"
+export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline notifications
 ```
 
 **For persistent setup**, add to your shell profile (`~/.zshrc` or `~/.bashrc`):
@@ -183,6 +222,7 @@ export QBO_CLIENT_ID="your_client_id"
 export QBO_CLIENT_SECRET="your_client_secret"
 export EPOS_USERNAME="your_username"
 export EPOS_PASSWORD="your_password"
+export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline notifications
 ```
 
 Then reload: `source ~/.zshrc`
@@ -260,6 +300,18 @@ The upload script uses the QuickBooks Online API and expects:
 
 The script maps the memo field (tender type) to QuickBooks Payment Methods by name and sends the corresponding `PaymentMethodRef` ID when creating each Sales Receipt.
 
+**Location/Department Support:**
+
+- The script automatically maps **Location** data from the CSV to QuickBooks **Departments** (shown as "Location" in the QBO UI)
+- If a location name from the CSV doesn't exist in QuickBooks, a warning is logged and the Sales Receipt is created without a Department reference
+- Ensure your QuickBooks company has Departments configured with names matching your CSV location values
+
+**Item Auto-Creation:**
+
+- By default, `AUTO_CREATE_ITEMS = True` in `qbo_upload.py`
+- If an item/product doesn't exist in QuickBooks, the script will automatically create it as a Service item
+- Items are cached during the run to avoid duplicate queries
+
 > ⚠️ **Important:** When using production credentials, be careful not to run the pipeline multiple times for the same day unless you intend to create duplicate Sales Receipts.
 
 ---
@@ -271,11 +323,14 @@ The pipeline uses OAuth2 tokens to communicate with QuickBooks Online. Access to
 ### How Token Refresh Works
 
 - `qbo_auth.py` manages your **client ID**, **client secret**, and refresh-token logic
-- Whenever the upload script (`qbo_upload.py`) detects an expired token, it:
-  1. Calls the QuickBooks OAuth2 token endpoint
-  2. Exchanges the refresh token for a **new access token**
-  3. Saves the new tokens back to `qbo_tokens.json`
-  4. Retries the failed request automatically
+- `qbo_upload.py` uses a `TokenManager` class that:
+  1. Fetches a valid access token once at the start of the run
+  2. Automatically detects 401 authentication errors during API calls
+  3. Refreshes the token using the refresh token
+  4. Updates the token state and retries the failed request
+  5. Uses the refreshed token for all subsequent requests
+
+This ensures efficient token management without redundant checks, and handles mid-run token expiry automatically.
 
 ### Token Storage File (`qbo_tokens.json`)
 
@@ -313,11 +368,15 @@ The expected structure under `code-scripts/` is roughly:
 ```text
 code-scripts/
   epos_playwright.py
+  epos_playwright_custom.py
   epos_to_qb_single.py
   qbo_upload.py
   qbo_auth.py
   sales_recepit_script.py
   run_pipeline.py
+  run_pipeline_custom.py
+  slack_notify.py
+  load_env.py
   README.md
 
   # Temporary files (during processing)
@@ -369,26 +428,63 @@ The normalized date used for archiving is extracted from the CSV's `*SalesReceip
 
 ## Running the Full Pipeline
 
+### Standard Pipeline (Latest Data)
+
 From the `code-scripts` directory, run:
-
-```bash
-python run_pipeline.py
-```
-
-or explicitly with Python 3:
 
 ```bash
 python3 run_pipeline.py
 ```
 
-This will:
+This downloads "Yesterday's" data from EPOS and processes it.
 
-1. **Phase 1:** Launch Playwright and download the latest EPOS BookKeeping CSV to the repo root.
+### Custom Date Range Pipeline
+
+To process a specific date range:
+
+```bash
+python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
+```
+
+**Arguments:**
+
+- `--from-date`: Start date in `YYYY-MM-DD` format (required)
+- `--to-date`: End date in `YYYY-MM-DD` format (required)
+
+**Example:**
+
+```bash
+# Single day
+python3 run_pipeline_custom.py --from-date 2025-12-13 --to-date 2025-12-13
+
+# Date range
+python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
+```
+
+### Pipeline Phases
+
+Both pipelines run the same four phases:
+
+1. **Phase 1:** Launch Playwright and download EPOS BookKeeping CSV to the repo root.
 2. **Phase 2:** Transform the raw CSV into a single QuickBooks‑ready CSV in the repo root, and create metadata file.
 3. **Phase 3:** Upload Sales Receipts into QuickBooks via the API.
 4. **Phase 4:** Archive all processed files (raw CSV, processed CSV, and metadata) to `Uploaded/<date>/` folder.
 
-If any step fails (for example, EPOS login changes or the API token is expired), the pipeline will stop and print an error message indicating which phase failed. **Note:** If archiving (Phase 4) fails, the pipeline will log a warning but continue since the upload was successful.
+### Error Handling
+
+- If any step fails (for example, EPOS login changes or the API token is expired), the pipeline will stop and send a failure notification to Slack (if configured).
+- **Note:** If archiving (Phase 4) fails, the pipeline will log a warning but continue since the upload was successful.
+- Sales Receipt upload failures are now properly detected and will stop the pipeline before archiving.
+
+### Slack Notifications
+
+If `SLACK_WEBHOOK_URL` is set in your environment or `.env` file, the pipeline will send notifications:
+
+- **Start:** When the pipeline begins (includes date range for custom pipeline)
+- **Success:** When all phases complete successfully
+- **Failure:** When any phase fails (includes error details)
+
+Notifications include the log file name and date range (for custom pipeline) for easy debugging.
 
 ---
 
@@ -408,6 +504,7 @@ If any step fails (for example, EPOS login changes or the API token is expired),
     export QBO_CLIENT_SECRET="your_client_secret"
     export EPOS_USERNAME="your_username"
     export EPOS_PASSWORD="your_password"
+    export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional
     ```
   - For persistent setup, add to your shell profile (`~/.zshrc` or `~/.bashrc`)
   - Verify variables are set: `echo $QBO_CLIENT_ID` or check your `.env` file
@@ -445,6 +542,12 @@ If any step fails (for example, EPOS login changes or the API token is expired),
   - Check that your app has the correct permissions/scopes
   - Ensure tokens are valid (check `expires_at` in `qbo_tokens.json`)
   - For sandbox, verify you're using sandbox credentials and sandbox company
+  - **Note:** The script automatically refreshes tokens on 401 errors, so if you see a 401, it will retry once with a fresh token. If it still fails, check your credentials.
+
+### Sales Receipt Upload Failures
+
+- **Symptom:** Pipeline continues even when Sales Receipt uploads fail
+- **Solution:** This has been fixed! The pipeline now properly validates API responses and will stop with an error if any Sales Receipt fails to upload. Check the error message for details about what went wrong (missing items, invalid data, etc.)
 
 ### Payment Method Mapping Errors
 
@@ -453,6 +556,14 @@ If any step fails (for example, EPOS login changes or the API token is expired),
   - Verify Payment Methods exist in QuickBooks with exact names matching CSV values
   - Update `PAYMENT_METHOD_BY_NAME` dictionary in `qbo_upload.py` with correct Payment Method IDs
   - Check CSV memo/tender column values match expected format
+
+### Location/Department Not Appearing
+
+- **Symptom:** Sales Receipts created but Location field is empty in QuickBooks
+- **Solutions:**
+  - Verify Departments exist in QuickBooks with names matching your CSV "Location" column values
+  - Check that the Location column is present in your processed CSV
+  - If a location name doesn't match exactly, the script will log a warning and continue without the Department reference
 
 ### CSV Processing Errors
 
@@ -476,11 +587,12 @@ If any step fails (for example, EPOS login changes or the API token is expired),
 
 ## Security Best Practices
 
-- **Environment Variables:** All credentials (QuickBooks and EPOS) must be set via environment variables. Never hardcode credentials in source files.
-- **Token File Protection:** The `qbo_tokens.json` file is automatically created with restricted file permissions (owner read/write only) for security.
+- **Environment Variables:** All credentials (QuickBooks, EPOS, and Slack) must be set via environment variables or `.env` file. Never hardcode credentials in source files.
+- **Token File Protection:** The `qbo_tokens.json` file is automatically created with restricted file permissions (owner read/write only, 0o600) for security.
 - **Version Control:** The `.gitignore` file ensures sensitive files are never committed. Always verify credentials are not in source code before committing.
 - **Production:** For production deployments, use a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) instead of environment variables.
 - **Token Rotation:** Refresh tokens expire after ~100 days. Plan to re-authorize periodically.
+- **Archive Safety:** The archive function includes safety checks to prevent accidentally moving the repository root directory. Invalid file paths in metadata are skipped with warnings.
 
 ## Notes
 
