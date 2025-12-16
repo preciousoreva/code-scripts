@@ -35,6 +35,7 @@ DATE_COL = "*SalesReceiptDate"
 MEMO_COL = "Memo"
 DOCNUM_COL = "*SalesReceiptNo"
 GROUP_COL = "*SalesReceiptNo"
+LOCATION_COL = "Location"         # Location name from CSV
 
 # Detail columns
 ITEM_NAME_COL = "Item(Product/Service)"  # Product/Service name in QBO
@@ -46,7 +47,7 @@ SERVICE_DATE_COL = "Service Date"        # Per-line service date
 # Item mapping / creation behaviour
 DEFAULT_ITEM_ID = "1"           # Fallback generic item
 DEFAULT_INCOME_ACCOUNT_ID = "1" # For auto-created items
-AUTO_CREATE_ITEMS = False       # Flip to True if you ever want auto item creation
+AUTO_CREATE_ITEMS = True       # Flip to True if you ever want auto item creation
 
 
 def get_repo_root() -> str:
@@ -85,6 +86,42 @@ def _qbo_headers(access_token: str) -> dict:
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+
+
+def get_department_id(name: str, access_token: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """
+    Resolve a Department (shown as "Location" in the QBO UI) name to a Department Id with simple caching.
+
+    - If the name exists in cache, reuse its Id.
+    - Otherwise, try a QBO query by Name.
+    - Returns None if department not found or name is empty.
+    """
+    if not name or not name.strip():
+        return None
+    
+    name_clean = name.strip()
+    if name_clean in cache:
+        return cache[name_clean]
+    
+    safe_name = name_clean.replace("'", "''")
+    query = f"select Id from Department where Name = '{safe_name}'"
+    url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
+    
+    resp = requests.get(url, headers=_qbo_headers(access_token))
+    department_id: Optional[str] = None
+    if resp.status_code == 200:
+        data = resp.json()
+        departments = data.get("QueryResponse", {}).get("Department", [])
+        if departments:
+            department_id = departments[0].get("Id")
+    
+    if department_id:
+        cache[name_clean] = department_id
+    else:
+        # Cache None to avoid repeated failed queries
+        cache[name_clean] = None
+    
+    return department_id
 
 
 def get_or_create_item_id(name: str, access_token: str, cache: Dict[str, str]) -> str:
@@ -146,6 +183,7 @@ def build_sales_receipt_payload(
     group: pd.DataFrame,
     access_token: str,
     item_cache: Dict[str, str],
+    department_cache: Dict[str, Optional[str]],
 ) -> dict:
     """
     Build a SalesReceipt payload from a group of CSV rows (one SalesReceiptNo).
@@ -162,6 +200,7 @@ def build_sales_receipt_payload(
     txn_date = str(first_row[DATE_COL])
     memo = str(first_row[MEMO_COL])
     doc_number = str(first_row[DOCNUM_COL])
+    location_name = str(first_row.get(LOCATION_COL, "")).strip()
 
     lines = []
 
@@ -246,6 +285,14 @@ def build_sales_receipt_payload(
     if payment_method_id:
         payload["PaymentMethodRef"] = {"value": payment_method_id}
 
+    # Location from CSV -> QBO Department (Location tracking)
+    if location_name:
+        department_id = get_department_id(location_name, access_token, department_cache)
+        if department_id:
+            payload["DepartmentRef"] = {"value": department_id}
+        else:
+            print(f"[WARN] Department/Location '{location_name}' not found in QBO, skipping DepartmentRef")
+
     # No CustomerRef -> customer left blank (as desired)
     return payload
 
@@ -283,9 +330,10 @@ def main():
     print(f"Found {len(grouped)} distinct SalesReceiptNo groups")
 
     item_cache: Dict[str, str] = {}
+    department_cache: Dict[str, Optional[str]] = {}
 
     for group_key, group_df in grouped:
-        payload = build_sales_receipt_payload(group_df, access_token, item_cache)
+        payload = build_sales_receipt_payload(group_df, access_token, item_cache, department_cache)
         print(f"\nSending SalesReceiptNo: {group_key}")
         send_sales_receipt(payload, access_token)
 

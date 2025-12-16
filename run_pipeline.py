@@ -173,6 +173,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# Example usage:
-# python run_pipeline.py --from-date 2025-12-01 --to-date 2025-12-05
-# use python3 for Mac OS
