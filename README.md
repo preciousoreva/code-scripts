@@ -97,6 +97,9 @@ That's it! The pipeline will download, transform, upload, and archive automatica
   - Automatically refreshes expired access tokens on 401 errors
   - Maps **Location** data from CSV to QuickBooks **Departments** (shown as "Location" in QBO UI)
   - Auto-creates missing Items if `AUTO_CREATE_ITEMS = True`
+  - Treats EPOS line amounts as **VAT-inclusive** and sends both **net** and **gross** values to QBO so that:
+    - Subtotal and Total in QBO stay equal to the EPOS gross total
+    - QBO *backs out* VAT for display using `GlobalTaxCalculation = "TaxInclusive"` and `TaxInclusiveAmt`
   - Validates API responses and raises errors on upload failures
   - Uses efficient `TokenManager` to avoid redundant token checks
 

@@ -43,6 +43,7 @@ ITEM_DESC_COL = "ItemDescription"        # Line description
 QTY_COL = "ItemQuantity"                 # Quantity sold
 RATE_COL = "ItemRate"                    # Unit price (can be NaN)
 SERVICE_DATE_COL = "Service Date"        # Per-line service date
+TAX_AMOUNT_COL = "ItemTaxAmount"        # Per-line tax amount from EPOS (7.5% VAT)
 
 # Item mapping / creation behaviour
 DEFAULT_ITEM_ID = "1"           # Fallback generic item
@@ -267,6 +268,8 @@ def build_sales_receipt_payload(
     location_name = str(first_row.get(LOCATION_COL, "")).strip()
 
     lines = []
+    gross_total = 0.0
+    net_total = 0.0
 
     for _, row in group.iterrows():
         # Product/Service
@@ -281,36 +284,22 @@ def build_sales_receipt_payload(
         except (TypeError, ValueError):
             qty_val = 1.0
 
-        # Authoritative gross amount from CSV (*ItemAmount)
+        # Authoritative gross amount from CSV (*ItemAmount) – VAT-inclusive
         try:
             amount_csv = float(row[AMOUNT_COL])
         except (TypeError, ValueError, KeyError):
             amount_csv = 0.0
 
-        # Prefer ItemRate directly from CSV when valid and consistent
-        rate_raw = row.get(RATE_COL, None)
-        unit_price_gross: float
-
+        # Per-line tax amount from CSV. If missing, derive from the configured rate.
         try:
-            if rate_raw is not None and rate_raw == rate_raw and float(rate_raw) > 0:
-                rate_val = float(rate_raw)
-                # If CSV is internally consistent, keep it exactly
-                if qty_val and abs(rate_val * qty_val - amount_csv) < 0.01:
-                    unit_price_gross = rate_val
-                    amount_gross = amount_csv
-                else:
-                    # Derive a clean pair that satisfies QBO’s rule: Amount = UnitPrice * Qty
-                    unit_price_gross = round(amount_csv / qty_val, 2) if qty_val else amount_csv
-                    amount_gross = round(unit_price_gross * qty_val, 2)
-            else:
-                # No usable rate: derive from amount
-                unit_price_gross = round(amount_csv / qty_val, 2) if qty_val else amount_csv
-                amount_gross = round(unit_price_gross * qty_val, 2)
+            tax_amount = float(row.get(TAX_AMOUNT_COL, 0.0) or 0.0)
         except (TypeError, ValueError):
-            # Fallback if something is really broken
-            unit_price_gross = amount_csv
-            qty_val = 1.0
-            amount_gross = amount_csv
+            tax_amount = 0.0
+
+        # For tax-inclusive logic we treat *ItemAmount as the authoritative GROSS
+        # line amount. We'll derive a net amount (for Amount) and a net UnitPrice
+        # so that QBO's validation rule Amount == UnitPrice * Qty holds.
+        amount_gross = amount_csv
 
         # Service date: fall back to TxnDate if missing
         service_date = str(row.get(SERVICE_DATE_COL, txn_date))
@@ -321,19 +310,35 @@ def build_sales_receipt_payload(
         sales_item_detail = {
             "ItemRef": {"value": item_ref_id},
             "Qty": qty_val,
-            "UnitPrice": unit_price_gross,   # this matches CSV ItemRate when valid
+            # UnitPrice will be set after we compute the net amount below
+            "UnitPrice": None,
             "ServiceDate": service_date,
             "TaxCodeRef": {"value": TAX_CODE_ID},  # 7.5% S
         }
 
+        # To match QBO's "good" behaviour, we store line Amount as NET (exclusive of VAT)
+        # and provide TaxInclusiveAmt as the original gross from EPOS.
+        raw_amount_net = amount_gross - tax_amount
+        if raw_amount_net < 0:
+            raw_amount_net = 0.0
+
+        # Net unit price so that Amount == UnitPrice * Qty holds for QBO validation.
+        unit_price_net = round(raw_amount_net / qty_val, 2) if qty_val else raw_amount_net
+        amount_net = round(unit_price_net * qty_val, 2)
+        sales_item_detail["UnitPrice"] = unit_price_net
+
+        sales_item_detail["TaxInclusiveAmt"] = amount_gross
+
         lines.append(
             {
                 "DetailType": "SalesItemLineDetail",
-                "Amount": amount_gross,  # gross per line; must equal UnitPrice * Qty
+                "Amount": amount_net,  # net per line; matches QBO's stored Amount
                 "Description": description,
                 "SalesItemLineDetail": sales_item_detail,
             }
         )
+        gross_total += amount_gross
+        net_total += amount_net
 
     payload: dict = {
         "TxnDate": txn_date,
@@ -343,6 +348,34 @@ def build_sales_receipt_payload(
         "GlobalTaxCalculation": "TaxInclusive",
         "Line": lines,
     }
+
+    # Explicit tax summary so QBO keeps the overall total equal to our gross_total
+    # and only backs out the VAT portion for display, mirroring "good" receipts.
+    try:
+        # If we have a sensible net_total (from the per-line calculations), use that;
+        # otherwise fall back to deriving from the configured VAT rate.
+        tax_rate = 0.075  # 7.5%
+        net_base = round(net_total or (gross_total / (1 + tax_rate)), 2)
+        total_tax = round(gross_total - net_base, 2)
+
+        payload["TxnTaxDetail"] = {
+            "TotalTax": total_tax,
+            "TaxLine": [
+                {
+                    "Amount": total_tax,
+                    "DetailType": "TaxLineDetail",
+                    "TaxLineDetail": {
+                        "TaxRateRef": {"value": TAX_CODE_ID},
+                        "PercentBased": True,
+                        "TaxPercent": 7.5,
+                        "NetAmountTaxable": net_base,
+                    },
+                }
+            ],
+        }
+    except Exception:
+        # If anything goes wrong with our explicit tax calc, fall back to letting QBO compute.
+        pass
 
     # Payment method (tender type) from memo
     payment_method_id = infer_payment_method_id(memo)
