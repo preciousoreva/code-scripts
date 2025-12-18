@@ -7,9 +7,19 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 from qbo_auth import get_access_token, refresh_access_token, load_tokens, save_tokens
+from load_env import load_env_file
+
+# Load .env if present so QBO_* vars are available
+load_env_file()
 
 # === CONFIG: QBO company info (auth is handled in qbo_auth.py) ===
-REALM_ID = "9341455406194328"  # QBO Company ID as string
+try:
+    REALM_ID = os.environ["QBO_REALM_ID"]  # QBO Company ID as string
+except KeyError:
+    raise RuntimeError(
+        "QBO_REALM_ID environment variable is not set. "
+        "Set it in your environment or .env file."
+    )
 BASE_URL = "https://quickbooks.api.intuit.com"
 
 # Tax code id for your 7.5% VAT ("7.5% S")

@@ -73,7 +73,8 @@ That's it! The pipeline will download, transform, upload, and archive automatica
   python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
   ```
 
-  Downloads EPOS data for the specified date range instead of "Yesterday". Also sends Slack notifications with the date range included.
+  Downloads EPOS data for the specified date range instead of "Yesterday". Also sends Slack notifications with the date range included.  
+  **Archive folders:** Files are archived to `Uploaded/<date_range>/` (e.g., `Uploaded/2025-12-01 to 2025-12-05/`) instead of a single date folder.
 
 - `epos_playwright.py`  
   Uses **Playwright** to log into EPOS Now, navigate to the BookKeeping report, and download the CSV directly to the repo root directory.  
@@ -108,6 +109,15 @@ That's it! The pipeline will download, transform, upload, and archive automatica
 - `qbo_auth.py`  
   Handles QuickBooks OAuth2 authentication and token management. Contains client ID, client secret, and refresh-token logic. Automatically refreshes expired access tokens.
 
+- `qbo_query.py`  
+  **Unified QuickBooks query and management tool** — Supports multiple operations:
+  - `count`: Count SalesReceipts for a date or date range
+  - `list`: List SalesReceipts with details (supports pagination)
+  - `delete`: Delete SalesReceipts for a date or date range (with confirmation)
+  - `query`: Execute custom QBO queries
+  
+  All operations support single dates or date ranges. See [QuickBooks Query Tool](#quickbooks-query-tool) section for usage examples.
+
 - `slack_notify.py`  
   Sends Slack notifications for pipeline events (start, success, failure). Requires `SLACK_WEBHOOK_URL` environment variable. Uses SSL certificate verification with certifi support.
 
@@ -119,9 +129,10 @@ That's it! The pipeline will download, transform, upload, and archive automatica
 
 ### Data Folders
 
-- `Uploaded/<date>/` – Archived files after successful upload (created automatically by Phase 4)
+- `Uploaded/<date>/` or `Uploaded/<date_range>/` – Archived files after successful upload (created automatically by Phase 4)
   - Contains raw CSV, processed CSV(s), and `last_epos_transform.json` metadata
-  - Organized by normalized date extracted from CSV data (format: `YYYY-MM-DD`)
+  - Standard pipeline: Organized by normalized date (format: `YYYY-MM-DD`)
+  - Custom pipeline: Organized by date range (format: `YYYY-MM-DD to YYYY-MM-DD`)
 - `logs/` – Log files for each full pipeline run (created automatically by `run_pipeline.py`)
 
 **Note:** Files are temporarily stored in the repo root during processing, then automatically archived after successful upload.
@@ -195,6 +206,7 @@ playwright install chromium
    ```
    QBO_CLIENT_ID=your_actual_client_id
    QBO_CLIENT_SECRET=your_actual_client_secret
+   QBO_REALM_ID=your_realm_id  # QuickBooks Company ID
    EPOS_USERNAME=your_actual_username
    EPOS_PASSWORD=your_actual_password
    SLACK_WEBHOOK_URL=your_slack_webhook_url  # Optional: for pipeline notifications
@@ -212,6 +224,7 @@ If you prefer using system environment variables:
 # Set for current session
 export QBO_CLIENT_ID="your_client_id"
 export QBO_CLIENT_SECRET="your_client_secret"
+export QBO_REALM_ID="your_realm_id"  # QuickBooks Company ID
 export EPOS_USERNAME="your_username"
 export EPOS_PASSWORD="your_password"
 export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline notifications
@@ -223,6 +236,7 @@ export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline noti
 # Add to ~/.zshrc or ~/.bash_profile
 export QBO_CLIENT_ID="your_client_id"
 export QBO_CLIENT_SECRET="your_client_secret"
+export QBO_REALM_ID="your_realm_id"  # QuickBooks Company ID
 export EPOS_USERNAME="your_username"
 export EPOS_PASSWORD="your_password"
 export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline notifications
@@ -256,11 +270,8 @@ Before running the pipeline for the first time, you need to obtain initial OAuth
 
 3. **Get Your Realm ID:**
    - The Realm ID is your QuickBooks company ID
-   - Update `REALM_ID` in `qbo_upload.py`:
-
-```python
-REALM_ID = "your_realm_id"  # Found in your QBO app settings or API responses
-```
+   - Add it to your `.env` file as `QBO_REALM_ID` (or set as environment variable)
+   - Found in your QBO app settings or API responses
 
 ### 4. Configure Payment Methods in QuickBooks
 
@@ -375,6 +386,7 @@ code-scripts/
   epos_to_qb_single.py
   qbo_upload.py
   qbo_auth.py
+  qbo_query.py
   sales_recepit_script.py
   run_pipeline.py
   run_pipeline_custom.py
@@ -388,8 +400,12 @@ code-scripts/
   last_epos_transform.json                 # metadata for archiving
 
   Uploaded/
-    2025-01-15/
+    2025-01-15/  # Standard pipeline (single date)
       BookKeeping_20250115_120000.csv
+      single_sales_receipts_BookKeeping_....csv
+      last_epos_transform.json
+    2025-10-15 to 2025-10-17/  # Custom pipeline (date range)
+      BookKeeping_20251015_120000.csv
       single_sales_receipts_BookKeeping_....csv
       last_epos_transform.json
 
@@ -491,6 +507,86 @@ Notifications include the log file name and date range (for custom pipeline) for
 
 ---
 
+## QuickBooks Query Tool
+
+The `qbo_query.py` script provides a unified interface for querying and managing QuickBooks data. It supports multiple operations through subcommands.
+
+### Commands
+
+#### Count SalesReceipts
+
+Count the number of SalesReceipts for a date or date range:
+
+```bash
+# Single date
+python3 qbo_query.py count 2025-10-19
+
+# Date range
+python3 qbo_query.py count 2025-10-15 2025-10-17
+```
+
+#### List SalesReceipts
+
+List SalesReceipts with details (supports pagination):
+
+```bash
+# Single date (shows first 100)
+python3 qbo_query.py list 2025-10-19
+
+# Date range with custom limit
+python3 qbo_query.py list 2025-10-15 2025-10-17 --max-results 50
+```
+
+#### Delete SalesReceipts
+
+Delete SalesReceipts for a date or date range (with confirmation):
+
+```bash
+# Single date (will prompt for confirmation)
+python3 qbo_query.py delete 2025-10-19
+
+# Date range (will prompt for confirmation)
+python3 qbo_query.py delete 2025-10-15 2025-10-17
+
+# Skip confirmation prompt
+python3 qbo_query.py delete 2025-10-15 2025-10-17 --yes
+```
+
+**⚠️ Warning:** Deletion is permanent. The script will:
+- Show a preview of receipts to be deleted
+- Ask for confirmation (unless `--yes` is used)
+- Send a Slack notification when deletion completes (if `SLACK_WEBHOOK_URL` is configured)
+
+#### Execute Custom Query
+
+Run any custom QuickBooks query:
+
+```bash
+python3 qbo_query.py query "SELECT * FROM Customer MAXRESULTS 10"
+```
+
+### Features
+
+- **Pagination Support:** Automatically handles queries that return more than 1000 results
+- **Date Range Support:** All date-based commands support single dates or date ranges
+- **Slack Integration:** Delete operations send notifications on completion
+- **Environment Variables:** Uses `QBO_REALM_ID` from `.env` or environment variables
+
+### Common Use Cases
+
+**Before re-uploading data:**
+1. Count receipts: `python3 qbo_query.py count 2025-10-19`
+2. Delete receipts: `python3 qbo_query.py delete 2025-10-19`
+3. Run pipeline: `python3 run_pipeline_custom.py --from-date 2025-10-19 --to-date 2025-10-19`
+
+**Probe data:**
+```bash
+# See what receipts exist for a date range
+python3 qbo_query.py list 2025-10-15 2025-10-17 --max-results 20
+```
+
+---
+
 ## Troubleshooting
 
 ### Missing Environment Variables
@@ -499,12 +595,13 @@ Notifications include the log file name and date range (for custom pipeline) for
 - **Solutions:**
   - **Easiest:** Use a `.env` file (recommended):
     1. Copy the example: `cp .env.example .env`
-    2. Edit `.env` and add your credentials
+    2. Edit `.env` and add your credentials (including `QBO_REALM_ID`)
     3. Run the pipeline - it will automatically load from `.env`
   - **Alternative:** Set environment variables:
     ```bash
     export QBO_CLIENT_ID="your_client_id"
     export QBO_CLIENT_SECRET="your_client_secret"
+    export QBO_REALM_ID="your_realm_id"
     export EPOS_USERNAME="your_username"
     export EPOS_PASSWORD="your_password"
     export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional
@@ -541,7 +638,7 @@ Notifications include the log file name and date range (for custom pipeline) for
 
 - **Symptom:** 401 Unauthorized, 403 Forbidden, or other API errors
 - **Solutions:**
-  - Verify `REALM_ID` in `qbo_upload.py` matches your QuickBooks company
+  - Verify `QBO_REALM_ID` in your `.env` file or environment variables matches your QuickBooks company
   - Check that your app has the correct permissions/scopes
   - Ensure tokens are valid (check `expires_at` in `qbo_tokens.json`)
   - For sandbox, verify you're using sandbox credentials and sandbox company

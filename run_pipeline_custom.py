@@ -71,10 +71,14 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-def archive_files(repo_root: Path) -> None:
+def archive_files(repo_root: Path, date_range_str: str) -> None:
     """
     Phase 4: Archive processed files after successful upload.
-    Reads last_epos_transform.json and moves files to Uploaded/<date>/ folder.
+    Reads last_epos_transform.json and moves files to Uploaded/<date_range>/ folder.
+    
+    Args:
+        repo_root: Root directory of the repository
+        date_range_str: Date range string (e.g., "2025-10-15 to 2025-10-17")
     """
     metadata_path = repo_root / "last_epos_transform.json"
     
@@ -89,13 +93,9 @@ def archive_files(repo_root: Path) -> None:
         logging.error(f"Failed to read metadata file: {e}")
         return
     
-    normalized_date = metadata.get("normalized_date")
-    if not normalized_date:
-        logging.warning("No normalized_date in metadata. Skipping archive step.")
-        return
-    
-    # Create Uploaded/<date>/ folder
-    archive_dir = repo_root / "Uploaded" / normalized_date
+    # Use date_range_str for folder name instead of normalized_date
+    # Create Uploaded/<date_range>/ folder (e.g., "Uploaded/2025-10-15 to 2025-10-17/")
+    archive_dir = repo_root / "Uploaded" / date_range_str
     archive_dir.mkdir(parents=True, exist_ok=True)
     
     # Move raw file
@@ -119,7 +119,7 @@ def archive_files(repo_root: Path) -> None:
         elif raw_file_path.exists() and raw_file_path.is_file():
             dest_raw = archive_dir / raw_file_path.name
             shutil.move(str(raw_file_path), str(dest_raw))
-            logging.info(f"Moved raw file: {raw_file_path.name} → Uploaded/{normalized_date}/")
+            logging.info(f"Moved raw file: {raw_file_path.name} → Uploaded/{date_range_str}/")
         else:
             logging.warning(f"Raw file not found or is not a file: {raw_file_path}")
     else:
@@ -142,16 +142,16 @@ def archive_files(repo_root: Path) -> None:
         if processed_path.exists() and processed_path.is_file():
             dest_processed = archive_dir / processed_file
             shutil.move(str(processed_path), str(dest_processed))
-            logging.info(f"Moved processed file: {processed_file} → Uploaded/{normalized_date}/")
+            logging.info(f"Moved processed file: {processed_file} → Uploaded/{date_range_str}/")
         else:
             logging.warning(f"Processed file not found or is not a file: {processed_file}")
     
     # Move metadata file to archive as well
     dest_metadata = archive_dir / "last_epos_transform.json"
     shutil.move(str(metadata_path), str(dest_metadata))
-    logging.info(f"Moved metadata: last_epos_transform.json → Uploaded/{normalized_date}/")
+    logging.info(f"Moved metadata: last_epos_transform.json → Uploaded/{date_range_str}/")
     
-    logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{normalized_date}/")
+    logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{date_range_str}/")
 
 
 def main(from_date: str, to_date: str) -> None:
@@ -200,7 +200,7 @@ def main(from_date: str, to_date: str) -> None:
         # Phase 4: Archive files after successful upload
         logging.info("\n=== Phase 4: Archive Files ===")
         try:
-            archive_files(repo_root)
+            archive_files(repo_root, date_range_str)
         except Exception as e:
             logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
             # Don't fail the pipeline if archiving fails - upload already succeeded
