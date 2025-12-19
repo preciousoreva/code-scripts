@@ -120,6 +120,20 @@ def refresh_access_token(tokens: dict) -> dict:
                     f"Authentication failed (401). Check your CLIENT_ID and CLIENT_SECRET.\n"
                     f"Response: {error_detail}"
                 )
+        elif resp.status_code == 400 and "invalid_grant" in error_detail:
+            raise RuntimeError(
+                f"Refresh token is invalid or expired (400 invalid_grant).\n"
+                f"This usually means:\n"
+                f"  1. The refresh token has expired (typically after ~100 days)\n"
+                f"  2. The refresh token was revoked or invalidated\n"
+                f"  3. The token was issued for different credentials\n\n"
+                f"To fix this, you need to re-authenticate:\n"
+                f"  1. Go to Intuit Developer Portal (https://developer.intuit.com/)\n"
+                f"  2. Use the OAuth playground or perform OAuth flow\n"
+                f"  3. Get new access_token and refresh_token\n"
+                f"  4. Update qbo_tokens.json with the new tokens\n\n"
+                f"Response: {resp.status_code} {error_detail}"
+            )
         else:
             raise RuntimeError(
                 f"Failed to refresh access token: {resp.status_code} {error_detail}"

@@ -125,7 +125,7 @@ def archive_files(repo_root: Path) -> None:
         elif raw_file_path.exists() and raw_file_path.is_file():
             dest_raw = archive_dir / raw_file_path.name
             shutil.move(str(raw_file_path), str(dest_raw))
-            logging.info(f"Moved raw file: {raw_file_path.name} → Uploaded/{normalized_date}/")
+            logging.info(f"Moved raw file: {raw_file_path.name} -> Uploaded/{normalized_date}/")
         else:
             logging.warning(f"Raw file not found or is not a file: {raw_file_path}")
     else:
@@ -148,14 +148,14 @@ def archive_files(repo_root: Path) -> None:
         if processed_path.exists() and processed_path.is_file():
             dest_processed = archive_dir / processed_file
             shutil.move(str(processed_path), str(dest_processed))
-            logging.info(f"Moved processed file: {processed_file} → Uploaded/{normalized_date}/")
+            logging.info(f"Moved processed file: {processed_file} -> Uploaded/{normalized_date}/")
         else:
             logging.warning(f"Processed file not found or is not a file: {processed_file}")
     
     # Move metadata file to archive as well
     dest_metadata = archive_dir / "last_epos_transform.json"
     shutil.move(str(metadata_path), str(dest_metadata))
-    logging.info(f"Moved metadata: last_epos_transform.json → Uploaded/{normalized_date}/")
+    logging.info(f"Moved metadata: last_epos_transform.json -> Uploaded/{normalized_date}/")
     
     logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{normalized_date}/")
 
@@ -183,10 +183,10 @@ def main() -> None:
        - Creates Uploaded/<date>/ folder
        - Moves raw CSV, processed CSV(s), and metadata to archive folder
     """
-    pipeline_name = "EPOS → QuickBooks Pipeline"
+    pipeline_name = "EPOS -> QuickBooks Pipeline"
     date_range_str = None  # this pipeline uses latest available data
 
-    logging.info("Starting EPOS → QuickBooks pipeline...\n")
+    logging.info("Starting EPOS -> QuickBooks pipeline...\n")
     notify_pipeline_start(pipeline_name, log_file, date_range_str)
 
     try:
