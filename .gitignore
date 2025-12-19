@@ -1,5 +1,6 @@
 # QuickBooks tokens and credentials
 qbo_tokens.json
+qbo_tokens_cache.json
 
 # Environment-specific configuration
 # Note: .env.example is NOT ignored (it's a template that should be committed)

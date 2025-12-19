@@ -210,6 +210,11 @@ playwright install chromium
    EPOS_USERNAME=your_actual_username
    EPOS_PASSWORD=your_actual_password
    SLACK_WEBHOOK_URL=your_slack_webhook_url  # Optional: for pipeline notifications
+   
+   # Token Broker (Optional - for multi-machine setups)
+   # If set, Mac will fetch tokens from Windows broker instead of managing locally
+   QBO_TOKEN_BROKER_URL=http://127.0.0.1:8765/token
+   QBO_TOKEN_BROKER_KEY=your_broker_secret_key_here
    ```
 
 3. **That's it!** The pipeline will automatically load credentials from `.env` when you run it.
@@ -334,19 +339,63 @@ The script maps the memo field (tender type) to QuickBooks Payment Methods by na
 
 The pipeline uses OAuth2 tokens to communicate with QuickBooks Online. Access tokens expire every 60 minutes, so the script supports automatic token refresh.
 
+### Token Management Modes
+
+The pipeline supports two token management modes:
+
+#### Local Token Management (Default)
+
+This is the standard mode where each machine manages its own tokens locally. This mode is used when `QBO_TOKEN_BROKER_URL` and `QBO_TOKEN_BROKER_KEY` are not set.
+
+- Tokens are stored in `qbo_tokens.json` on each machine
+- Each machine refreshes its own tokens independently
+- Suitable for single-machine setups or when machines don't need to share tokens
+
+#### Broker Mode (Multi-Machine Setup)
+
+For multi-machine setups where you want a single source of truth for tokens, you can use broker mode by setting:
+
+```bash
+export QBO_TOKEN_BROKER_URL="http://127.0.0.1:8765/token"
+export QBO_TOKEN_BROKER_KEY="your_broker_secret_key"
+```
+
+**How it works:**
+- One machine (e.g., Windows) runs a token broker service that manages and refreshes tokens
+- Other machines (e.g., Mac) fetch tokens from the broker via HTTP
+- Mac caches tokens locally (`qbo_tokens_cache.json`) for resilience when broker is temporarily unreachable
+- Mac never refreshes tokens itself — Windows is the single authority
+
+**Benefits:**
+- Single source of truth for tokens across machines
+- No token sync issues between machines
+- Automatic fallback to cached token if broker is unreachable
+
+**Setup Requirements:**
+- Windows machine must run a FastAPI broker service on `http://127.0.0.1:8765`
+- Mac accesses broker via SSH tunnel: `ssh -L 8765:127.0.0.1:8765 user@windows-machine`
+- Broker must expose `GET /token` endpoint with `x-broker-key` header authentication
+- Broker returns: `{"access_token": "...", "expires_at": <float>}`
+
+**Note:** If broker env vars are not set, the pipeline automatically uses local token management (backward compatible).
+
 ### How Token Refresh Works
 
 - `qbo_auth.py` manages your **client ID**, **client secret**, and refresh-token logic
+- In **local mode**: Tokens are refreshed automatically when expired
+- In **broker mode**: Mac fetches fresh tokens from broker; Windows broker handles refresh
 - `qbo_upload.py` uses a `TokenManager` class that:
   1. Fetches a valid access token once at the start of the run
   2. Automatically detects 401 authentication errors during API calls
-  3. Refreshes the token using the refresh token
+  3. Refreshes the token using the refresh token (local mode) or fetches from broker (broker mode)
   4. Updates the token state and retries the failed request
   5. Uses the refreshed token for all subsequent requests
 
 This ensures efficient token management without redundant checks, and handles mid-run token expiry automatically.
 
-### Token Storage File (`qbo_tokens.json`)
+### Token Storage Files
+
+#### Local Token Management Mode
 
 The script stores your current **access token** and **refresh token** inside a local JSON file named `qbo_tokens.json`.
 
@@ -365,10 +414,20 @@ Example structure:
 }
 ```
 
+#### Broker Mode
+
+When using broker mode, the Mac maintains a **cache file** (`qbo_tokens_cache.json`) that contains:
+
+- `access_token`: Cached token from broker
+- `expires_at`: Token expiration timestamp
+- `last_synced`: Timestamp of last successful broker sync
+
+This cache is used as a fallback if the broker is temporarily unreachable. The cache is **not authoritative** — the Windows broker is the single source of truth.
+
 #### Important Security Notes
 
-- This file **must be kept private** — add it to `.gitignore`
-- If `expires_at` is in the past, the upload script will automatically refresh the tokens
+- Both `qbo_tokens.json` and `qbo_tokens_cache.json` **must be kept private** — they're already in `.gitignore`
+- If `expires_at` is in the past, the upload script will automatically refresh the tokens (local mode) or fetch from broker (broker mode)
 - If the refresh token has expired (typically after ~100 days), you must manually perform a new OAuth authorization to regenerate tokens
 - **Never commit your tokens or credentials** to git
 - In production, always store credentials using environment variables or a secrets manager
