@@ -3,6 +3,7 @@ import json
 import time
 import base64
 import stat
+import socket
 from pathlib import Path
 
 import requests
@@ -92,6 +93,55 @@ def is_cache_token_valid(cache: dict) -> bool:
     return time.time() < (expires_at - 60)
 
 
+def _check_tunnel_connectivity(broker_url: str) -> tuple[bool, str]:
+    """
+    Check if the SSH tunnel port is reachable.
+    Returns (is_reachable, error_message).
+    """
+    try:
+        # Parse URL to get host and port
+        if broker_url.startswith("http://"):
+            url_part = broker_url[7:]
+        elif broker_url.startswith("https://"):
+            url_part = broker_url[8:]
+        else:
+            return True, ""  # Can't parse, skip check
+        
+        # Extract host and port
+        if "/" in url_part:
+            host_port = url_part.split("/")[0]
+        else:
+            host_port = url_part
+        
+        if ":" in host_port:
+            host, port_str = host_port.split(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                return True, ""  # Invalid port, skip check
+        else:
+            host = host_port
+            port = 8765  # Default port
+        
+        # Try to connect to the port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        
+        if result != 0:
+            return False, (
+                f"SSH tunnel appears to be down. Port {port} on {host} is not reachable.\n"
+                f"To fix this, establish the SSH tunnel in a separate terminal:\n"
+                f"  ssh -L {port}:127.0.0.1:{port} user@windows-machine\n"
+                f"Then run your command again."
+            )
+        return True, ""
+    except Exception:
+        # If check fails for any reason, don't block the request
+        return True, ""
+
+
 def get_access_token_from_broker() -> str:
     """
     Fetch access token from Windows broker, cache it locally, and return it.
@@ -116,9 +166,28 @@ def get_access_token_from_broker() -> str:
         resp = requests.get(broker_url, headers=headers, timeout=5)
         resp.raise_for_status()
     except requests.exceptions.Timeout:
-        raise RuntimeError("Broker request timed out after 5 seconds")
+        raise RuntimeError(
+            "Broker request timed out after 5 seconds.\n"
+            "This may indicate the SSH tunnel is down or the broker is not responding.\n"
+            "Check that:\n"
+            "  1. SSH tunnel is established: ssh -L 8765:127.0.0.1:8765 user@windows-machine\n"
+            "  2. Windows broker service is running on port 8765"
+        )
     except requests.exceptions.ConnectionError as e:
-        raise RuntimeError(f"Broker connection failed: {e}")
+        # Check if tunnel is down and provide helpful guidance
+        is_reachable, tunnel_msg = _check_tunnel_connectivity(broker_url)
+        if not is_reachable:
+            raise RuntimeError(tunnel_msg)
+        else:
+            raise RuntimeError(
+                f"Broker connection failed: {e}\n"
+                f"This usually means:\n"
+                f"  1. SSH tunnel is not established\n"
+                f"  2. Windows broker service is not running\n"
+                f"  3. Broker URL is incorrect\n\n"
+                f"To establish SSH tunnel:\n"
+                f"  ssh -L 8765:127.0.0.1:8765 user@windows-machine"
+            )
     except requests.exceptions.HTTPError as e:
         raise RuntimeError(f"Broker returned error: {e}")
     
