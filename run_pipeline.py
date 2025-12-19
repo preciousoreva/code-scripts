@@ -37,10 +37,26 @@ def run_step(label: str, script_name: str) -> None:
     result = subprocess.run(
         [sys.executable, str(script_path)],
         cwd=str(repo_root),
+        capture_output=True,
+        text=True,
     )
+
+    # Log stdout and stderr
+    if result.stdout:
+        logging.info("Script output:")
+        for line in result.stdout.splitlines():
+            logging.info(f"  {line}")
+    if result.stderr:
+        logging.warning("Script errors:")
+        for line in result.stderr.splitlines():
+            logging.warning(f"  {line}")
 
     if result.returncode != 0:
         error_msg = f"[ERROR] {label} failed with exit code {result.returncode}"
+        if result.stdout:
+            error_msg += f"\nOutput: {result.stdout}"
+        if result.stderr:
+            error_msg += f"\nErrors: {result.stderr}"
         logging.error(error_msg)
         raise SystemExit(error_msg)
 
