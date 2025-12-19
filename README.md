@@ -119,7 +119,7 @@ That's it! The pipeline will download, transform, upload, and archive automatica
   All operations support single dates or date ranges. See [QuickBooks Query Tool](#quickbooks-query-tool) section for usage examples.
 
 - `slack_notify.py`  
-  Sends Slack notifications for pipeline events (start, success, failure). Requires `SLACK_WEBHOOK_URL` environment variable. Uses SSL certificate verification with certifi support.
+  Sends Slack notifications for pipeline events (start, success, failure). Requires `SLACK_WEBHOOK_URL` environment variable. Failure notifications automatically extract concise, user-friendly error reasons from error messages. Uses SSL certificate verification with certifi support.
 
 - `load_env.py`  
   Utility to automatically load environment variables from `.env` file. Makes credential management easier without modifying shell profiles.
@@ -501,9 +501,16 @@ If `SLACK_WEBHOOK_URL` is set in your environment or `.env` file, the pipeline w
 
 - **Start:** When the pipeline begins (includes date range for custom pipeline)
 - **Success:** When all phases complete successfully
-- **Failure:** When any phase fails (includes error details)
+- **Failure:** When any phase fails (includes concise error reason)
 
-Notifications include the log file name and date range (for custom pipeline) for easy debugging.
+Failure notifications automatically extract and display user-friendly error reasons instead of full tracebacks. Common error types detected include:
+- Token authentication errors (invalid/expired refresh tokens)
+- Missing credentials (CLIENT_ID, CLIENT_SECRET, REALM_ID)
+- File not found errors
+- Network/API errors (connection issues, rate limits, auth failures)
+- Phase-specific failures
+
+Notifications include the log file name and date range (for custom pipeline) for easy debugging. Full error details are always available in the log files.
 
 ---
 
