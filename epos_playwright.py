@@ -25,7 +25,7 @@ def run(playwright: Playwright) -> None:
             "  export EPOS_PASSWORD='your_password'"
         )
     
-    browser = playwright.chromium.launch(headless=False)
+    browser = playwright.chromium.launch(headless=True)
     context = browser.new_context()
     page = context.new_page()
     page.goto("https://www.eposnowhq.com/Pages/Reporting/SageReport.aspx")

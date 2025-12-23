@@ -160,7 +160,7 @@ def archive_files(repo_root: Path) -> None:
     logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{normalized_date}/")
 
 
-def main() -> None:
+def main() -> int:
     """
     Full pipeline:
 
@@ -211,17 +211,18 @@ def main() -> None:
         # Success notification
         notify_pipeline_success(pipeline_name, log_file, date_range_str)
         logging.info("\nPipeline completed successfully ✅")
+        return 0
 
     except SystemExit as e:
         logging.error("Pipeline failed", exc_info=True)
         notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
-        raise
+        return 1
     except Exception as e:
         logging.error("Pipeline failed with unexpected error", exc_info=True)
         notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
-        raise
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 

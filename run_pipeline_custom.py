@@ -170,7 +170,7 @@ def archive_files(repo_root: Path, date_range_str: str) -> None:
     logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{date_range_str}/")
 
 
-def main(from_date: str, to_date: str) -> None:
+def main(from_date: str, to_date: str) -> int:
     """
     Full pipeline with custom date range:
 
@@ -225,15 +225,16 @@ def main(from_date: str, to_date: str) -> None:
         # Success notification
         notify_pipeline_success(pipeline_name, log_file, date_range_str)
         logging.info("\nPipeline completed successfully ✅")
+        return 0
 
     except SystemExit as e:
         logging.error("Custom-range pipeline failed", exc_info=True)
         notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
-        raise
+        return 1
     except Exception as e:
         logging.error("Custom-range pipeline failed with unexpected error", exc_info=True)
         notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
-        raise
+        return 1
 
 
 if __name__ == "__main__":
@@ -252,7 +253,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    main(args.from_date, args.to_date)
+    raise SystemExit(main(args.from_date, args.to_date))
 
 # Example usage:
 # python run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
