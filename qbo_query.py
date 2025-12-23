@@ -2,10 +2,12 @@ import os
 import sys
 import json
 import argparse
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 from urllib.parse import quote
 
+import pandas as pd
 import requests
 
 from qbo_auth import get_access_token
@@ -149,7 +151,7 @@ def cmd_count(start_date: str, end_date: str = None) -> None:
     query = f"SELECT COUNT(*) FROM SalesReceipt WHERE {where_clause}"
     result = qbo_query(query)
     
-    count = result.get("QueryResponse", {}).get("maxResults", 0)
+    count = result.get("QueryResponse", {}).get("totalCount", 0)
     print(f"SalesReceipts count for {date_range_str}: {count}")
     print(json.dumps(result, indent=2))
 
@@ -255,23 +257,235 @@ def cmd_query(custom_query: str) -> None:
     print(json.dumps(result, indent=2))
 
 
+def get_repo_root() -> Path:
+    """Return the directory this script lives in (the repo root)."""
+    return Path(__file__).resolve().parent
+
+
+def get_qbo_total(start_date: str, end_date: str = None) -> Tuple[int, float]:
+    """
+    Get QBO total count and SUM(TotalAmt) for a date range.
+    Returns (count, total_amount).
+    """
+    if end_date:
+        where_clause = f"TxnDate >= '{start_date}' AND TxnDate <= '{end_date}'"
+    else:
+        where_clause = f"TxnDate = '{start_date}'"
+    
+    # Get count
+    count_query = f"SELECT COUNT(*) FROM SalesReceipt WHERE {where_clause}"
+    count_result = qbo_query(count_query)
+    count = count_result.get("QueryResponse", {}).get("totalCount", 0)
+    
+    # Get all receipts to sum TotalAmt (QBO doesn't support SUM in SELECT directly)
+    receipts = fetch_receipts_for_date_range(start_date, end_date)
+    total_amount = sum(float(r.get("TotalAmt", 0) or 0) for r in receipts)
+    
+    return count, total_amount
+
+
+def find_epos_files_for_date_range(start_date: str, end_date: str = None) -> List[Path]:
+    """
+    Find all processed EPOS CSV files for a date range.
+    Checks:
+    1. last_epos_transform.json in repo root (if normalized_date matches)
+    2. Uploaded/<date>/ folders for matching dates
+    3. Uploaded/<date_range>/ folders for matching ranges
+    
+    Returns list of paths to single_sales_receipts_*.csv files.
+    """
+    repo_root = get_repo_root()
+    found_files: List[Path] = []
+    
+    # Parse date range
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    if end_date:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    else:
+        end_dt = start_dt
+    
+    # Check repo root last_epos_transform.json first
+    root_metadata = repo_root / "last_epos_transform.json"
+    if root_metadata.exists():
+        try:
+            with open(root_metadata, "r") as f:
+                metadata = json.load(f)
+            normalized_date = metadata.get("normalized_date")
+            if normalized_date:
+                meta_dt = datetime.strptime(normalized_date, "%Y-%m-%d")
+                if start_dt <= meta_dt <= end_dt:
+                    # Date matches, use files from metadata
+                    processed_files = metadata.get("processed_files", [])
+                    for filename in processed_files:
+                        file_path = repo_root / filename
+                        if file_path.exists():
+                            found_files.append(file_path)
+        except Exception:
+            pass  # Skip if metadata is invalid
+    
+    # Check Uploaded/ folders
+    uploaded_dir = repo_root / "Uploaded"
+    if uploaded_dir.exists():
+        for item in uploaded_dir.iterdir():
+            if not item.is_dir():
+                continue
+            
+            folder_name = item.name
+            
+            # Check if it's a date range folder (e.g., "2025-10-15 to 2025-10-17")
+            if " to " in folder_name:
+                try:
+                    range_start_str, range_end_str = folder_name.split(" to ", 1)
+                    range_start = datetime.strptime(range_start_str, "%Y-%m-%d")
+                    range_end = datetime.strptime(range_end_str, "%Y-%m-%d")
+                    
+                    # Check if our date range overlaps with this folder's range
+                    if not (range_end < start_dt or range_start > end_dt):
+                        # Overlaps, include all processed CSVs in this folder
+                        for csv_file in item.glob("single_sales_receipts_*.csv"):
+                            found_files.append(csv_file)
+                except ValueError:
+                    continue  # Invalid date range format, skip
+            else:
+                # Single date folder (e.g., "2025-10-19")
+                try:
+                    folder_date = datetime.strptime(folder_name, "%Y-%m-%d")
+                    if start_dt <= folder_date <= end_dt:
+                        # Date matches, include all processed CSVs in this folder
+                        for csv_file in item.glob("single_sales_receipts_*.csv"):
+                            found_files.append(csv_file)
+                except ValueError:
+                    continue  # Invalid date format, skip
+    
+    return found_files
+
+
+def get_epos_total(start_date: str, end_date: str = None) -> Tuple[int, float]:
+    """
+    Get EPOS total count and SUM(*ItemAmount) for a date range.
+    Returns (count, total_amount).
+    
+    Counts unique SalesReceiptNos, sums all *ItemAmount values.
+    """
+    csv_files = find_epos_files_for_date_range(start_date, end_date)
+    
+    if not csv_files:
+        return 0, 0.0
+    
+    total_amount = 0.0
+    unique_receipts = set()
+    
+    # Parse date range for filtering
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    if end_date:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    else:
+        end_dt = start_dt
+    
+    for csv_file in csv_files:
+        try:
+            df = pd.read_csv(csv_file)
+            
+            # Filter by date range if *SalesReceiptDate column exists
+            if "*SalesReceiptDate" in df.columns:
+                # Convert to date only (no time component) for proper comparison
+                df["*SalesReceiptDate"] = pd.to_datetime(df["*SalesReceiptDate"], errors="coerce").dt.date
+                start_date_only = start_dt.date()
+                end_date_only = end_dt.date()
+                df = df[
+                    (df["*SalesReceiptDate"] >= start_date_only) &
+                    (df["*SalesReceiptDate"] <= end_date_only)
+                ]
+            
+            # Sum *ItemAmount
+            if "*ItemAmount" in df.columns:
+                amounts = df["*ItemAmount"].fillna(0).astype(float)
+                total_amount += amounts.sum()
+            
+            # Count unique SalesReceiptNos
+            if "*SalesReceiptNo" in df.columns:
+                unique_receipts.update(df["*SalesReceiptNo"].dropna().unique())
+        
+        except Exception as e:
+            print(f"Warning: Failed to process {csv_file.name}: {e}", file=sys.stderr)
+            continue
+    
+    count = len(unique_receipts)
+    return count, total_amount
+
+
+def format_currency(amount: float) -> str:
+    """Format amount as currency with thousands separator."""
+    return f"{amount:,.2f}"
+
+
 def cmd_reconcile(start_date: str, end_date: str = None, tolerance: float = 0.00) -> None:
-    """Reconcile EPOS vs QBO sales totals for a date or date range."""
+    """
+    Reconcile EPOS totals vs QBO totals for a date range.
+    """
+    # Build date range string for display
     if end_date:
         date_range_str = f"{start_date} to {end_date}"
     else:
         date_range_str = start_date
-
-    # Fetch receipts from QBO
-    receipts = fetch_receipts_for_date_range(start_date, end_date)
-    qbo_total = sum(float(r.get("TotalAmt", 0)) for r in receipts)
-    qbo_count = len(receipts)
-
-    print(f"QBO SalesReceipts for {date_range_str}:")
-    print(f"  Count: {qbo_count}")
-    print(f"  Total: {qbo_total:.2f}")
-    print(f"\nNote: EPOS reconciliation requires integration with your EPOS system.")
-    print(f"Tolerance: {tolerance:.2f}")
+    
+    print(f"\n📊 EPOS ↔ QBO Reconciliation")
+    print(f"Period: {date_range_str}")
+    print("-" * 50)
+    
+    # Get QBO totals
+    print("Fetching QBO totals...")
+    try:
+        qbo_count, qbo_total = get_qbo_total(start_date, end_date)
+        print(f"  QBO: {qbo_count} receipts, Total: {format_currency(qbo_total)}")
+    except Exception as e:
+        print(f"  ❌ Error fetching QBO totals: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Get EPOS totals
+    print("Fetching EPOS totals...")
+    try:
+        epos_count, epos_total = get_epos_total(start_date, end_date)
+        print(f"  EPOS: {epos_count} receipts, Total: {format_currency(epos_total)}")
+    except Exception as e:
+        print(f"  ❌ Error fetching EPOS totals: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Compare
+    print("-" * 50)
+    difference = abs(qbo_total - epos_total)
+    is_match = difference <= tolerance
+    
+    if is_match:
+        status = "✅ MATCH"
+        status_emoji = "✅"
+    else:
+        status = "❌ MISMATCH"
+        status_emoji = "❌"
+    
+    print(f"Status: {status}")
+    print(f"Difference: {format_currency(difference)}")
+    
+    if not is_match:
+        if qbo_total > epos_total:
+            print(f"QBO is {format_currency(qbo_total - epos_total)} higher than EPOS")
+        else:
+            print(f"EPOS is {format_currency(epos_total - qbo_total)} higher than QBO")
+    
+    # Send Slack notification
+    message = (
+        f"📊 *EPOS ↔ QBO Reconciliation*\n"
+        f"• Period: {date_range_str}\n"
+        f"• EPOS Total: {format_currency(epos_total)} ({epos_count} receipts)\n"
+        f"• QBO Total: {format_currency(qbo_total)} ({qbo_count} receipts)\n"
+        f"• Status: {status_emoji} {status}"
+    )
+    if not is_match:
+        message += f"\n• Difference: {format_currency(difference)}"
+    message += f"\n• Time: {datetime.now().isoformat(timespec='seconds')}"
+    
+    send_slack_success(message)
+    print(f"\n✅ Slack notification sent")
 
 
 def parse_date(date_str: str) -> str:
