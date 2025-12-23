@@ -14,6 +14,7 @@ from slack_notify import (
     notify_pipeline_failure,
     notify_pipeline_start,
 )
+from qbo_query import cmd_reconcile
 
 # Load .env file to make environment variables available
 load_env_file()
@@ -221,6 +222,24 @@ def main(from_date: str, to_date: str) -> int:
             logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
             # Don't fail the pipeline if archiving fails - upload already succeeded
             logging.warning("Continuing despite archive failure (upload was successful)")
+
+        # Phase 5: Reconcile EPOS vs QBO totals
+        logging.info("\n=== Phase 5: Reconciliation ===")
+        logging.info(f"Reconciling for date range: {from_date} to {to_date}")
+        try:
+            # Run reconciliation (non-fatal - wrapped to catch SystemExit)
+            try:
+                cmd_reconcile(from_date, to_date, tolerance=0.00)
+                logging.info("[OK] Phase 5: Reconciliation completed successfully.")
+            except SystemExit:
+                # cmd_reconcile calls sys.exit(1) on errors, catch it here
+                logging.warning("Reconciliation encountered errors but pipeline continues")
+            except Exception as e:
+                logging.error(f"[ERROR] Phase 5: Reconciliation failed: {e}")
+                logging.warning("Continuing despite reconciliation failure (upload was successful)")
+        except Exception as e:
+            logging.error(f"[ERROR] Phase 5: Reconciliation setup failed: {e}")
+            logging.warning("Continuing despite reconciliation failure (upload was successful)")
 
         # Success notification
         notify_pipeline_success(pipeline_name, log_file, date_range_str)

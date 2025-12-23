@@ -6,8 +6,9 @@ This repo contains a small automation pipeline that:
 2. Transforms the raw EPOS export into a single QuickBooks‑ready CSV in the repo root.
 3. Uploads the data into **QuickBooks Online** as Sales Receipts using the QBO API.
 4. Archives processed files to `Uploaded/<date>/` after successful upload.
+5. Reconciles EPOS totals vs QBO totals to verify data integrity.
 
-The pipeline is designed to be run as a single command and take care of all four phases in sequence.
+The pipeline is designed to be run as a single command and take care of all five phases in sequence.
 
 ---
 
@@ -46,7 +47,7 @@ The pipeline is designed to be run as a single command and take care of all four
    python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
    ```
 
-That's it! The pipeline will download, transform, upload, and archive automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, and failure events.
+That's it! The pipeline will download, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
 
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
 
@@ -57,14 +58,15 @@ That's it! The pipeline will download, transform, upload, and archive automatica
 ### Core Pipeline Scripts
 
 - `run_pipeline.py`  
-  **Main entry point** — Orchestration script that runs all four phases in order for the latest available data:
+  **Main entry point** — Orchestration script that runs all five phases in order for the latest available data:
 
   1. Download EPOS CSV (`epos_playwright.py`) - downloads "Yesterday's" data
   2. Transform to single CSV (`epos_to_qb_single.py`)
   3. Upload to QuickBooks (`qbo_upload.py`)
   4. Archive files (`run_pipeline.py` - Phase 4)
+  5. Reconcile EPOS vs QBO totals (`qbo_query.py` - Phase 5)
 
-  Sends Slack notifications for start, success, and failure events.
+  Sends Slack notifications for start, success, and failure events. Returns exit code 0 on success, 1 on failure.
 
 - `run_pipeline_custom.py`  
   **Custom date range pipeline** — Same as `run_pipeline.py` but allows you to specify a custom date range:
@@ -115,6 +117,7 @@ That's it! The pipeline will download, transform, upload, and archive automatica
   - `list`: List SalesReceipts with details (supports pagination)
   - `delete`: Delete SalesReceipts for a date or date range (with confirmation)
   - `query`: Execute custom QBO queries
+  - `reconcile`: Reconcile EPOS totals vs QBO totals for a date or date range (integrated into pipeline as Phase 5)
   
   All operations support single dates or date ranges. See [QuickBooks Query Tool](#quickbooks-query-tool) section for usage examples.
 
@@ -419,6 +422,7 @@ code-scripts/
 2. Phase 2 processes CSV and saves to repo root + creates metadata
 3. Phase 3 uploads from repo root
 4. Phase 4 archives all files to `Uploaded/<date>/` after successful upload
+5. Phase 5 reconciles EPOS totals vs QBO totals to verify data integrity
 
 - `Uploaded/` folder structure is created automatically by Phase 4
 - `logs/` is created automatically by `run_pipeline.py` when logging is enabled
@@ -440,6 +444,7 @@ code-scripts/
    - Raw CSV file
    - Processed CSV file(s)
    - Metadata file (`last_epos_transform.json`)
+5. **Reconciliation Phase:** EPOS totals are compared against QBO totals for the processed date(s) to verify data integrity. Results are logged and sent via Slack notification.
 
 The normalized date used for archiving is extracted from the CSV's `*SalesReceiptDate` column, ensuring files are organized by the actual transaction date rather than processing date.
 
@@ -456,6 +461,37 @@ python3 run_pipeline.py
 ```
 
 This downloads "Yesterday's" data from EPOS and processes it.
+
+### Windows Task Scheduler
+
+For automated scheduling on Windows, use the provided `run_pipeline.cmd` batch file:
+
+```batch
+@echo off
+setlocal
+
+set ROOT=C:\Users\MARVIN-DEV\Documents\Developer Projects\Scripts\Precious Oreva\AKPONORA
+cd /d "%ROOT%\code-scripts"
+
+call "%ROOT%\code-scripts\.venv\Scripts\activate.bat"
+
+python run_pipeline.py
+echo Pipeline exit code: %ERRORLEVEL%
+
+endlocal
+```
+
+**Setup:**
+1. Update the `ROOT` path in `run_pipeline.cmd` to match your project location
+2. Create a scheduled task in Windows Task Scheduler
+3. Set the action to run `run_pipeline.cmd`
+4. Configure your desired schedule (e.g., daily at a specific time)
+
+**Exit Codes:**
+- Exit code **0**: Pipeline succeeded (all phases completed)
+- Exit code **1**: Pipeline failed (critical error occurred)
+
+The pipeline includes reconciliation as Phase 5, so no separate reconciliation step is needed.
 
 ### Custom Date Range Pipeline
 
@@ -482,18 +518,21 @@ python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
 
 ### Pipeline Phases
 
-Both pipelines run the same four phases:
+Both pipelines run the same five phases:
 
 1. **Phase 1:** Launch Playwright and download EPOS BookKeeping CSV to the repo root.
 2. **Phase 2:** Transform the raw CSV into a single QuickBooks‑ready CSV in the repo root, and create metadata file.
 3. **Phase 3:** Upload Sales Receipts into QuickBooks via the API.
 4. **Phase 4:** Archive all processed files (raw CSV, processed CSV, and metadata) to `Uploaded/<date>/` folder.
+5. **Phase 5:** Reconcile EPOS totals vs QBO totals to verify data integrity. Compares receipt counts and total amounts.
 
 ### Error Handling
 
-- If any step fails (for example, EPOS login changes or the API token is expired), the pipeline will stop and send a failure notification to Slack (if configured).
+- If any critical step fails (for example, EPOS login changes or the API token is expired), the pipeline will stop and send a failure notification to Slack (if configured).
 - **Note:** If archiving (Phase 4) fails, the pipeline will log a warning but continue since the upload was successful.
+- **Note:** If reconciliation (Phase 5) fails, the pipeline will log a warning but continue since the upload was successful.
 - Sales Receipt upload failures are now properly detected and will stop the pipeline before archiving.
+- Pipeline returns exit code **0** on success, **1** on failure, making it suitable for automated scheduling (e.g., Windows Task Scheduler).
 
 ### Slack Notifications
 
@@ -501,7 +540,8 @@ If `SLACK_WEBHOOK_URL` is set in your environment or `.env` file, the pipeline w
 
 - **Start:** When the pipeline begins (includes date range for custom pipeline)
 - **Success:** When all phases complete successfully
-- **Failure:** When any phase fails (includes concise error reason)
+- **Failure:** When any critical phase fails (includes concise error reason)
+- **Reconciliation:** Phase 5 automatically sends reconciliation results via Slack (includes match/mismatch status, totals, and difference)
 
 Failure notifications automatically extract and display user-friendly error reasons instead of full tracebacks. Common error types detected include:
 - Token authentication errors (invalid/expired refresh tokens)
@@ -572,12 +612,40 @@ Run any custom QuickBooks query:
 python3 qbo_query.py query "SELECT * FROM Customer MAXRESULTS 10"
 ```
 
+#### Reconcile EPOS vs QBO Totals
+
+Reconcile EPOS totals against QBO totals for a date or date range:
+
+```bash
+# Single date
+python3 qbo_query.py reconcile --from-date 2025-10-19
+
+# Yesterday (convenience flag)
+python3 qbo_query.py reconcile --yesterday
+
+# Date range
+python3 qbo_query.py reconcile --from-date 2025-10-15 --to-date 2025-10-17
+
+# With tolerance (allow small differences)
+python3 qbo_query.py reconcile --from-date 2025-10-19 --tolerance 0.01
+```
+
+**Features:**
+- Compares receipt counts and total amounts between EPOS and QBO
+- Automatically finds EPOS files from `Uploaded/` folders or repo root metadata
+- Sends Slack notification with reconciliation results
+- Shows match/mismatch status and difference amount
+- Supports tolerance for small rounding differences
+
+**Note:** Reconciliation is automatically run as Phase 5 of the pipeline, so manual reconciliation is typically only needed for troubleshooting or historical verification.
+
 ### Features
 
 - **Pagination Support:** Automatically handles queries that return more than 1000 results
 - **Date Range Support:** All date-based commands support single dates or date ranges
-- **Slack Integration:** Delete operations send notifications on completion
+- **Slack Integration:** Delete and reconcile operations send notifications on completion
 - **Environment Variables:** Uses `QBO_REALM_ID` from `.env` or environment variables
+- **Automatic Reconciliation:** Reconciliation runs automatically as Phase 5 of the pipeline
 
 ### Common Use Cases
 
