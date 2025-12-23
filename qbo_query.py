@@ -3,7 +3,7 @@ import sys
 import json
 import argparse
 from typing import Any, Dict, List, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import requests
@@ -253,6 +253,25 @@ def cmd_query(custom_query: str) -> None:
     """Execute a custom QBO query."""
     result = qbo_query(custom_query)
     print(json.dumps(result, indent=2))
+
+
+def cmd_reconcile(start_date: str, end_date: str = None, tolerance: float = 0.00) -> None:
+    """Reconcile EPOS vs QBO sales totals for a date or date range."""
+    if end_date:
+        date_range_str = f"{start_date} to {end_date}"
+    else:
+        date_range_str = start_date
+
+    # Fetch receipts from QBO
+    receipts = fetch_receipts_for_date_range(start_date, end_date)
+    qbo_total = sum(float(r.get("TotalAmt", 0)) for r in receipts)
+    qbo_count = len(receipts)
+
+    print(f"QBO SalesReceipts for {date_range_str}:")
+    print(f"  Count: {qbo_count}")
+    print(f"  Total: {qbo_total:.2f}")
+    print(f"\nNote: EPOS reconciliation requires integration with your EPOS system.")
+    print(f"Tolerance: {tolerance:.2f}")
 
 
 def parse_date(date_str: str) -> str:
