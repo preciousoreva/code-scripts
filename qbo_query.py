@@ -290,6 +290,18 @@ Examples:
 
   # Execute a custom query
   python qbo_query.py query "SELECT * FROM Customer MAXRESULTS 10"
+
+  # Reconcile EPOS vs QBO for a single date
+  python qbo_query.py reconcile --from-date 2025-10-19
+
+  # Reconcile EPOS vs QBO for yesterday (convenience)
+  python qbo_query.py reconcile --yesterday
+
+  # Reconcile EPOS vs QBO for a date range
+  python qbo_query.py reconcile --from-date 2025-10-15 --to-date 2025-10-17
+
+  # Reconcile with tolerance (e.g., allow ±0.01 difference)
+  python qbo_query.py reconcile --from-date 2025-10-19 --tolerance 0.01
         """
     )
 
@@ -316,6 +328,15 @@ Examples:
     query_parser = subparsers.add_parser("query", help="Execute a custom QBO query")
     query_parser.add_argument("query", help="QBO query string (e.g., 'SELECT * FROM Customer MAXRESULTS 10')")
 
+    # Reconcile command
+    reconcile_parser = subparsers.add_parser("reconcile", help="Reconcile EPOS totals vs QBO totals")
+    reconcile_parser.add_argument("--from-date", help="Start date (YYYY-MM-DD)")
+    reconcile_parser.add_argument("--to-date", help="End date (YYYY-MM-DD, optional)")
+    reconcile_parser.add_argument("--yesterday", action="store_true", 
+                                  help="Reconcile yesterday's date (convenience flag)")
+    reconcile_parser.add_argument("--tolerance", type=float, default=0.00, 
+                                  help="Tolerance for match (default: 0.00 for exact match)")
+
     args = parser.parse_args()
 
     try:
@@ -336,6 +357,21 @@ Examples:
 
         elif args.command == "query":
             cmd_query(args.query)
+
+        elif args.command == "reconcile":
+            # Handle --yesterday flag
+            if args.yesterday:
+                if args.from_date:
+                    raise ValueError("Cannot use both --yesterday and --from-date. Use one or the other.")
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                start_date = parse_date(yesterday)
+                end_date = None
+            elif args.from_date:
+                start_date = parse_date(args.from_date)
+                end_date = parse_date(args.to_date) if args.to_date else None
+            else:
+                raise ValueError("Must specify either --from-date or --yesterday")
+            cmd_reconcile(start_date, end_date, args.tolerance)
 
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
