@@ -1,0 +1,43 @@
+# QuickBooks tokens and credentials
+qbo_tokens.json
+
+# Environment-specific configuration
+# Note: .env.example is NOT ignored (it's a template that should be committed)
+.env
+.env.local
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Temporary processing files (these get archived, but exclude from git)
+*.csv
+last_epos_transform.json
+
+# Logs
+logs/
+*.log
+
+# Archived files (optional - exclude if you don't want to track archived data)
+Uploaded/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+myenv/
