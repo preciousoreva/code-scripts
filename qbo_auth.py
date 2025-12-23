@@ -3,6 +3,7 @@ import json
 import time
 import base64
 import stat
+import socket
 from pathlib import Path
 
 import requests
@@ -21,6 +22,7 @@ CLIENT_SECRET = os.environ.get("QBO_CLIENT_SECRET")
 # Token storage file next to this script
 SCRIPT_DIR = Path(__file__).resolve().parent
 TOKEN_FILE = SCRIPT_DIR / "qbo_tokens.json"
+CACHE_FILE = SCRIPT_DIR / "qbo_tokens_cache.json"
 
 
 def _validate_credentials() -> None:
@@ -57,6 +59,160 @@ def save_tokens(tokens: dict) -> None:
     
     # Restrict file permissions to owner only (read/write for owner, no access for others)
     TOKEN_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def load_cache() -> dict:
+    """Load cached tokens from qbo_tokens_cache.json, or return an empty dict if missing/invalid."""
+    if not CACHE_FILE.exists():
+        return {}
+    try:
+        with CACHE_FILE.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_cache(tokens: dict) -> None:
+    """Persist cached tokens to qbo_tokens_cache.json with restricted file permissions."""
+    with CACHE_FILE.open("w", encoding="utf-8") as f:
+        json.dump(tokens, f, indent=2)
+    
+    # Restrict file permissions to owner only (read/write for owner, no access for others)
+    CACHE_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def is_cache_token_valid(cache: dict) -> bool:
+    """Return True if the cached access token exists and is not expired (with 60s safety margin)."""
+    access_token = cache.get("access_token")
+    expires_at = cache.get("expires_at")
+
+    if not access_token or not expires_at:
+        return False
+
+    # Safety margin: consider expired 60 seconds before actual expiry
+    return time.time() < (expires_at - 60)
+
+
+def _check_tunnel_connectivity(broker_url: str) -> tuple[bool, str]:
+    """
+    Check if the SSH tunnel port is reachable.
+    Returns (is_reachable, error_message).
+    """
+    try:
+        # Parse URL to get host and port
+        if broker_url.startswith("http://"):
+            url_part = broker_url[7:]
+        elif broker_url.startswith("https://"):
+            url_part = broker_url[8:]
+        else:
+            return True, ""  # Can't parse, skip check
+        
+        # Extract host and port
+        if "/" in url_part:
+            host_port = url_part.split("/")[0]
+        else:
+            host_port = url_part
+        
+        if ":" in host_port:
+            host, port_str = host_port.split(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                return True, ""  # Invalid port, skip check
+        else:
+            host = host_port
+            port = 8765  # Default port
+        
+        # Try to connect to the port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        
+        if result != 0:
+            return False, (
+                f"SSH tunnel appears to be down. Port {port} on {host} is not reachable.\n"
+                f"To fix this, establish the SSH tunnel in a separate terminal:\n"
+                f"  ssh -L {port}:127.0.0.1:{port} user@windows-machine\n"
+                f"Then run your command again."
+            )
+        return True, ""
+    except Exception:
+        # If check fails for any reason, don't block the request
+        return True, ""
+
+
+def get_access_token_from_broker() -> str:
+    """
+    Fetch access token from Windows broker, cache it locally, and return it.
+    Raises RuntimeError if broker is unreachable or returns non-200.
+    """
+    broker_url = os.environ.get("QBO_TOKEN_BROKER_URL")
+    broker_key = os.environ.get("QBO_TOKEN_BROKER_KEY")
+    
+    if not broker_url or not broker_key:
+        raise RuntimeError("Broker URL and key must be set to use broker mode")
+    
+    # Ensure URL ends with /token (helpful error if missing)
+    if not broker_url.rstrip('/').endswith('/token'):
+        raise RuntimeError(
+            f"Broker URL should end with '/token', got: {broker_url}\n"
+            f"Example: http://127.0.0.1:8765/token"
+        )
+    
+    headers = {"x-broker-key": broker_key}
+    
+    try:
+        resp = requests.get(broker_url, headers=headers, timeout=5)
+        resp.raise_for_status()
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            "Broker request timed out after 5 seconds.\n"
+            "This may indicate the SSH tunnel is down or the broker is not responding.\n"
+            "Check that:\n"
+            "  1. SSH tunnel is established: ssh -L 8765:127.0.0.1:8765 user@windows-machine\n"
+            "  2. Windows broker service is running on port 8765"
+        )
+    except requests.exceptions.ConnectionError as e:
+        # Check if tunnel is down and provide helpful guidance
+        is_reachable, tunnel_msg = _check_tunnel_connectivity(broker_url)
+        if not is_reachable:
+            raise RuntimeError(tunnel_msg)
+        else:
+            raise RuntimeError(
+                f"Broker connection failed: {e}\n"
+                f"This usually means:\n"
+                f"  1. SSH tunnel is not established\n"
+                f"  2. Windows broker service is not running\n"
+                f"  3. Broker URL is incorrect\n\n"
+                f"To establish SSH tunnel:\n"
+                f"  ssh -L 8765:127.0.0.1:8765 user@windows-machine"
+            )
+    except requests.exceptions.HTTPError as e:
+        raise RuntimeError(f"Broker returned error: {e}")
+    
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RuntimeError("Broker returned invalid JSON response")
+    
+    access_token = data.get("access_token")
+    expires_at = data.get("expires_at")
+    
+    if not access_token:
+        raise RuntimeError("Broker response missing access_token")
+    if expires_at is None:
+        raise RuntimeError("Broker response missing expires_at")
+    
+    # Cache the token with sync timestamp
+    cache_data = {
+        "access_token": access_token,
+        "expires_at": float(expires_at),
+        "last_synced": time.time()
+    }
+    save_cache(cache_data)
+    
+    return access_token
 
 
 def is_token_expired(tokens: dict) -> bool:
@@ -157,8 +313,37 @@ def refresh_access_token(tokens: dict) -> dict:
 
 def get_access_token() -> str:
     """
-    Return a valid access token, refreshing with the refresh_token if needed.
+    Return a valid access token.
+    
+    If QBO_TOKEN_BROKER_URL and QBO_TOKEN_BROKER_KEY are set:
+    - Fetches token from broker and caches it locally.
+    - Falls back to cached token if broker is unreachable.
+    - Raises error if broker is unreachable and cache is expired/missing.
+    
+    Otherwise (backward compatibility):
+    - Uses local qbo_tokens.json and refreshes if needed.
     """
+    broker_url = os.environ.get("QBO_TOKEN_BROKER_URL")
+    broker_key = os.environ.get("QBO_TOKEN_BROKER_KEY")
+    
+    # Broker mode: Windows is the authority
+    if broker_url and broker_key:
+        try:
+            return get_access_token_from_broker()
+        except RuntimeError as broker_error:
+            # Broker failed, try cache fallback
+            cache = load_cache()
+            if is_cache_token_valid(cache):
+                return cache["access_token"]
+            else:
+                # Both broker and cache failed
+                raise RuntimeError(
+                    f"Broker unreachable and cached token expired/missing.\n"
+                    f"Broker error: {broker_error}\n"
+                    f"Please ensure the broker is running and SSH tunnel is established."
+                )
+    
+    # Legacy mode: local token management (backward compatibility)
     _validate_credentials()
     
     tokens = load_tokens()
