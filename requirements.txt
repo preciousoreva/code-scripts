@@ -9,3 +9,6 @@ pandas>=2.0.0
 
 # HTTP client for QuickBooks API
 requests>=2.31.0
+
+# SSL certificate bundle (optional but recommended for Slack notifications)
+certifi>=2023.0.0

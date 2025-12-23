@@ -29,7 +29,19 @@ The pipeline is designed to be run as a single command and take care of all five
 3. **Install dependencies:**
 
    ```bash
+   # Create virtual environment (recommended)
+   python -m venv .venv
+   
+   # Activate virtual environment
+   # On Windows (PowerShell):
+   .\.venv\Scripts\Activate.ps1
+   # On macOS/Linux:
+   source .venv/bin/activate
+   
+   # Install dependencies
    pip install -r requirements.txt
+   
+   # Install Playwright browser (required after installing playwright package)
    playwright install chromium
    ```
 
@@ -149,31 +161,53 @@ You'll need:
 - **Python 3.9+** installed on your machine
 - **EPOS Now HQ** account credentials
 - **QuickBooks Online** account with Developer app access
-- The following Python packages:
-  - `playwright`
-  - `pandas`
-  - `requests`
+- The following Python packages (see `requirements.txt` for versions):
+  - `playwright` - Web automation for EPOS downloads
+  - `pandas` - Data processing and CSV manipulation
+  - `requests` - HTTP client for QuickBooks API
+  - `certifi` - SSL certificate bundle (recommended for Slack notifications)
 
 ### Install Python dependencies
+
+**Recommended: Use a virtual environment** to isolate dependencies:
 
 From the `code-scripts` folder:
 
 ```bash
-# Install all dependencies
+# Create virtual environment
+python -m venv .venv
+
+# Activate virtual environment
+# On Windows (PowerShell):
+.\.venv\Scripts\Activate.ps1
+# On macOS/Linux:
+source .venv/bin/activate
+
+# Install all dependencies from requirements.txt
 pip install -r requirements.txt
 
 # Install Playwright browser (required after installing playwright package)
 playwright install chromium
 ```
 
-**Alternative:** If you prefer to install packages individually:
+**Alternative: Install without virtual environment** (not recommended):
 
 ```bash
-pip install playwright pandas requests
+pip install -r requirements.txt
 playwright install chromium
 ```
 
-> **Note:** On macOS, you may need to use `pip3` and `python3` instead of `pip` and `python`.
+**Alternative: Install packages individually:**
+
+```bash
+pip install playwright pandas requests certifi
+playwright install chromium
+```
+
+> **Note:** 
+> - On macOS, you may need to use `pip3` and `python3` instead of `pip` and `python`.
+> - If you encounter PowerShell execution policy errors on Windows, run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+> - The `playwright install chromium` command is **required** after installing the playwright package - it downloads the browser binary.
 
 ---
 
