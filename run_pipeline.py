@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from load_env import load_env_file
 from slack_notify import (
@@ -13,6 +13,7 @@ from slack_notify import (
     notify_pipeline_failure,
     notify_pipeline_start,
 )
+from qbo_query import cmd_reconcile
 
 # Load .env file to make environment variables available
 load_env_file()
@@ -207,6 +208,42 @@ def main() -> int:
             logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
             # Don't fail the pipeline if archiving fails - upload already succeeded
             logging.warning("Continuing despite archive failure (upload was successful)")
+
+        # Phase 5: Reconcile EPOS vs QBO totals
+        logging.info("\n=== Phase 5: Reconciliation ===")
+        try:
+            # Read normalized_date from metadata before it gets archived
+            metadata_path = repo_root / "last_epos_transform.json"
+            reconcile_date = None
+            
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                    reconcile_date = metadata.get("normalized_date")
+                except Exception as e:
+                    logging.warning(f"Could not read metadata for reconciliation: {e}")
+            
+            # Use normalized_date if available, otherwise use yesterday as fallback
+            if not reconcile_date:
+                reconcile_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                logging.info(f"No normalized_date in metadata, using yesterday: {reconcile_date}")
+            else:
+                logging.info(f"Reconciling for date: {reconcile_date}")
+            
+            # Run reconciliation (non-fatal - wrapped to catch SystemExit)
+            try:
+                cmd_reconcile(reconcile_date, None, tolerance=0.00)
+                logging.info("[OK] Phase 5: Reconciliation completed successfully.")
+            except SystemExit:
+                # cmd_reconcile calls sys.exit(1) on errors, catch it here
+                logging.warning("Reconciliation encountered errors but pipeline continues")
+            except Exception as e:
+                logging.error(f"[ERROR] Phase 5: Reconciliation failed: {e}")
+                logging.warning("Continuing despite reconciliation failure (upload was successful)")
+        except Exception as e:
+            logging.error(f"[ERROR] Phase 5: Reconciliation setup failed: {e}")
+            logging.warning("Continuing despite reconciliation failure (upload was successful)")
 
         # Success notification
         notify_pipeline_success(pipeline_name, log_file, date_range_str)
