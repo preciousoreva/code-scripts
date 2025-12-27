@@ -17,6 +17,10 @@ __pycache__/
 # Temporary processing files (these get archived, but exclude from git)
 *.csv
 last_epos_transform.json
+uploaded_docnumbers.json
+
+# Spill files (temporary, get archived after use)
+uploads/spill/
 
 # Logs
 logs/

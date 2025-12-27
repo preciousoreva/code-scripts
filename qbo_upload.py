@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import os
 import glob
 import json
 from typing import Optional, Dict, Callable, Any
 from urllib.parse import quote
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -64,6 +67,76 @@ AUTO_CREATE_ITEMS = True       # Flip to True if you ever want auto item creatio
 def get_repo_root() -> str:
     """Return the directory this script lives in (the repo root for our purposes)."""
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def load_uploaded_docnumbers(repo_root: str) -> set:
+    """Load set of DocNumbers that have been successfully uploaded."""
+    ledger_path = os.path.join(repo_root, "uploaded_docnumbers.json")
+    if not os.path.exists(ledger_path):
+        return set()
+    
+    try:
+        with open(ledger_path, "r") as f:
+            data = json.load(f)
+            return set(data.get("docnumbers", []))
+    except Exception as e:
+        print(f"[WARN] Failed to load uploaded_docnumbers.json: {e}")
+        return set()
+
+
+def save_uploaded_docnumber(repo_root: str, docnumber: str) -> None:
+    """Add a DocNumber to the uploaded ledger."""
+    ledger_path = os.path.join(repo_root, "uploaded_docnumbers.json")
+    
+    # Load existing
+    docnumbers = load_uploaded_docnumbers(repo_root)
+    docnumbers.add(docnumber)
+    
+    # Save back
+    data = {
+        "docnumbers": sorted(list(docnumbers)),
+        "last_updated": datetime.now().isoformat(),
+    }
+    
+    try:
+        with open(ledger_path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[WARN] Failed to save uploaded_docnumbers.json: {e}")
+
+
+def check_qbo_existing_docnumbers(
+    docnumbers: list[str],
+    token_mgr: TokenManager,
+    batch_size: int = 50
+) -> set:
+    """
+    Check QBO for existing SalesReceipts by DocNumber.
+    Returns set of DocNumbers that already exist in QBO.
+    """
+    existing = set()
+    
+    # Query in batches to avoid URL length limits
+    for i in range(0, len(docnumbers), batch_size):
+        batch = docnumbers[i:i + batch_size]
+        # Build query: select Id, DocNumber from SalesReceipt where DocNumber in ('SR-...', 'SR-...', ...)
+        docnumber_list = "', '".join(d.replace("'", "''") for d in batch)
+        query = f"select Id, DocNumber from SalesReceipt where DocNumber in ('{docnumber_list}')"
+        url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
+        
+        resp = _make_qbo_request("GET", url, token_mgr)
+        if resp.status_code == 200:
+            data = resp.json()
+            receipts = data.get("QueryResponse", {}).get("SalesReceipt", [])
+            if not isinstance(receipts, list):
+                receipts = [receipts] if receipts else []
+            
+            for receipt in receipts:
+                doc_num = receipt.get("DocNumber")
+                if doc_num:
+                    existing.add(doc_num)
+    
+    return existing
 
 
 def find_latest_single_csv(repo_root: str) -> str:
@@ -482,13 +555,73 @@ def main():
     grouped = df.groupby(GROUP_COL)
     print(f"Found {len(grouped)} distinct SalesReceiptNo groups")
 
+    # Layer A: Load local ledger of uploaded DocNumbers
+    uploaded_docnumbers = load_uploaded_docnumbers(repo_root)
+    print(f"Loaded {len(uploaded_docnumbers)} DocNumbers from local ledger")
+
+    # Collect all DocNumbers to check
+    all_docnumbers = list(grouped.groups.keys())
+    
+    # Layer B: Check QBO for existing DocNumbers (optional safety check)
+    print("Checking QBO for existing DocNumbers...")
+    qbo_existing = check_qbo_existing_docnumbers(all_docnumbers, token_mgr)
+    print(f"Found {len(qbo_existing)} existing DocNumbers in QBO")
+    
+    # Combine both sources
+    skip_docnumbers = uploaded_docnumbers | qbo_existing
+    if skip_docnumbers:
+        print(f"Skipping {len(skip_docnumbers)} DocNumbers (already uploaded or exist in QBO)")
+
     item_cache: Dict[str, str] = {}
     department_cache: Dict[str, Optional[str]] = {}
+    
+    stats = {
+        "attempted": 0,
+        "skipped": 0,
+        "uploaded": 0,
+        "failed": 0,
+    }
 
     for group_key, group_df in grouped:
-        payload = build_sales_receipt_payload(group_df, token_mgr, item_cache, department_cache)
-        print(f"\nSending SalesReceiptNo: {group_key}")
-        send_sales_receipt(payload, token_mgr)
+        stats["attempted"] += 1
+        
+        # Skip if already uploaded or exists in QBO
+        if group_key in skip_docnumbers:
+            print(f"\nSkipping SalesReceiptNo: {group_key} (already uploaded or exists)")
+            stats["skipped"] += 1
+            continue
+        
+        try:
+            payload = build_sales_receipt_payload(group_df, token_mgr, item_cache, department_cache)
+            print(f"\nSending SalesReceiptNo: {group_key}")
+            send_sales_receipt(payload, token_mgr)
+            
+            # Success - add to local ledger
+            save_uploaded_docnumber(repo_root, group_key)
+            stats["uploaded"] += 1
+        except Exception as e:
+            print(f"\n[ERROR] Failed to upload SalesReceiptNo {group_key}: {e}")
+            stats["failed"] += 1
+            # Don't add to ledger on failure
+    
+    # Print summary
+    print(f"\n=== Upload Summary ===")
+    print(f"Attempted: {stats['attempted']}")
+    print(f"Skipped (duplicates): {stats['skipped']}")
+    print(f"Uploaded: {stats['uploaded']}")
+    print(f"Failed: {stats['failed']}")
+    
+    # Write stats to metadata for Slack notification
+    metadata_path = os.path.join(repo_root, "last_epos_transform.json")
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
+            metadata["upload_stats"] = stats
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+        except Exception as e:
+            print(f"[WARN] Failed to update metadata with upload stats: {e}")
 
 
 if __name__ == "__main__":

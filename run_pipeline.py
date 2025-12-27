@@ -2,6 +2,7 @@ import subprocess
 import sys
 import json
 import shutil
+import argparse
 from pathlib import Path
 from typing import Optional
 import logging
@@ -19,10 +20,15 @@ from qbo_query import cmd_reconcile
 load_env_file()
 
 
-def run_step(label: str, script_name: str) -> None:
+def run_step(label: str, script_name: str, args: list = None) -> None:
     """
     Run a Python script in this repo using the current interpreter.
     Raises SystemExit if the script exits with a non-zero status.
+    
+    Args:
+        label: Human-readable label for logging
+        script_name: Name of the script file to run
+        args: Optional list of command-line arguments to pass to the script
     """
     repo_root = Path(__file__).resolve().parent
     script_path = repo_root / script_name
@@ -32,11 +38,15 @@ def run_step(label: str, script_name: str) -> None:
         logging.error(error_msg)
         raise SystemExit(error_msg)
 
+    cmd = [sys.executable, str(script_path)]
+    if args:
+        cmd.extend(args)
+
     logging.info(f"\n=== {label} ===")
-    logging.info(f"Running: {sys.executable} {script_path}")
+    logging.info(f"Running: {' '.join(cmd)}")
 
     result = subprocess.run(
-        [sys.executable, str(script_path)],
+        cmd,
         cwd=str(repo_root),
         capture_output=True,
         text=True,
@@ -153,6 +163,42 @@ def archive_files(repo_root: Path) -> None:
         else:
             logging.warning(f"Processed file not found or is not a file: {processed_file}")
     
+    # Move spill files that were created during this run (if they match target_date)
+    spill_files = metadata.get("spill_files", [])
+    target_date = metadata.get("target_date") or normalized_date
+    if spill_files and target_date:
+        for spill_file in spill_files:
+            # spill_file is relative path like "uploads/spill/BookKeeping_spill_2025-12-25.csv"
+            # Only archive spill files that match the target_date
+            spill_filename = Path(spill_file).name
+            # Extract date from filename: BookKeeping_spill_YYYY-MM-DD.csv
+            if f"spill_{target_date}.csv" in spill_filename:
+                spill_path = repo_root / spill_file
+                if spill_path.exists() and spill_path.is_file():
+                    dest_spill = archive_dir / spill_filename
+                    shutil.move(str(spill_path), str(dest_spill))
+                    logging.info(f"Moved newly created spill file: {spill_filename} -> Uploaded/{normalized_date}/")
+                else:
+                    logging.warning(f"Spill file not found: {spill_path}")
+            else:
+                # This spill file is for a different date - keep it in uploads/spill/
+                logging.info(f"Keeping spill file {spill_filename} in uploads/spill/ (for future date)")
+    
+    # Move spill files that were used/merged during processing
+    used_spill_files = metadata.get("used_spill_files", [])
+    if used_spill_files:
+        logging.info(f"Archiving {len(used_spill_files)} used spill file(s)...")
+        for spill_file in used_spill_files:
+            # spill_file is relative path like "uploads/spill/BookKeeping_spill_2025-12-25.csv"
+            spill_path = repo_root / spill_file
+            if spill_path.exists() and spill_path.is_file():
+                spill_filename = spill_path.name
+                dest_spill = archive_dir / spill_filename
+                shutil.move(str(spill_path), str(dest_spill))
+                logging.info(f"Moved used spill file: {spill_filename} -> Uploaded/{normalized_date}/")
+            else:
+                logging.warning(f"Used spill file not found: {spill_path}")
+    
     # Move metadata file to archive as well
     dest_metadata = archive_dir / "last_epos_transform.json"
     shutil.move(str(metadata_path), str(dest_metadata))
@@ -161,7 +207,7 @@ def archive_files(repo_root: Path) -> None:
     logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{normalized_date}/")
 
 
-def main() -> int:
+def main(target_date: Optional[str] = None) -> int:
     """
     Full pipeline:
 
@@ -183,19 +229,37 @@ def main() -> int:
        - After successful upload, reads last_epos_transform.json
        - Creates Uploaded/<date>/ folder
        - Moves raw CSV, processed CSV(s), and metadata to archive folder
+    
+    Args:
+        target_date: Target business date in YYYY-MM-DD format. If None, uses yesterday.
     """
+    # Determine target_date: use provided, or default to yesterday
+    if not target_date:
+        target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        logging.info(f"No target_date provided, using yesterday: {target_date}")
+    else:
+        logging.info(f"Using provided target_date: {target_date}")
+    
     pipeline_name = "EPOS -> QuickBooks Pipeline"
-    date_range_str = None  # this pipeline uses latest available data
+    date_range_str = target_date  # Use target_date for notifications
 
     logging.info("Starting EPOS -> QuickBooks pipeline...\n")
     notify_pipeline_start(pipeline_name, log_file, date_range_str)
 
     try:
-        # Phase 1: Download from EPOS
-        run_step("Phase 1: Download EPOS CSV (epos_playwright)", "epos_playwright.py")
+        # Phase 1: Download from EPOS with target_date
+        run_step(
+            "Phase 1: Download EPOS CSV (epos_playwright)",
+            "epos_playwright.py",
+            ["--target-date", target_date]
+        )
 
-        # Phase 2: Transform to single QuickBooks-ready CSV
-        run_step("Phase 2: Transform to single CSV (epos_to_qb_single)", "epos_to_qb_single.py")
+        # Phase 2: Transform to single QuickBooks-ready CSV with target_date filtering
+        run_step(
+            "Phase 2: Transform to single CSV (epos_to_qb_single)",
+            "epos_to_qb_single.py",
+            ["--target-date", target_date]
+        )
 
         # Phase 3: Upload to QBO sandbox
         run_step("Phase 3: Upload to QBO (qbo_upload)", "qbo_upload.py")
@@ -212,7 +276,7 @@ def main() -> int:
         # Phase 5: Reconcile EPOS vs QBO totals
         logging.info("\n=== Phase 5: Reconciliation ===")
         try:
-            # Read normalized_date from metadata before it gets archived
+            # Read target_date or normalized_date from metadata before it gets archived
             metadata_path = repo_root / "last_epos_transform.json"
             reconcile_date = None
             
@@ -220,14 +284,15 @@ def main() -> int:
                 try:
                     with open(metadata_path, "r") as f:
                         metadata = json.load(f)
-                    reconcile_date = metadata.get("normalized_date")
+                    # Prefer target_date, fallback to normalized_date
+                    reconcile_date = metadata.get("target_date") or metadata.get("normalized_date")
                 except Exception as e:
                     logging.warning(f"Could not read metadata for reconciliation: {e}")
             
-            # Use normalized_date if available, otherwise use yesterday as fallback
+            # Use target_date if available, otherwise use yesterday as fallback
             if not reconcile_date:
-                reconcile_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-                logging.info(f"No normalized_date in metadata, using yesterday: {reconcile_date}")
+                reconcile_date = target_date or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                logging.info(f"No target_date/normalized_date in metadata, using: {reconcile_date}")
             else:
                 logging.info(f"Reconciling for date: {reconcile_date}")
             
@@ -245,8 +310,17 @@ def main() -> int:
             logging.error(f"[ERROR] Phase 5: Reconciliation setup failed: {e}")
             logging.warning("Continuing despite reconciliation failure (upload was successful)")
 
-        # Success notification
-        notify_pipeline_success(pipeline_name, log_file, date_range_str)
+        # Success notification - load metadata for summary
+        metadata = None
+        metadata_path = repo_root / "last_epos_transform.json"
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+            except Exception as e:
+                logging.warning(f"Could not load metadata for notification: {e}")
+        
+        notify_pipeline_success(pipeline_name, log_file, date_range_str, metadata)
         logging.info("\nPipeline completed successfully ✅")
         return 0
 
@@ -261,5 +335,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(
+        description="Run EPOS -> QuickBooks pipeline for target business date."
+    )
+    parser.add_argument(
+        "--target-date",
+        help="Target business date in YYYY-MM-DD format (default: yesterday)",
+    )
+    args = parser.parse_args()
+    
+    raise SystemExit(main(args.target_date))
 

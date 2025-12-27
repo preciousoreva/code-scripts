@@ -46,14 +46,48 @@ def send_slack_success(message: str) -> None:
         logging.error(f"Failed to send Slack message: {e}")
 
 
-def notify_pipeline_success(pipeline_name: str, log_file: Path, date_range: str = None) -> None:
+def notify_pipeline_success(
+    pipeline_name: str,
+    log_file: Path,
+    date_range: str = None,
+    metadata: dict = None
+) -> None:
     message = (
         f"✅ *{pipeline_name} completed successfully*\n"
         f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
         f"• Log: `{log_file.name}`"
     )
     if date_range:
-        message += f"\n• Date Range: {date_range}"
+        message += f"\n• Target Date: {date_range}"
+    
+    # Add summary from metadata if available
+    if metadata:
+        target_date = metadata.get("target_date")
+        if target_date:
+            message += f"\n• Target Date: {target_date}"
+        
+        dates_present = metadata.get("dates_present", [])
+        if dates_present:
+            message += f"\n• Dates Present: {', '.join(dates_present)}"
+        
+        rows_total = metadata.get("rows_total")
+        rows_kept = metadata.get("rows_kept")
+        rows_spilled = metadata.get("rows_spilled")
+        if rows_total is not None:
+            message += f"\n• Rows: {rows_kept} kept, {rows_spilled} spilled (total: {rows_total})"
+        
+        spill_files = metadata.get("spill_files", [])
+        if spill_files:
+            message += f"\n• Spill Files: {len(spill_files)} file(s)"
+        
+        upload_stats = metadata.get("upload_stats")
+        if upload_stats:
+            attempted = upload_stats.get("attempted", 0)
+            uploaded = upload_stats.get("uploaded", 0)
+            skipped = upload_stats.get("skipped", 0)
+            failed = upload_stats.get("failed", 0)
+            message += f"\n• Upload: {uploaded} uploaded, {skipped} skipped, {failed} failed (attempted: {attempted})"
+    
     send_slack_success(message)
 
 
