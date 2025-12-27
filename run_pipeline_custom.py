@@ -88,7 +88,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-def archive_files(repo_root: Path, date_range_str: str) -> None:
+def archive_files(repo_root: Path, date_range_str: str, from_date: str = None, to_date: str = None) -> None:
     """
     Phase 4: Archive processed files after successful upload.
     Reads last_epos_transform.json and moves files to Uploaded/<date_range>/ folder.
@@ -96,7 +96,16 @@ def archive_files(repo_root: Path, date_range_str: str) -> None:
     Args:
         repo_root: Root directory of the repository
         date_range_str: Date range string (e.g., "2025-10-15 to 2025-10-17")
+        from_date: Start date in YYYY-MM-DD format (optional, parsed from date_range_str if not provided)
+        to_date: End date in YYYY-MM-DD format (optional, parsed from date_range_str if not provided)
     """
+    # Parse from_date and to_date from date_range_str if not provided
+    if not from_date or not to_date:
+        if " to " in date_range_str:
+            parts = date_range_str.split(" to ", 1)
+            if len(parts) == 2:
+                from_date = parts[0].strip()
+                to_date = parts[1].strip()
     metadata_path = repo_root / "last_epos_transform.json"
     
     if not metadata_path.exists():
@@ -163,6 +172,62 @@ def archive_files(repo_root: Path, date_range_str: str) -> None:
         else:
             logging.warning(f"Processed file not found or is not a file: {processed_file}")
     
+    # Move spill files if any - but ONLY for dates in the range being processed
+    # Spill files for future dates should remain in uploads/spill/ for later processing
+    spill_files = metadata.get("spill_files", [])
+    if spill_files:
+        # Parse date range
+        from datetime import datetime
+        try:
+            range_start = datetime.strptime(from_date, "%Y-%m-%d")
+            range_end = datetime.strptime(to_date, "%Y-%m-%d")
+        except ValueError:
+            range_start = None
+            range_end = None
+        
+        for spill_file in spill_files:
+            # spill_file is relative path like "uploads/spill/BookKeeping_spill_2025-12-25.csv"
+            spill_filename = Path(spill_file).name
+            # Extract date from filename: BookKeeping_spill_YYYY-MM-DD.csv
+            try:
+                spill_date_str = spill_filename.replace("BookKeeping_spill_", "").replace(".csv", "")
+                spill_date = datetime.strptime(spill_date_str, "%Y-%m-%d")
+                
+                # Only archive if spill date is within the processed range
+                if range_start and range_end and range_start <= spill_date <= range_end:
+                    spill_path = repo_root / spill_file
+                    if spill_path.exists() and spill_path.is_file():
+                        dest_spill = archive_dir / spill_filename
+                        shutil.move(str(spill_path), str(dest_spill))
+                        logging.info(f"Moved spill file: {spill_filename} -> Uploaded/{date_range_str}/")
+                    else:
+                        logging.warning(f"Spill file not found: {spill_path}")
+                else:
+                    # This spill file is outside the range - keep it in uploads/spill/
+                    logging.info(f"Keeping spill file {spill_filename} in uploads/spill/ (outside processed range)")
+            except ValueError:
+                # Couldn't parse date from filename - archive it anyway
+                spill_path = repo_root / spill_file
+                if spill_path.exists() and spill_path.is_file():
+                    dest_spill = archive_dir / spill_filename
+                    shutil.move(str(spill_path), str(dest_spill))
+                    logging.info(f"Moved spill file: {spill_filename} -> Uploaded/{date_range_str}/")
+    
+    # Move spill files that were used/merged during processing
+    used_spill_files = metadata.get("used_spill_files", [])
+    if used_spill_files:
+        logging.info(f"Archiving {len(used_spill_files)} used spill file(s)...")
+        for spill_file in used_spill_files:
+            # spill_file is relative path like "uploads/spill/BookKeeping_spill_2025-12-25.csv"
+            spill_path = repo_root / spill_file
+            if spill_path.exists() and spill_path.is_file():
+                spill_filename = spill_path.name
+                dest_spill = archive_dir / spill_filename
+                shutil.move(str(spill_path), str(dest_spill))
+                logging.info(f"Moved used spill file: {spill_filename} -> Uploaded/{date_range_str}/")
+            else:
+                logging.warning(f"Used spill file not found: {spill_path}")
+    
     # Move metadata file to archive as well
     dest_metadata = archive_dir / "last_epos_transform.json"
     shutil.move(str(metadata_path), str(dest_metadata))
@@ -171,7 +236,7 @@ def archive_files(repo_root: Path, date_range_str: str) -> None:
     logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{date_range_str}/")
 
 
-def main(from_date: str, to_date: str) -> int:
+def main(from_date: str, to_date: str, target_date: str = None) -> int:
     """
     Full pipeline with custom date range:
 
@@ -209,7 +274,16 @@ def main(from_date: str, to_date: str) -> int:
         )
 
         # Phase 2: Transform to single QuickBooks-ready CSV
-        run_step("Phase 2: Transform to single CSV (epos_to_qb_single)", "epos_to_qb_single.py")
+        # If target_date is provided, filter by it; otherwise process all dates in range
+        transform_args = []
+        if target_date:
+            transform_args = ["--target-date", target_date]
+            logging.info(f"Filtering by target_date: {target_date}")
+        run_step(
+            "Phase 2: Transform to single CSV (epos_to_qb_single)",
+            "epos_to_qb_single.py",
+            transform_args if transform_args else None
+        )
 
         # Phase 3: Upload to QBO sandbox
         run_step("Phase 3: Upload to QBO (qbo_upload)", "qbo_upload.py")
@@ -217,7 +291,7 @@ def main(from_date: str, to_date: str) -> int:
         # Phase 4: Archive files after successful upload
         logging.info("\n=== Phase 4: Archive Files ===")
         try:
-            archive_files(repo_root, date_range_str)
+            archive_files(repo_root, date_range_str, from_date, to_date)
         except Exception as e:
             logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
             # Don't fail the pipeline if archiving fails - upload already succeeded
@@ -241,8 +315,17 @@ def main(from_date: str, to_date: str) -> int:
             logging.error(f"[ERROR] Phase 5: Reconciliation setup failed: {e}")
             logging.warning("Continuing despite reconciliation failure (upload was successful)")
 
-        # Success notification
-        notify_pipeline_success(pipeline_name, log_file, date_range_str)
+        # Success notification - load metadata for summary
+        metadata = None
+        metadata_path = repo_root / "last_epos_transform.json"
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+            except Exception as e:
+                logging.warning(f"Could not load metadata for notification: {e}")
+        
+        notify_pipeline_success(pipeline_name, log_file, date_range_str, metadata)
         logging.info("\nPipeline completed successfully ✅")
         return 0
 
@@ -270,9 +353,13 @@ if __name__ == "__main__":
         required=True,
         help="End date in YYYY-MM-DD format (e.g. 2025-12-05)",
     )
+    parser.add_argument(
+        "--target-date",
+        help="Optional target business date in YYYY-MM-DD format. If provided, filters rows to only this date (useful for handling spillover).",
+    )
     args = parser.parse_args()
 
-    raise SystemExit(main(args.from_date, args.to_date))
+    raise SystemExit(main(args.from_date, args.to_date, args.target_date))
 
 # Example usage:
 # python run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
