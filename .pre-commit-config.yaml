@@ -1,0 +1,17 @@
+# Pre-commit hooks configuration
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# Note: gitleaks is automatically downloaded on first run (no manual installation required)
+
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: Gitleaks Secret Scan
+        description: Detect hardcoded secrets and credentials (auto-downloads gitleaks binary)
+        entry: python .pre-commit-hooks/gitleaks-wrapper.py
+        language: python
+        additional_dependencies: [certifi>=2023.0.0]
+        pass_filenames: false
+        always_run: true

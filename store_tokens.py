@@ -5,12 +5,19 @@ Helper script to store QBO OAuth tokens into qbo_tokens.sqlite.
 This script simplifies onboarding on a new machine by providing a CLI interface
 for storing tokens without hardcoding secrets.
 
+⚠️  WARNING: DO NOT HARDCODE TOKENS OR CREDENTIALS IN THIS FILE ⚠️
+
+- Tokens must be passed via CLI arguments only
+- Tokens are stored in qbo_tokens.sqlite (which is gitignored)
+- Secret scanning runs in CI and will block PRs if secrets are detected
+- Never commit access tokens, refresh tokens, or any credentials
+
 Usage:
     # Store tokens for a company
-    python store_tokens.template.py --company company_a --access-token "..." --refresh-token "..."
+    python store_tokens.py --company company_a --access-token "..." --refresh-token "..."
 
     # List stored tokens (safe fields only)
-    python store_tokens.template.py --list
+    python store_tokens.py --list
 """
 
 import argparse
@@ -133,13 +140,13 @@ def main():
         epilog="""
 Examples:
   # Store tokens for company_a
-  python store_tokens.template.py --company company_a --access-token "..." --refresh-token "..."
+  python store_tokens.py --company company_a --access-token "..." --refresh-token "..."
 
   # Store tokens with custom expires_in and environment
-  python store_tokens.template.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --env sandbox
+  python store_tokens.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --env sandbox
 
   # List all stored tokens
-  python store_tokens.template.py --list
+  python store_tokens.py --list
         """
     )
 

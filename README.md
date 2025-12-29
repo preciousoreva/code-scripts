@@ -51,24 +51,26 @@ The pipeline is designed to be run as a single command and take care of all phas
    **Standard (yesterday's data):**
 
    ```bash
-   python3 run_pipeline.py --company company_a
+   python run_pipeline.py --company company_a
    ```
 
    **Specific date:**
 
    ```bash
-   python3 run_pipeline.py --company company_a --target-date 2025-12-24
+   python run_pipeline.py --company company_a --target-date 2025-12-24
    ```
 
    **Custom date range:**
 
    ```bash
-   python3 run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
+   python run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
    ```
 
 That's it! The pipeline will download, split, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
 
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
+>
+> **Note:** All examples use `python` for cross-platform compatibility. On macOS/Linux, use `python3` if `python` points to Python 2 or is missing.
 
 ---
 
@@ -187,13 +189,13 @@ Uploaded/YYYY-MM-DD/
 
   ```bash
   # Single-day (yesterday)
-  python3 run_pipeline.py --company company_a
+  python run_pipeline.py --company company_a
 
   # Single-day (specific date)
-  python3 run_pipeline.py --company company_a --target-date 2025-12-24
+  python run_pipeline.py --company company_a --target-date 2025-12-24
 
   # Date range
-  python3 run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
+  python run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
   ```
 
 - `epos_playwright.py`  
@@ -281,7 +283,7 @@ code-scripts/
 ### Single-Day Mode
 
 ```bash
-python3 run_pipeline.py --company company_a --target-date 2025-12-28
+python run_pipeline.py --company company_a --target-date 2025-12-28
 ```
 
 **Flow:**
@@ -299,7 +301,7 @@ python3 run_pipeline.py --company company_a --target-date 2025-12-28
 ### Range Mode
 
 ```bash
-python3 run_pipeline.py --company company_b --from-date 2025-12-26 --to-date 2025-12-28
+python run_pipeline.py --company company_b --from-date 2025-12-26 --to-date 2025-12-28
 ```
 
 **Flow:**
@@ -418,24 +420,24 @@ The pipeline uses `qbo_tokens.sqlite` to store OAuth tokens, isolated by company
 **For each company:**
 
 1. Perform OAuth flow via Intuit's OAuth playground or your OAuth implementation
-2. Store tokens using the helper script `store_tokens.template.py`:
+2. Store tokens using the helper script `store_tokens.py`:
 
 **Example store command (company_a):**
 
 ```bash
-python store_tokens.template.py --company company_a --access-token "..." --refresh-token "..." --expires-in 3600 --env production
+python store_tokens.py --company company_a --access-token "..." --refresh-token "..." --expires-in 3600 --env production
 ```
 
 **Example store command (company_b):**
 
 ```bash
-python store_tokens.template.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --env production
+python store_tokens.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --env production
 ```
 
 **Example list command (view stored tokens):**
 
 ```bash
-python store_tokens.template.py --list
+python store_tokens.py --list
 ```
 
 **Notes:**
@@ -458,6 +460,28 @@ Ensure these are ignored:
 - `Uploaded/` — Archive
 - `logs/` — Execution logs
 - `*.csv` — Processing files
+
+### 4. (Optional) Enable Pre-commit Secret Scanning
+
+To catch hardcoded secrets before committing, you can enable pre-commit hooks:
+
+```bash
+# Install pre-commit (or use requirements-dev.txt)
+pip install -r requirements-dev.txt
+# OR: pip install pre-commit
+
+# Install the git hooks
+pre-commit install
+
+# Run on all files (optional, to check existing code)
+pre-commit run --all-files
+```
+
+**Note:** The pre-commit hook will automatically download gitleaks (v8.18.0) on first run. You do not need to install gitleaks manually — it's fully self-contained and works on macOS, Windows, and Linux.
+
+This will automatically scan for secrets before each commit. The same scanning also runs in CI on pull requests and will block PRs if secrets are detected.
+
+**Note:** Secret scanning is enforced in CI regardless of whether you use pre-commit locally.
 
 ---
 
@@ -551,7 +575,7 @@ The pipeline supports multiple companies, each with its own configuration file. 
 5. **Test the configuration:**
 
    ```bash
-   python3 run_pipeline.py --company company_c --target-date 2025-01-01
+   python run_pipeline.py --company company_c --target-date 2025-01-01
    ```
 
 ### Configuration Schema Notes

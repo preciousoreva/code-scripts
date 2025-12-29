@@ -72,10 +72,9 @@ token_broker.py
 start_broker.ps1
 README-infra.md
 
-# Local token storage script (optional local copy)
-# Note: store_tokens.template.py is committed and should NOT be ignored
-store_tokens.py
-
 # Safety: raw EPOS downloads (should be auto-archived after success)
 BookKeeping_*.csv
 CombinedRaw_*.csv
+
+# Pre-commit hooks: downloaded binaries (auto-downloaded by gitleaks-wrapper)
+.pre-commit-hooks/.bin/
