@@ -418,53 +418,34 @@ The pipeline uses `qbo_tokens.sqlite` to store OAuth tokens, isolated by company
 **For each company:**
 
 1. Perform OAuth flow via Intuit's OAuth playground or your OAuth implementation
-2. Store tokens using `token_manager.store_tokens_from_oauth()`:
+2. Store tokens using the helper script `store_tokens.template.py`:
 
-```python
-from token_manager import store_tokens_from_oauth
-from company_config import load_company_config
+**Example store command (company_a):**
 
-# Load company config to get realm_id
-config = load_company_config("company_a")  # or "company_b"
-
-# Store tokens from OAuth response
-store_tokens_from_oauth(
-    company_key=config.company_key,
-    realm_id=config.realm_id,
-    access_token="your_access_token",
-    refresh_token="your_refresh_token",
-    expires_in=3600,  # seconds
-    environment="production"  # or "sandbox"
-)
+```bash
+python store_tokens.template.py --company company_a --access-token "..." --refresh-token "..." --expires-in 3600 --env production
 ```
 
-**Alternative:** Create a simple script to store tokens:
+**Example store command (company_b):**
 
-```python
-# store_tokens.py
-import sys
-from token_manager import store_tokens_from_oauth
-from company_config import load_company_config
-
-if len(sys.argv) < 5:
-    print("Usage: python store_tokens.py <company_key> <access_token> <refresh_token> <expires_in>")
-    sys.exit(1)
-
-company_key = sys.argv[1]
-config = load_company_config(company_key)
-
-store_tokens_from_oauth(
-    company_key=company_key,
-    realm_id=config.realm_id,
-    access_token=sys.argv[2],
-    refresh_token=sys.argv[3],
-    expires_in=int(sys.argv[4])
-)
-
-print(f"Tokens stored for {company_key} (realm_id: {config.realm_id})")
+```bash
+python store_tokens.template.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --env production
 ```
 
-**Adding a second company:** Simply run the OAuth flow again for the new company and store tokens using the same function with the new company's `company_key` and `realm_id`. The SQLite database stores tokens separately per company.
+**Example list command (view stored tokens):**
+
+```bash
+python store_tokens.template.py --list
+```
+
+**Notes:**
+
+- `qbo_tokens.sqlite` is local state, gitignored, and must be created per machine (or copied manually)
+- Do not commit tokens or the database file
+- The script automatically loads the `realm_id` from your company configuration file
+- Optional: You can use a GUI tool like [DB Browser for SQLite](https://sqlitebrowser.org/) to view the database contents (useful for debugging or verifying stored tokens)
+
+**Adding a second company:** Simply run the OAuth flow again for the new company and store tokens using the same script with the new company's `--company` argument. The SQLite database stores tokens separately per company.
 
 ### 3. Verify .gitignore
 
