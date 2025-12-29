@@ -1,14 +1,15 @@
 # EPOS → QuickBooks Automation
 
-This repo contains a small automation pipeline that:
+This repo contains an automation pipeline that:
 
-1. Logs into **EPOS Now HQ** and downloads the daily **BookKeeping** CSV to the repo root.
-2. Transforms the raw EPOS export into a single QuickBooks‑ready CSV in the repo root.
-3. Uploads the data into **QuickBooks Online** as Sales Receipts using the QBO API.
-4. Archives processed files to `Uploaded/<date>/` after successful upload.
-5. Reconciles EPOS totals vs QBO totals to verify data integrity.
+1. Logs into **EPOS Now HQ** and downloads the daily **BookKeeping** CSV.
+2. Splits the raw CSV by date (WAT timezone) and handles **RAW spill** for future dates.
+3. Transforms each day's raw data into QuickBooks-ready CSV format.
+4. Uploads the data into **QuickBooks Online** as Sales Receipts using the QBO API.
+5. Archives all processed files to `Uploaded/<date>/` after successful upload.
+6. Reconciles EPOS totals vs QBO totals to verify data integrity.
 
-The pipeline is designed to be run as a single command and take care of all five phases in sequence.
+The pipeline is designed to be run as a single command and take care of all phases in sequence.
 
 ---
 
@@ -24,23 +25,23 @@ The pipeline is designed to be run as a single command and take care of all five
 2. **Create initial OAuth tokens:**
 
    - Perform OAuth flow to get access/refresh tokens
-   - Create `qbo_tokens.json` with your tokens (see [Initial Setup](#3-get-initial-oauth-tokens) for details)
+   - Store tokens in `qbo_tokens.sqlite` using `store_tokens_from_oauth()` (see [Initial Setup](#2-get-initial-oauth-tokens) for details)
 
 3. **Install dependencies:**
 
    ```bash
    # Create virtual environment (recommended)
    python -m venv .venv
-   
+
    # Activate virtual environment
    # On Windows (PowerShell):
    .\.venv\Scripts\Activate.ps1
    # On macOS/Linux:
    source .venv/bin/activate
-   
+
    # Install dependencies
    pip install -r requirements.txt
-   
+
    # Install Playwright browser (required after installing playwright package)
    playwright install chromium
    ```
@@ -50,30 +51,91 @@ The pipeline is designed to be run as a single command and take care of all five
    **Standard (yesterday's data):**
 
    ```bash
-   python3 run_pipeline.py
+   python3 run_pipeline.py --company company_a
    ```
 
    **Specific date:**
 
    ```bash
-   python3 run_pipeline.py --target-date 2025-12-24
+   python3 run_pipeline.py --company company_a --target-date 2025-12-24
    ```
 
    **Custom date range:**
 
    ```bash
-   python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
+   python3 run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
    ```
 
-   **Custom date range with target-date filtering:**
-
-   ```bash
-   python3 run_pipeline_custom.py --from-date 2025-12-24 --to-date 2025-12-26 --target-date 2025-12-25
-   ```
-
-That's it! The pipeline will download, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
+That's it! The pipeline will download, split, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
 
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
+
+---
+
+## Architecture Overview
+
+### RAW-First Processing
+
+The pipeline enforces **date correctness BEFORE transformation**:
+
+1. EPOS CSV is treated as a multi-day ledger (may contain rows from multiple dates due to timezone differences)
+2. The downloaded CSV is split by WAT date immediately after download
+3. Future-date rows become **RAW spill files** (stored for later processing)
+4. Transform receives only rows for the target date — it never creates or merges spills
+
+> **Why RAW-first is safer:** Date filtering happens at the raw data level, before any transformation. This prevents double-processing, ensures no rows are lost, and keeps transform.py simple and stateless.
+
+### RAW Spill System (Pipeline-Managed)
+
+When processing date D, if the EPOS download contains rows for future dates (D+1, D+2, etc.):
+
+1. **Creation:** Future rows are written as RAW spill files:
+
+   ```
+   uploads/spill_raw/<CompanyDir>/BookKeeping_raw_spill_YYYY-MM-DD.csv
+   ```
+
+2. **Merge:** When processing date D+1, the pipeline checks for a RAW spill file and merges it with the split file before transform
+
+3. **Archive:** Used RAW spill files are moved to:
+
+   ```
+   Uploaded/YYYY-MM-DD/RAW_SPILL_BookKeeping_raw_spill_YYYY-MM-DD.csv
+   ```
+
+4. **Lifecycle:** RAW spill files remain in `uploads/spill_raw/` until their date is processed, then they're archived
+
+> **Note:** There is no `uploads/spill/` directory. The old "transformed spill" system has been removed. All spill handling now happens at the RAW level in `run_pipeline.py`.
+
+### Split Staging (Temporary)
+
+The `uploads/range_raw/` directory is used ONLY as a staging area during processing:
+
+- Single-day: `uploads/range_raw/<CompanyDir>/<date>_to_<date>/`
+- Range mode: `uploads/range_raw/<CompanyDir>/<from>_to_<to>/`
+
+These directories are **always cleaned up** after successful runs. No files in `uploads/` are authoritative after success.
+
+### Archive Structure (Authoritative)
+
+After a successful run, all relevant files are archived to:
+
+```
+Uploaded/YYYY-MM-DD/
+├── ORIGINAL_<EPOS CSV>                          # Original downloaded EPOS CSV
+├── RAW_SPLIT_BookKeeping_YYYY-MM-DD.csv         # Split raw file for this date
+├── RAW_COMBINED_CombinedRaw_YYYY-MM-DD.csv      # (Only if RAW spill was merged)
+├── RAW_SPILL_BookKeeping_raw_spill_*.csv        # (Only if RAW spill was used)
+├── gp_sales_receipts_*.csv                      # Transformed/processed CSV
+└── transform_metadata.json                       # Processing metadata
+```
+
+### Guarantees
+
+- **No duplicate QBO uploads** — Deduplication via local ledger + QBO API checks
+- **No silent row loss** — Future rows become RAW spill, past rows are logged
+- **Spill rows processed exactly once** — RAW spills are archived after use
+- **Repo root clean after success** — Original EPOS CSV is archived, staging dirs removed
 
 ---
 
@@ -82,829 +144,488 @@ That's it! The pipeline will download, transform, upload, archive, and reconcile
 ### Core Pipeline Scripts
 
 - `run_pipeline.py`  
-  **Main entry point** — Orchestration script that runs all five phases in order for a target business date:
+  **Main entry point** — Orchestrates all phases for single-day or range mode:
 
-  1. Download EPOS CSV (`epos_playwright.py`) - downloads data for target date (defaults to yesterday)
-  2. Transform to single CSV (`epos_to_qb_single.py`) - filters rows by target date and handles spillover
-  3. Upload to QuickBooks (`qbo_upload.py`) - with deduplication to prevent duplicate entries
-  4. Archive files (`run_pipeline.py` - Phase 4) - archives processed files and used spill files
-  5. Reconcile EPOS vs QBO totals (`qbo_query.py` - Phase 5)
+  1. Download EPOS CSV (`epos_playwright.py`)
+  2. Split by WAT date and create RAW spill files for future dates
+  3. Merge RAW spill (if exists for target date)
+  4. Transform to QuickBooks CSV (`transform.py`)
+  5. Upload to QuickBooks (`qbo_upload.py`)
+  6. Archive all files to `Uploaded/<date>/`
+  7. Reconcile EPOS vs QBO totals
 
-  **Features:**
-  - `--target-date YYYY-MM-DD`: Process a specific business date (defaults to yesterday if not provided)
-  - **Multi-date spillover handling**: Automatically separates rows from other dates into spill files
-  - **Deduplication**: Prevents duplicate uploads using local ledger and QBO API checks
-  - Sends Slack notifications with detailed summary (target date, dates present, row counts, upload stats)
-  
-  Returns exit code 0 on success, 1 on failure.
-
-- `run_pipeline_custom.py`  
-  **Custom date range pipeline** — Same as `run_pipeline.py` but allows you to specify a custom date range:
+  **Usage:**
 
   ```bash
-  python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
-  ```
+  # Single-day (yesterday)
+  python3 run_pipeline.py --company company_a
 
-  Downloads EPOS data for the specified date range. Also supports optional `--target-date` filtering:
-  
-  ```bash
-  python3 run_pipeline_custom.py --from-date 2025-12-24 --to-date 2025-12-26 --target-date 2025-12-25
+  # Single-day (specific date)
+  python3 run_pipeline.py --company company_a --target-date 2025-12-24
+
+  # Date range
+  python3 run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
   ```
-  
-  **Features:**
-  - Downloads data for the specified date range
-  - Optional `--target-date`: Filter to process only a specific date within the range (useful for handling spillover)
-  - Sends Slack notifications with the date range included
-  - **Archive folders:** Files are archived to `Uploaded/<date_range>/` (e.g., `Uploaded/2025-12-01 to 2025-12-05/`) instead of a single date folder
 
 - `epos_playwright.py`  
-  Uses **Playwright** to log into EPOS Now, navigate to the BookKeeping report, and download the CSV directly to the repo root directory.  
-  Supports `--target-date YYYY-MM-DD` parameter to download data for a specific date (defaults to yesterday if not provided).  
-  **Note:** EPOS credentials are loaded from `.env` file or environment variables (see [Initial Setup](#2-configure-credentials-required)).
+  Uses **Playwright** to log into EPOS Now, navigate to the BookKeeping report, and download the CSV.
+  Supports both single-date (`--target-date`) and range (`--from-date` / `--to-date`) downloads.
 
-- `epos_playwright_custom.py`  
-  Custom date range version of `epos_playwright.py`. Accepts `--from-date` and `--to-date` arguments to download data for a specific date range.  
-  Automatically navigates the calendar to the correct month and selects the specified dates.
+- `transform.py`  
+  Transforms raw EPOS CSV into QuickBooks-ready format using company-specific configuration.
 
-- `epos_to_qb_single.py`  
-  Reads the latest raw CSV from the repo root and transforms it into a single consolidated CSV for QuickBooks import.  
-  **Features:**
-  - `--target-date YYYY-MM-DD`: Filters rows to only process the target business date (in WAT timezone)
-  - **Multi-date spillover handling**: Automatically detects and separates rows from other dates into spill files in `uploads/spill/`
-  - **Spill file merging**: When processing a date, automatically checks for and merges existing spill files for that date
-  - Output is written to `single_sales_receipts_*.csv` in the repo root
-  - Creates `last_epos_transform.json` metadata file with file paths, target date, dates present, row counts, and spill file information
-  
-  **Dependency:** Uses `sales_recepit_script.py` for transformation logic.
+  **Important:** Transform.py does NOT create or merge spill files. It receives a pre-filtered raw file via `--raw-file` and transforms only that data.
 
 - `qbo_upload.py`  
-  Reads the latest `single_sales_receipts_*.csv` from the repo root and uses the **QuickBooks Online REST API** to create Sales Receipts.  
-  Each `*SalesReceiptNo` group becomes one Sales Receipt, with the tender type stored in the memo and the **Payment method** automatically mapped from the memo.  
+  Uploads transformed CSV to QuickBooks Online via REST API.
+
   **Features:**
-  - **Deduplication (Layer A)**: Local ledger (`uploaded_docnumbers.json`) tracks successfully uploaded DocNumbers to prevent re-uploads
-  - **Deduplication (Layer B)**: Bulk QBO API queries check for existing SalesReceipts by DocNumber before uploading
-  - Automatically refreshes expired access tokens on 401 errors
-  - Maps **Location** data from CSV to QuickBooks **Departments** (shown as "Location" in QBO UI)
-  - Auto-creates missing Items if `AUTO_CREATE_ITEMS = True`
-  - Treats EPOS line amounts as **VAT-inclusive** and sends both **net** and **gross** values to QBO so that:
-    - Subtotal and Total in QBO stay equal to the EPOS gross total
-    - QBO *backs out* VAT for display using `GlobalTaxCalculation = "TaxInclusive"` and `TaxInclusiveAmt`
-  - Validates API responses and raises errors on upload failures
-  - Uses efficient `TokenManager` to avoid redundant token checks
-  - Tracks upload statistics (attempted/skipped/uploaded/failed) in metadata
+
+  - **Deduplication (Layer A)**: Local ledger tracks uploaded DocNumbers
+  - **Deduplication (Layer B)**: Bulk QBO API checks before uploading
+  - Automatic token refresh on 401 errors
+  - Location/Department mapping
+  - VAT-inclusive amount handling
+
+### Configuration
+
+- `company_config.py` — Loads company-specific settings from JSON files
+- `companies/company_a.json` — Company A configuration
+- `companies/company_b.json` — Company B configuration
 
 ### Supporting Files
 
-- `qbo_auth.py`  
-  Handles QuickBooks OAuth2 authentication and token management. Contains client ID, client secret, and refresh-token logic. Automatically refreshes expired access tokens.
-
-- `qbo_query.py`  
-  **Unified QuickBooks query and management tool** — Supports multiple operations:
-  - `count`: Count SalesReceipts for a date or date range
-  - `list`: List SalesReceipts with details (supports pagination)
-  - `delete`: Delete SalesReceipts for a date or date range (with confirmation)
-  - `query`: Execute custom QBO queries
-  - `reconcile`: Reconcile EPOS totals vs QBO totals for a date or date range (integrated into pipeline as Phase 5)
-  
-  All operations support single dates or date ranges. See [QuickBooks Query Tool](#quickbooks-query-tool) section for usage examples.
-
-- `slack_notify.py`  
-  Sends Slack notifications for pipeline events (start, success, failure). Requires `SLACK_WEBHOOK_URL` environment variable. Failure notifications automatically extract concise, user-friendly error reasons from error messages. Uses SSL certificate verification with certifi support.
-
-- `load_env.py`  
-  Utility to automatically load environment variables from `.env` file. Makes credential management easier without modifying shell profiles.
-
-- `sales_recepit_script.py`  
-  Core transformation library used by `epos_to_qb_single.py`. Converts raw EPOS CSV format into QuickBooks-compatible format.
+- `token_manager.py` — QuickBooks OAuth2 token management (SQLite storage, per-company tokens)
+- `query_qbo_for_company.py` — QuickBooks query/reconciliation tool
+- `slack_notify.py` — Slack notification helpers
+- `load_env.py` — Environment variable loader
 
 ### Data Folders
 
-- `Uploaded/<date>/` or `Uploaded/<date_range>/` – Archived files after successful upload (created automatically by Phase 4)
-  - Contains raw CSV, processed CSV(s), used spill files, and `last_epos_transform.json` metadata
-  - Standard pipeline: Organized by target date (format: `YYYY-MM-DD`)
-  - Custom pipeline: Organized by date range (format: `YYYY-MM-DD to YYYY-MM-DD`)
-- `uploads/spill/` – Spillover files for future dates (created automatically, cleaned up after use)
-  - Contains `BookKeeping_spill_YYYY-MM-DD.csv` files for dates that appear in CSV downloads for other dates
-  - These files are automatically merged when processing their target date
-  - Moved to `Uploaded/<date>/` after successful upload
-- `logs/` – Log files for each full pipeline run (created automatically by `run_pipeline.py`)
-
-**Note:** Files are temporarily stored in the repo root during processing, then automatically archived after successful upload.
-
----
-
-## Requirements
-
-You'll need:
-
-- **Python 3.9+** installed on your machine
-- **EPOS Now HQ** account credentials
-- **QuickBooks Online** account with Developer app access
-- The following Python packages (see `requirements.txt` for versions):
-  - `playwright` - Web automation for EPOS downloads
-  - `pandas` - Data processing and CSV manipulation
-  - `requests` - HTTP client for QuickBooks API
-  - `certifi` - SSL certificate bundle (recommended for Slack notifications)
-
-### Install Python dependencies
-
-**Recommended: Use a virtual environment** to isolate dependencies:
-
-From the `code-scripts` folder:
-
-```bash
-# Create virtual environment
-python -m venv .venv
-
-# Activate virtual environment
-# On Windows (PowerShell):
-.\.venv\Scripts\Activate.ps1
-# On macOS/Linux:
-source .venv/bin/activate
-
-# Install all dependencies from requirements.txt
-pip install -r requirements.txt
-
-# Install Playwright browser (required after installing playwright package)
-playwright install chromium
-```
-
-**Alternative: Install without virtual environment** (not recommended):
-
-```bash
-pip install -r requirements.txt
-playwright install chromium
-```
-
-**Alternative: Install packages individually:**
-
-```bash
-pip install playwright pandas requests certifi
-playwright install chromium
-```
-
-> **Note:** 
-> - On macOS, you may need to use `pip3` and `python3` instead of `pip` and `python`.
-> - If you encounter PowerShell execution policy errors on Windows, run: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
-> - The `playwright install chromium` command is **required** after installing the playwright package - it downloads the browser binary.
-
----
-
-## Initial Setup
-
-### 1. Set Up QuickBooks Developer App
-
-1. Create a QuickBooks Developer account at [developer.intuit.com](https://developer.intuit.com)
-2. Create a new app (start with **Sandbox** for testing)
-3. Note your **Client ID** and **Client Secret**
-4. Configure OAuth redirect URLs as required by Intuit
-
-### 2. Configure Credentials (Required)
-
-**All credentials must be set for security.** You have two options:
-
-#### Option A: Using .env File (Recommended - Easiest)
-
-1. **Copy the example file:**
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. **Edit `.env` and add your credentials:**
-
-   ```bash
-   nano .env  # or use any text editor
-   ```
-
-   Replace the placeholder values:
-
-   ```
-   QBO_CLIENT_ID=your_actual_client_id
-   QBO_CLIENT_SECRET=your_actual_client_secret
-   QBO_REALM_ID=your_realm_id  # QuickBooks Company ID
-   EPOS_USERNAME=your_actual_username
-   EPOS_PASSWORD=your_actual_password
-   SLACK_WEBHOOK_URL=your_slack_webhook_url  # Optional: for pipeline notifications
-   ```
-
-3. **That's it!** The pipeline will automatically load credentials from `.env` when you run it.
-
-> ✅ **Benefits:** All credentials in one place, easy to edit, automatically loaded, already in `.gitignore`
-
-#### Option B: Environment Variables (Alternative)
-
-If you prefer using system environment variables:
-
-```bash
-# Set for current session
-export QBO_CLIENT_ID="your_client_id"
-export QBO_CLIENT_SECRET="your_client_secret"
-export QBO_REALM_ID="your_realm_id"  # QuickBooks Company ID
-export EPOS_USERNAME="your_username"
-export EPOS_PASSWORD="your_password"
-export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline notifications
-```
-
-**For persistent setup**, add to your shell profile (`~/.zshrc` or `~/.bashrc`):
-
-```bash
-# Add to ~/.zshrc or ~/.bash_profile
-export QBO_CLIENT_ID="your_client_id"
-export QBO_CLIENT_SECRET="your_client_secret"
-export QBO_REALM_ID="your_realm_id"  # QuickBooks Company ID
-export EPOS_USERNAME="your_username"
-export EPOS_PASSWORD="your_password"
-export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional: for pipeline notifications
-```
-
-Then reload: `source ~/.zshrc`
-
-> ⚠️ **Security:** The `.env` file is already in `.gitignore`, so it won't be committed. Never commit credentials to version control.
-
-### 3. Get Initial OAuth Tokens
-
-Before running the pipeline for the first time, you need to obtain initial OAuth tokens:
-
-1. **Perform OAuth Authorization Flow:**
-
-   - Use Intuit's OAuth playground or a custom script
-   - Authorize your app to access your QuickBooks company
-   - You'll receive an authorization code
-
-2. **Exchange Authorization Code for Tokens:**
-   - Exchange the authorization code for an access token and refresh token
-   - Save these tokens to `qbo_tokens.json`:
-
-```json
-{
-  "access_token": "your_access_token",
-  "refresh_token": "your_refresh_token",
-  "expires_at": 1700000000
-}
-```
-
-3. **Get Your Realm ID:**
-   - The Realm ID is your QuickBooks company ID
-   - Add it to your `.env` file as `QBO_REALM_ID` (or set as environment variable)
-   - Found in your QBO app settings or API responses
-
-### 4. Configure Payment Methods in QuickBooks
-
-Ensure your QuickBooks company has Payment Methods configured that match the tender values in your CSV. Common values include:
-
-- `Cash`
-- `Card`
-- `Transfer`
-- `Cash/Transfer`
-- `Card/Transfer`
-- `Card/Cash`
-- `Card/Cash/Transfer`
-
-The script maps these from the memo field to QuickBooks Payment Methods by name. You may need to update the `PAYMENT_METHOD_BY_NAME` dictionary in `qbo_upload.py` to match your specific Payment Method IDs.
-
-### 5. Verify `.gitignore` is Set Up
-
-A `.gitignore` file is included in the repository to exclude sensitive files. It includes:
-
-- `qbo_tokens.json` - QuickBooks OAuth tokens
-- `*.csv` - Temporary processing files
-- `last_epos_transform.json` - Processing metadata
-- `logs/` - Log files
-- `Uploaded/` - Archived files (optional)
-- Other common exclusions (Python cache, IDE files, etc.)
-
-> **Security Note:** The `.gitignore` file ensures sensitive credentials and tokens are never committed to version control. Always verify your credentials are set via environment variables, not hardcoded in source files.
-
----
-
-## QuickBooks Online Configuration
-
-The upload script uses the QuickBooks Online API and expects:
-
-- A **QuickBooks Developer app** (sandbox or production)
-- Valid **OAuth tokens** (access token and refresh token)
-- The **realm ID** for the QBO company you're connecting to
-- Pre‑configured **Payment Methods** in QBO that match the tender values used in the CSV
-- Pre‑configured **Items** (products/services) in QBO, or the script will use a default item
-
-The script maps the memo field (tender type) to QuickBooks Payment Methods by name and sends the corresponding `PaymentMethodRef` ID when creating each Sales Receipt.
-
-**Location/Department Support:**
-
-- The script automatically maps **Location** data from the CSV to QuickBooks **Departments** (shown as "Location" in the QBO UI)
-- If a location name from the CSV doesn't exist in QuickBooks, a warning is logged and the Sales Receipt is created without a Department reference
-- Ensure your QuickBooks company has Departments configured with names matching your CSV location values
-
-**Item Auto-Creation:**
-
-- By default, `AUTO_CREATE_ITEMS = True` in `qbo_upload.py`
-- If an item/product doesn't exist in QuickBooks, the script will automatically create it as a Service item
-- Items are cached during the run to avoid duplicate queries
-
-> ⚠️ **Important:** When using production credentials, be careful not to run the pipeline multiple times for the same day unless you intend to create duplicate Sales Receipts.
-
----
-
-## Token Refresh (OAuth2)
-
-The pipeline uses OAuth2 tokens to communicate with QuickBooks Online. Access tokens expire every 60 minutes, so the script supports automatic token refresh.
-
-### How Token Refresh Works
-
-- `qbo_auth.py` manages your **client ID**, **client secret**, and refresh-token logic
-- `qbo_upload.py` uses a `TokenManager` class that:
-  1. Fetches a valid access token once at the start of the run
-  2. Automatically detects 401 authentication errors during API calls
-  3. Refreshes the token using the refresh token
-  4. Updates the token state and retries the failed request
-  5. Uses the refreshed token for all subsequent requests
-
-This ensures efficient token management without redundant checks, and handles mid-run token expiry automatically.
-
-### Token Storage File (`qbo_tokens.json`)
-
-The script stores your current **access token** and **refresh token** inside a local JSON file named `qbo_tokens.json`.
-
-This file is automatically updated whenever:
-
-- A new access token is issued
-- A refresh token is exchanged for a new one
-
-Example structure:
-
-```json
-{
-  "access_token": "...",
-  "refresh_token": "...",
-  "expires_at": 1700000000
-}
-```
-
-#### Important Security Notes
-
-- This file **must be kept private** — add it to `.gitignore`
-- If `expires_at` is in the past, the upload script will automatically refresh the tokens
-- If the refresh token has expired (typically after ~100 days), you must manually perform a new OAuth authorization to regenerate tokens
-- **Never commit your tokens or credentials** to git
-- In production, always store credentials using environment variables or a secrets manager
+- `Uploaded/<date>/` — **Authoritative archive** after successful runs
+- `uploads/spill_raw/` — RAW spill files awaiting processing (temporary)
+- `uploads/range_raw/` — Split staging during processing (temporary, cleaned up)
+- `logs/` — Pipeline execution logs
 
 ---
 
 ## Folder Structure
 
-The expected structure under `code-scripts/` is roughly:
-
 ```text
 code-scripts/
-  epos_playwright.py
-  epos_playwright_custom.py
-  epos_to_qb_single.py
-  qbo_upload.py
-  qbo_auth.py
-  qbo_query.py
-  sales_recepit_script.py
-  run_pipeline.py
-  run_pipeline_custom.py
-  slack_notify.py
-  load_env.py
-  README.md
-
-  # Temporary files (during processing)
-  BookKeeping_YYYYMMDD_HHMMSS.csv        # downloaded by epos_playwright.py
-  single_sales_receipts_BookKeeping_....csv  # created by epos_to_qb_single.py
-  last_epos_transform.json                 # metadata for archiving
-
-  Uploaded/
-    2025-01-15/  # Standard pipeline (single date)
-      BookKeeping_20250115_120000.csv
-      single_sales_receipts_BookKeeping_....csv
-      last_epos_transform.json
-    2025-10-15 to 2025-10-17/  # Custom pipeline (date range)
-      BookKeeping_20251015_120000.csv
-      single_sales_receipts_BookKeeping_....csv
-      last_epos_transform.json
-
-  logs/
-    pipeline_YYYYMMDD-HHMMSS.log
+├── run_pipeline.py              # Main orchestrator
+├── epos_playwright.py           # EPOS download
+├── transform.py                 # CSV transformation
+├── qbo_upload.py                # QuickBooks upload
+├── company_config.py            # Company config loader
+├── companies/
+│   ├── company_a.json
+│   └── company_b.json
+│
+├── uploads/                     # TEMPORARY staging (ignored by git)
+│   ├── spill_raw/              # RAW spill files for future dates
+│   │   └── <CompanyDir>/
+│   │       └── BookKeeping_raw_spill_YYYY-MM-DD.csv
+│   └── range_raw/              # Split staging (cleaned after success)
+│       └── <CompanyDir>/
+│           └── <from>_to_<to>/
+│               ├── BookKeeping_YYYY-MM-DD.csv
+│               └── CombinedRaw_YYYY-MM-DD.csv
+│
+├── Uploaded/                    # AUTHORITATIVE archive (ignored by git)
+│   └── YYYY-MM-DD/
+│       ├── ORIGINAL_*.csv
+│       ├── RAW_SPLIT_*.csv
+│       ├── RAW_COMBINED_*.csv   # (if spill merged)
+│       ├── RAW_SPILL_*.csv      # (if spill used)
+│       ├── gp_sales_receipts_*.csv
+│       └── transform_metadata.json
+│
+└── logs/                        # Execution logs (ignored by git)
+    └── pipeline_YYYYMMDD-HHMMSS.log
 ```
-
-**Workflow:**
-
-1. Phase 1 downloads CSV to repo root
-2. Phase 2 processes CSV and saves to repo root + creates metadata
-3. Phase 3 uploads from repo root
-4. Phase 4 archives all files to `Uploaded/<date>/` after successful upload
-5. Phase 5 reconciles EPOS totals vs QBO totals to verify data integrity
-
-- `Uploaded/` folder structure is created automatically by Phase 4
-- `logs/` is created automatically by `run_pipeline.py` when logging is enabled
 
 ---
 
 ## Workflow Details
 
-### File Flow
+### Single-Day Mode
 
-1. **Download Phase:** EPOS CSV is downloaded directly to the repo root directory
-2. **Transform Phase:** Raw CSV is processed and output CSV is saved to repo root. Metadata file `last_epos_transform.json` is created with:
-   - Raw file path and name
-   - Processed file name(s)
-   - Normalized date extracted from CSV data
-   - Processing timestamp
-3. **Upload Phase:** Processed CSV is read from repo root and uploaded to QuickBooks
-4. **Archive Phase:** After successful upload, all files are moved to `Uploaded/<date>/`:
-   - Raw CSV file
-   - Processed CSV file(s)
-   - Metadata file (`last_epos_transform.json`)
-5. **Reconciliation Phase:** EPOS totals are compared against QBO totals for the processed date(s) to verify data integrity. Results are logged and sent via Slack notification.
+```bash
+python3 run_pipeline.py --company company_a --target-date 2025-12-28
+```
 
-The target date used for archiving is either:
-- The `--target-date` parameter provided (preferred)
-- The normalized date extracted from the CSV's `*SalesReceiptDate` column (fallback)
+**Flow:**
 
-This ensures files are organized by the intended business date rather than processing date.
+1. **Download:** EPOS CSV for 2025-12-28 → repo root
+2. **Split:** By WAT date
+   - Rows for 2025-12-28 → `uploads/range_raw/.../BookKeeping_2025-12-28.csv`
+   - Rows for 2025-12-29 → `uploads/spill_raw/.../BookKeeping_raw_spill_2025-12-29.csv`
+3. **Merge:** Check if RAW spill exists for 2025-12-28, merge if so
+4. **Transform:** Process merged/split file via `transform.py --raw-file ...`
+5. **Upload:** Send to QuickBooks
+6. **Archive:** Move all artifacts to `Uploaded/2025-12-28/`
+7. **Cleanup:** Remove staging dirs, archive original CSV from repo root
 
-**Multi-Date Spillover Handling:**
-When processing a target date, the pipeline:
-1. Filters rows by target date (using WAT timezone conversion)
-2. Separates spillover rows (from other dates) into `uploads/spill/BookKeeping_spill_YYYY-MM-DD.csv` files
-3. Checks for existing spill files matching the target date and merges them
-4. Processes all merged data together
-5. Archives used spill files to `Uploaded/<date>/` after successful upload
-6. Keeps future-date spill files in `uploads/spill/` for later processing
+### Range Mode
 
-This prevents duplicate uploads when spillover rows from one day's CSV are processed again on their actual date.
+```bash
+python3 run_pipeline.py --company company_b --from-date 2025-12-26 --to-date 2025-12-28
+```
+
+**Flow:**
+
+1. **Download:** EPOS CSV for full range → repo root
+2. **Split:** By WAT date (all days)
+   - Rows for 2025-12-26 → `uploads/range_raw/.../BookKeeping_2025-12-26.csv`
+   - Rows for 2025-12-27 → `uploads/range_raw/.../BookKeeping_2025-12-27.csv`
+   - Rows for 2025-12-28 → `uploads/range_raw/.../BookKeeping_2025-12-28.csv`
+   - Rows for 2025-12-29 → `uploads/spill_raw/.../BookKeeping_raw_spill_2025-12-29.csv`
+3. **Loop per day:** For each day in range:
+   - Check/merge RAW spill
+   - Transform
+   - Upload
+   - Archive
+4. **Final archive:** Archive range staging folder and original CSV
+
+### Timeline Example: RAW Spill Flow
+
+**Day 1: Process 2025-12-27**
+
+```
+Download EPOS → Contains rows: 12-27 (500 rows), 12-28 (23 rows)
+Split:
+  → BookKeeping_2025-12-27.csv (500 rows) → transform → upload → archive
+  → BookKeeping_raw_spill_2025-12-28.csv (23 rows) → stays in spill_raw/
+```
+
+**Day 2: Process 2025-12-28**
+
+```
+Download EPOS → Contains rows: 12-28 (480 rows), 12-29 (15 rows)
+Split:
+  → BookKeeping_2025-12-28.csv (480 rows)
+  → BookKeeping_raw_spill_2025-12-29.csv (15 rows) → stays in spill_raw/
+Merge: Found spill for 12-28! Merge 480 + 23 = 503 rows
+  → CombinedRaw_2025-12-28.csv (503 rows) → transform → upload → archive
+Archive: RAW_SPILL_BookKeeping_raw_spill_2025-12-28.csv moved to Uploaded/2025-12-28/
+```
 
 ---
 
-## Running the Full Pipeline
+## Slack Notifications
 
-### Standard Pipeline (Target Date)
+If `SLACK_WEBHOOK_URL` is configured, the pipeline sends:
 
-From the `code-scripts` directory, run:
+- **Start:** Pipeline beginning (includes date/range and company)
+- **Watchdog Update:** When RAW spills are created or merged (high-signal only)
+- **Success:** All phases completed with summary
+- **Failure:** Critical error with concise reason
 
-```bash
-# Process yesterday's data (default)
-python3 run_pipeline.py
+**Watchdog messages include:**
 
-# Process a specific date
-python3 run_pipeline.py --target-date 2025-12-24
-```
-
-**What happens:**
-1. Downloads CSV for the target date (or yesterday if not specified)
-2. Filters rows to only process the target date (handles timezone differences)
-3. Separates spillover rows (from other dates) into `uploads/spill/` files
-4. Checks for and merges existing spill files for the target date
-5. Uploads to QuickBooks with deduplication
-6. Archives all files including used spill files
-
-**Multi-Date Spillover Handling:**
-Due to timezone differences, EPOS CSV downloads for one date may include rows from adjacent dates. The pipeline automatically:
-- Filters rows by target date using WAT timezone conversion
-- Saves spillover rows (other dates) to `uploads/spill/BookKeeping_spill_YYYY-MM-DD.csv`
-- When processing a date, automatically checks for and merges existing spill files for that date
-- Archives spill files after successful upload
-
-### Windows Task Scheduler
-
-For automated scheduling on Windows, use the provided `run_pipeline.cmd` batch file:
-
-```batch
-@echo off
-setlocal
-
-set ROOT=C:\Users\MARVIN-DEV\Documents\Developer Projects\Scripts\Precious Oreva\AKPONORA
-cd /d "%ROOT%\code-scripts"
-
-call "%ROOT%\code-scripts\.venv\Scripts\activate.bat"
-
-python run_pipeline.py
-echo Pipeline exit code: %ERRORLEVEL%
-
-endlocal
-```
-
-**Setup:**
-1. Update the `ROOT` path in `run_pipeline.cmd` to match your project location
-2. Create a scheduled task in Windows Task Scheduler
-3. Set the action to run `run_pipeline.cmd`
-4. Configure your desired schedule (e.g., daily at a specific time)
-
-**Exit Codes:**
-- Exit code **0**: Pipeline succeeded (all phases completed)
-- Exit code **1**: Pipeline failed (critical error occurred)
-
-The pipeline includes reconciliation as Phase 5, so no separate reconciliation step is needed.
-
-### Custom Date Range Pipeline
-
-To process a specific date range:
-
-```bash
-python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
-```
-
-**Arguments:**
-
-- `--from-date`: Start date in `YYYY-MM-DD` format (required)
-- `--to-date`: End date in `YYYY-MM-DD` format (required)
-- `--target-date`: Optional target business date in `YYYY-MM-DD` format. If provided, filters rows to only this date (useful for handling spillover within a range)
-
-**Examples:**
-
-```bash
-# Single day
-python3 run_pipeline_custom.py --from-date 2025-12-13 --to-date 2025-12-13
-
-# Date range (processes all dates in range)
-python3 run_pipeline_custom.py --from-date 2025-12-01 --to-date 2025-12-05
-
-# Date range with target-date filtering (downloads range but processes only one date)
-python3 run_pipeline_custom.py --from-date 2025-12-24 --to-date 2025-12-26 --target-date 2025-12-25
-```
-
-**When to use `--target-date` with date ranges:**
-- When you want to download a date range but process only a specific date (e.g., to handle spillover from previous runs)
-- When testing spillover handling for a specific date
-
-### Pipeline Phases
-
-Both pipelines run the same five phases:
-
-1. **Phase 1:** Launch Playwright and download EPOS BookKeeping CSV to the repo root.
-2. **Phase 2:** Transform the raw CSV into a single QuickBooks‑ready CSV in the repo root, and create metadata file.
-3. **Phase 3:** Upload Sales Receipts into QuickBooks via the API.
-4. **Phase 4:** Archive all processed files (raw CSV, processed CSV, and metadata) to `Uploaded/<date>/` folder.
-5. **Phase 5:** Reconcile EPOS totals vs QBO totals to verify data integrity. Compares receipt counts and total amounts.
-
-### Error Handling
-
-- If any critical step fails (for example, EPOS login changes or the API token is expired), the pipeline will stop and send a failure notification to Slack (if configured).
-- **Note:** If archiving (Phase 4) fails, the pipeline will log a warning but continue since the upload was successful.
-- **Note:** If reconciliation (Phase 5) fails, the pipeline will log a warning but continue since the upload was successful.
-- Sales Receipt upload failures are now properly detected and will stop the pipeline before archiving.
-- Pipeline returns exit code **0** on success, **1** on failure, making it suitable for automated scheduling (e.g., Windows Task Scheduler).
-
-### Slack Notifications
-
-If `SLACK_WEBHOOK_URL` is set in your environment or `.env` file, the pipeline will send notifications:
-
-- **Start:** When the pipeline begins (includes date range for custom pipeline)
-- **Success:** When all phases complete successfully
-- **Failure:** When any critical phase fails (includes concise error reason)
-- **Reconciliation:** Phase 5 automatically sends reconciliation results via Slack (includes match/mismatch status, totals, and difference)
-
-Failure notifications automatically extract and display user-friendly error reasons instead of full tracebacks. Common error types detected include:
-- Token authentication errors (invalid/expired refresh tokens)
-- Missing credentials (CLIENT_ID, CLIENT_SECRET, REALM_ID)
-- File not found errors
-- Network/API errors (connection issues, rate limits, auth failures)
-- Phase-specific failures
-
-Notifications include the log file name and date range (for custom pipeline) for easy debugging. Full error details are always available in the log files.
+- Future RAW spill creation: `"Future raw spill: 2025-12-29 (23 rows)"`
+- RAW spill merge: `"2025-12-28: merged target split (480 rows) + raw spill (23 rows) -> final (503 rows)"`
 
 ---
 
-## QuickBooks Query Tool
+## Requirements
 
-The `qbo_query.py` script provides a unified interface for querying and managing QuickBooks data. It supports multiple operations through subcommands.
+- **Python 3.9+**
+- **EPOS Now HQ** account credentials
+- **QuickBooks Online** account with Developer app access
 
-### Commands
-
-#### Count SalesReceipts
-
-Count the number of SalesReceipts for a date or date range:
+### Install
 
 ```bash
-# Single date
-python3 qbo_query.py count 2025-10-19
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate  # macOS/Linux
+# .\.venv\Scripts\Activate.ps1  # Windows
 
-# Date range
-python3 qbo_query.py count 2025-10-15 2025-10-17
+# Install dependencies
+pip install -r requirements.txt
+
+# Install Playwright browser
+playwright install chromium
 ```
 
-#### List SalesReceipts
+---
 
-List SalesReceipts with details (supports pagination):
+## Initial Setup
+
+### 1. Configure Credentials
+
+Copy and edit the environment file:
 
 ```bash
-# Single date (shows first 100)
-python3 qbo_query.py list 2025-10-19
-
-# Date range with custom limit
-python3 qbo_query.py list 2025-10-15 2025-10-17 --max-results 50
+cp .env.example .env
 ```
 
-#### Delete SalesReceipts
+Required variables:
 
-Delete SalesReceipts for a date or date range (with confirmation):
+```
+# QuickBooks OAuth credentials (shared across all companies)
+QBO_CLIENT_ID=your_client_id
+QBO_CLIENT_SECRET=your_client_secret
 
-```bash
-# Single date (will prompt for confirmation)
-python3 qbo_query.py delete 2025-10-19
+# EPOS credentials (company-specific)
+EPOS_USERNAME_A=your_epos_username_for_company_a
+EPOS_PASSWORD_A=your_epos_password_for_company_a
+EPOS_USERNAME_B=your_epos_username_for_company_b
+EPOS_PASSWORD_B=your_epos_password_for_company_b
 
-# Date range (will prompt for confirmation)
-python3 qbo_query.py delete 2025-10-15 2025-10-17
-
-# Skip confirmation prompt
-python3 qbo_query.py delete 2025-10-15 2025-10-17 --yes
+# Slack webhooks (optional, company-specific)
+SLACK_WEBHOOK_URL_A=your_slack_webhook_for_company_a  # Optional
+SLACK_WEBHOOK_URL_B=your_slack_webhook_for_company_b  # Optional
 ```
 
-**⚠️ Warning:** Deletion is permanent. The script will:
-- Show a preview of receipts to be deleted
-- Ask for confirmation (unless `--yes` is used)
-- Send a Slack notification when deletion completes (if `SLACK_WEBHOOK_URL` is configured)
+**Note:** `QBO_REALM_ID` is **not** required as an environment variable. Realm IDs are configured per-company in `companies/company_a.json` and `companies/company_b.json`.
 
-#### Execute Custom Query
+### 2. Get Initial OAuth Tokens
 
-Run any custom QuickBooks query:
+The pipeline uses `qbo_tokens.sqlite` to store OAuth tokens, isolated by company and realm_id.
 
-```bash
-python3 qbo_query.py query "SELECT * FROM Customer MAXRESULTS 10"
+**For each company:**
+
+1. Perform OAuth flow via Intuit's OAuth playground or your OAuth implementation
+2. Store tokens using `token_manager.store_tokens_from_oauth()`:
+
+```python
+from token_manager import store_tokens_from_oauth
+from company_config import load_company_config
+
+# Load company config to get realm_id
+config = load_company_config("company_a")  # or "company_b"
+
+# Store tokens from OAuth response
+store_tokens_from_oauth(
+    company_key=config.company_key,
+    realm_id=config.realm_id,
+    access_token="your_access_token",
+    refresh_token="your_refresh_token",
+    expires_in=3600,  # seconds
+    environment="production"  # or "sandbox"
+)
 ```
 
-#### Reconcile EPOS vs QBO Totals
+**Alternative:** Create a simple script to store tokens:
 
-Reconcile EPOS totals against QBO totals for a date or date range:
+```python
+# store_tokens.py
+import sys
+from token_manager import store_tokens_from_oauth
+from company_config import load_company_config
 
-```bash
-# Single date
-python3 qbo_query.py reconcile --from-date 2025-10-19
+if len(sys.argv) < 5:
+    print("Usage: python store_tokens.py <company_key> <access_token> <refresh_token> <expires_in>")
+    sys.exit(1)
 
-# Yesterday (convenience flag)
-python3 qbo_query.py reconcile --yesterday
+company_key = sys.argv[1]
+config = load_company_config(company_key)
 
-# Date range
-python3 qbo_query.py reconcile --from-date 2025-10-15 --to-date 2025-10-17
+store_tokens_from_oauth(
+    company_key=company_key,
+    realm_id=config.realm_id,
+    access_token=sys.argv[2],
+    refresh_token=sys.argv[3],
+    expires_in=int(sys.argv[4])
+)
 
-# With tolerance (allow small differences)
-python3 qbo_query.py reconcile --from-date 2025-10-19 --tolerance 0.01
+print(f"Tokens stored for {company_key} (realm_id: {config.realm_id})")
 ```
 
-**Features:**
-- Compares receipt counts and total amounts between EPOS and QBO
-- Automatically finds EPOS files from `Uploaded/` folders or repo root metadata
-- Sends Slack notification with reconciliation results
-- Shows match/mismatch status and difference amount
-- Supports tolerance for small rounding differences
+**Adding a second company:** Simply run the OAuth flow again for the new company and store tokens using the same function with the new company's `company_key` and `realm_id`. The SQLite database stores tokens separately per company.
 
-**Note:** Reconciliation is automatically run as Phase 5 of the pipeline, so manual reconciliation is typically only needed for troubleshooting or historical verification.
+### 3. Verify .gitignore
 
-### Features
+Ensure these are ignored:
 
-- **Pagination Support:** Automatically handles queries that return more than 1000 results
-- **Date Range Support:** All date-based commands support single dates or date ranges
-- **Slack Integration:** Delete and reconcile operations send notifications on completion
-- **Environment Variables:** Uses `QBO_REALM_ID` from `.env` or environment variables
-- **Automatic Reconciliation:** Reconciliation runs automatically as Phase 5 of the pipeline
+- `qbo_tokens.sqlite` — OAuth tokens database (SQLite)
+- `*.sqlite-wal`, `*.sqlite-shm` — SQLite sidecar files
+- `.env` — Credentials
+- `uploads/` — Temporary staging
+- `Uploaded/` — Archive
+- `logs/` — Execution logs
+- `*.csv` — Processing files
 
-### Common Use Cases
+---
 
-**Before re-uploading data:**
-1. Count receipts: `python3 qbo_query.py count 2025-10-19`
-2. Delete receipts: `python3 qbo_query.py delete 2025-10-19`
-3. Run pipeline: `python3 run_pipeline_custom.py --from-date 2025-10-19 --to-date 2025-10-19`
+## Adding a New Company
 
-**Probe data:**
-```bash
-# See what receipts exist for a date range
-python3 qbo_query.py list 2025-10-15 2025-10-17 --max-results 20
-```
+The pipeline supports multiple companies, each with its own configuration file. Company configs use a **flexible schema** — different companies may have different fields depending on their requirements (tax modes, location mapping, etc.).
+
+### Step-by-Step: Adding `company_c`
+
+1. **Copy the template:**
+
+   ```bash
+   cp companies/company.example.json companies/company_c.json
+   ```
+
+2. **Edit `companies/company_c.json` and update required fields:**
+
+   **Required (minimum viable schema):**
+
+   - `company_key`: `"company_c"` (must match filename)
+   - `qbo.realm_id`: Your QBO Realm ID (replace `"REPLACE_WITH_YOUR_REALM_ID"`)
+   - `qbo.deposit_account`: Your deposit account name (e.g., `"100900 - Undeposited Funds"`)
+   - `epos.username_env_key`: Environment variable name (e.g., `"EPOS_USERNAME_C"`)
+   - `epos.password_env_key`: Environment variable name (e.g., `"EPOS_PASSWORD_C"`)
+   - `transform.group_by`: Choose grouping strategy:
+     - `["date", "tender"]` — Simple grouping (like Company A)
+     - `["date", "location", "tender"]` — Location-aware grouping (like Company B)
+   - `transform.date_format`: Date format string (e.g., `"%Y-%m-%d"` or `"%d/%m/%Y"`)
+   - `transform.receipt_prefix`: Receipt prefix (e.g., `"SR"`)
+   - `transform.receipt_number_format`: Choose format:
+     - `"date_tender_sequence"` — For simple grouping (SR-YYYYMMDD-SEQ)
+     - `"date_location_sequence"` — For location-aware grouping (SR-YYYYMMDD-LOC-SEQ)
+   - `output.csv_prefix`: Unique prefix for CSV files (e.g., `"sales_receipts"`)
+   - `output.metadata_file`: Unique metadata filename (e.g., `"last_transform.json"`)
+   - `output.uploaded_docnumbers_file`: Unique ledger filename (e.g., `"uploaded_docnumbers.json"`)
+
+   > **Note:** `metadata_file` and `uploaded_docnumbers_file` are per-company state files. They may differ between companies depending on transform logic and should remain unique. For example, Company A uses `last_epos_transform.json` while Company B uses `last_gp_transform.json` — this prevents state file conflicts when running the pipeline for different companies.
+
+   **Optional fields (configure as needed):**
+
+   - `display_name`: Human-readable company name (defaults to `company_key` if omitted)
+   - `qbo.tax_mode`:
+     - `"vat_inclusive_7_5"` (default) — Single-rate VAT
+     - `"tax_inclusive_composite"` — Multi-component tax (requires `tax_components`)
+   - `qbo.tax_rate`: Tax rate as decimal (defaults to `0.075` if omitted)
+   - `qbo.tax_code_id`: QBO Tax Code ID (optional, used if provided)
+   - `qbo.tax_code_name`: Tax code name to query from QBO (optional)
+   - `qbo.tax_rate_id`: QBO Tax Rate ID (required for `vat_inclusive_7_5` mode if `tax_code_id` not set)
+   - `qbo.default_item_id`: Default item ID (defaults to `"1"`)
+   - `qbo.default_income_account_id`: Default income account ID (defaults to `"1"`)
+   - `qbo.department_mapping`: Maps location names to QBO Department IDs (empty object `{}` if not needed)
+   - `transform.location_mapping`: Maps EPOS location names to location codes (empty object `{}` if not needed)
+   - `slack.webhook_url_env_key`: Environment variable name or direct URL for Slack notifications (entire `slack` section optional)
+
+   **Conditional fields (required only for specific tax modes):**
+
+   - `qbo.tax_components`: **Required only if `tax_mode == "tax_inclusive_composite"`**. Array of tax components:
+     ```json
+     "tax_components": [
+       {"name": "VAT", "rate": 0.075, "tax_rate_id": "17"},
+       {"name": "Lagos State", "rate": 0.05, "tax_rate_id": "30"}
+     ]
+     ```
+
+3. **Add environment variables to `.env`:**
+
+   ```bash
+   EPOS_USERNAME_C=your_epos_username
+   EPOS_PASSWORD_C=your_epos_password
+   SLACK_WEBHOOK_URL_C=your_slack_webhook_url  # Optional
+   ```
+
+4. **Authorize QBO tokens:**
+
+   Follow the OAuth flow (see [Initial Setup](#2-get-initial-oauth-tokens)) and store tokens for `company_c`:
+
+   ```python
+   from token_manager import store_tokens_from_oauth
+   from company_config import load_company_config
+
+   config = load_company_config("company_c")
+   store_tokens_from_oauth(
+       company_key="company_c",
+       realm_id=config.realm_id,
+       access_token="your_access_token",
+       refresh_token="your_refresh_token",
+       expires_in=3600
+   )
+   ```
+
+5. **Test the configuration:**
+
+   ```bash
+   python3 run_pipeline.py --company company_c --target-date 2025-01-01
+   ```
+
+### Configuration Schema Notes
+
+- **Flexible schema:** Company configs may vary — some companies need `department_mapping`, others don't. The code handles missing optional fields gracefully.
+- **Tax mode differences:**
+  - `vat_inclusive_7_5`: Single tax rate, requires `tax_code_id` or `tax_rate_id`
+  - `tax_inclusive_composite`: Multiple tax components, requires `tax_components` array
+- **Location handling:**
+  - If `group_by` includes `"location"`, you'll likely need `location_mapping` to map EPOS locations to codes
+  - If `receipt_number_format == "date_location_sequence"`, location codes are used in receipt numbers
+- **All company config files are committed to git** (they contain no secrets, only configuration and environment variable key names)
 
 ---
 
 ## Troubleshooting
 
-### Missing Environment Variables
+### RAW Spill Not Being Merged
 
-- **Symptom:** `EPOS_USERNAME environment variable is not set` or `QBO_CLIENT_ID environment variable is not set`
-- **Solutions:**
-  - **Easiest:** Use a `.env` file (recommended):
-    1. Copy the example: `cp .env.example .env`
-    2. Edit `.env` and add your credentials (including `QBO_REALM_ID`)
-    3. Run the pipeline - it will automatically load from `.env`
-  - **Alternative:** Set environment variables:
-    ```bash
-    export QBO_CLIENT_ID="your_client_id"
-    export QBO_CLIENT_SECRET="your_client_secret"
-    export QBO_REALM_ID="your_realm_id"
-    export EPOS_USERNAME="your_username"
-    export EPOS_PASSWORD="your_password"
-    export SLACK_WEBHOOK_URL="your_slack_webhook_url"  # Optional
-    ```
-  - For persistent setup, add to your shell profile (`~/.zshrc` or `~/.bashrc`)
-  - Verify variables are set: `echo $QBO_CLIENT_ID` or check your `.env` file
-
-### EPOS Login Fails
-
-- **Symptom:** Playwright script fails to log in or download CSV
-- **Solutions:**
-  - Verify EPOS credentials are set correctly via environment variables
-  - Check if EPOS website structure has changed (may require updating Playwright selectors)
-  - Ensure browser can access the EPOS website (check network/firewall)
-  - Try running with `headless=False` to see what's happening
-
-### QuickBooks Token Errors
-
-- **Symptom:** `qbo_tokens.json not found or empty` or `No refresh_token found`
-- **Solutions:**
-  - Ensure `qbo_tokens.json` exists with valid `access_token` and `refresh_token`
-  - Re-run OAuth authorization flow to get new tokens
-  - Check that `QBO_CLIENT_ID` and `QBO_CLIENT_SECRET` are set correctly
-
-### Token Refresh Fails
-
-- **Symptom:** `Failed to refresh access token` error
-- **Solutions:**
-  - Refresh token may have expired (~100 days) — re-authorize to get new tokens
-  - Verify `CLIENT_ID` and `CLIENT_SECRET` are correct
-  - Check network connectivity to Intuit OAuth endpoint
-
-### QuickBooks API Errors
-
-- **Symptom:** 401 Unauthorized, 403 Forbidden, or other API errors
-- **Solutions:**
-  - Verify `QBO_REALM_ID` in your `.env` file or environment variables matches your QuickBooks company
-  - Check that your app has the correct permissions/scopes
-  - Ensure tokens are valid (check `expires_at` in `qbo_tokens.json`)
-  - For sandbox, verify you're using sandbox credentials and sandbox company
-  - **Note:** The script automatically refreshes tokens on 401 errors, so if you see a 401, it will retry once with a fresh token. If it still fails, check your credentials.
-
-### Sales Receipt Upload Failures
-
-- **Symptom:** Pipeline continues even when Sales Receipt uploads fail
-- **Solution:** This has been fixed! The pipeline now properly validates API responses and will stop with an error if any Sales Receipt fails to upload. Check the error message for details about what went wrong (missing items, invalid data, etc.)
-
-### Payment Method Mapping Errors
-
-- **Symptom:** Sales Receipts created but payment method is wrong or missing
-- **Solutions:**
-  - Verify Payment Methods exist in QuickBooks with exact names matching CSV values
-  - Update `PAYMENT_METHOD_BY_NAME` dictionary in `qbo_upload.py` with correct Payment Method IDs
-  - Check CSV memo/tender column values match expected format
-
-### Location/Department Not Appearing
-
-- **Symptom:** Sales Receipts created but Location field is empty in QuickBooks
-- **Solutions:**
-  - Verify Departments exist in QuickBooks with names matching your CSV "Location" column values
-  - Check that the Location column is present in your processed CSV
-  - If a location name doesn't match exactly, the script will log a warning and continue without the Department reference
-
-### CSV Processing Errors
-
-- **Symptom:** `No raw CSV files found` or transformation errors
-- **Solutions:**
-  - Ensure repo root contains raw CSV files (downloaded by Phase 1)
-  - Verify CSV file format matches expected EPOS BookKeeping format
-  - Check that `sales_recepit_script.py` is present (required dependency)
-  - If files were already archived, they'll be in `Uploaded/<date>/` folders
+- Verify spill file exists: `uploads/spill_raw/<CompanyDir>/BookKeeping_raw_spill_YYYY-MM-DD.csv`
+- File name must match target date exactly
+- Check logs for "Found raw spill file for..." message
 
 ### Duplicate Sales Receipts
 
-- **Symptom:** Running pipeline multiple times creates duplicate entries
-- **Solutions:**
-  - The pipeline now includes **automatic deduplication**:
-    - **Layer A**: Local ledger (`uploaded_docnumbers.json`) tracks successfully uploaded DocNumbers
-    - **Layer B**: Bulk QBO API queries check for existing SalesReceipts before uploading
-  - Duplicate DocNumbers are automatically skipped with a log message
-  - If you need to re-upload, delete existing receipts first using `qbo_query.py delete`
-  - For testing, use QuickBooks Sandbox to avoid production data issues
+The pipeline includes automatic deduplication:
 
-### Spillover Files Not Being Created
+- **Layer A:** Local ledger (`uploaded_docnumbers.json`)
+- **Layer B:** Bulk QBO API check before upload
 
-- **Symptom:** No spill files appear in `uploads/spill/` folder
-- **Solutions:**
-  - Verify that the CSV actually contains rows from multiple dates (check date distribution in logs)
-  - Ensure `--target-date` is provided when running the pipeline
-  - Check that spillover rows exist (rows with dates different from target date)
-  - Spill files are only created when there are rows from dates other than the target date
+If you need to re-upload, delete existing receipts first using `query_qbo_for_company.py`.
 
-### Spill Files Not Being Merged
+### Token Refresh Fails
 
-- **Symptom:** Spill files exist but aren't being merged when processing target date
-- **Solutions:**
-  - Verify spill file naming: `BookKeeping_spill_YYYY-MM-DD.csv` (must match target date exactly)
-  - Check that `--target-date` matches the date in the spill filename
-  - Ensure spill files are in `uploads/spill/` directory (relative to repo root)
-  - Check logs for "Found existing spill file" messages
+- Refresh tokens expire after ~100 days
+- Re-authorize via OAuth flow to get new tokens and store using `store_tokens_from_oauth()`
+- Verify `QBO_CLIENT_ID` and `QBO_CLIENT_SECRET` are correct in `.env`
+- Check that tokens exist in `qbo_tokens.sqlite` for the company/realm_id combination
+
+### Missing Environment Variables
+
+```bash
+# Check if set
+echo $QBO_CLIENT_ID
+
+# Use .env file (recommended) or export directly
+export QBO_CLIENT_ID="your_id"
+```
 
 ---
 
 ## Security Best Practices
 
-- **Environment Variables:** All credentials (QuickBooks, EPOS, and Slack) must be set via environment variables or `.env` file. Never hardcode credentials in source files.
-- **Token File Protection:** The `qbo_tokens.json` file is automatically created with restricted file permissions (owner read/write only, 0o600) for security.
-- **Version Control:** The `.gitignore` file ensures sensitive files are never committed. Always verify credentials are not in source code before committing.
-- **Production:** For production deployments, use a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) instead of environment variables.
-- **Token Rotation:** Refresh tokens expire after ~100 days. Plan to re-authorize periodically.
-- **Archive Safety:** The archive function includes safety checks to prevent accidentally moving the repository root directory. Invalid file paths in metadata are skipped with warnings.
+- **Credentials:** Use `.env` file or environment variables, never hardcode
+- **Tokens:** `qbo_tokens.sqlite` is auto-created with restricted permissions (0o600)
+- **Git:** `.gitignore` excludes all sensitive files (including `qbo_tokens.sqlite` and SQLite sidecar files)
+- **Production:** Use a secrets manager (AWS Secrets Manager, HashiCorp Vault)
+
+---
+
+## Design Notes
+
+### Why Transformed Spill Logic Was Removed
+
+The original design had `transform.py` creating "transformed spill" files for non-target-date rows. This was removed because:
+
+1. **Double-handling risk:** Rows could be processed twice (once in spill, once in target date)
+2. **Complexity:** Spill merging logic in transform made it stateful and harder to debug
+3. **Date accounting:** Hard to track which rows were processed when
+
+The RAW-first approach is simpler: split at the raw level, merge at the raw level, transform only sees target-date rows.
+
+### Why RAW-First Is Safer
+
+- **Single source of truth:** Date filtering happens once, at download time
+- **Immutable spill files:** RAW spill files are never modified, only archived
+- **Clear lifecycle:** Create → Await → Merge → Archive
+- **Stateless transform:** `transform.py` has no knowledge of spills
+
+---
 
 ## Notes
 
-- For development and testing, it's recommended to start with a **QuickBooks sandbox company** before pointing the pipeline at a live production company.
-- The pipeline processes the **latest** raw CSV file in the repo root (excluding processed files), so ensure you're working with the correct files if multiple exist.
-- Files are automatically archived after successful upload to keep the repo root clean. Archived files are organized by date in `Uploaded/<date>/` folders.
-- The `last_epos_transform.json` metadata file tracks which files were processed and their normalized date for proper archiving.
+- Start with a **QuickBooks sandbox** before using production credentials
+- Files are automatically archived after success — check `Uploaded/<date>/` if looking for processed data
+- The pipeline cleans up staging directories after success — `uploads/range_raw/` should be empty
+- RAW spill files stay in `uploads/spill_raw/` until their date is processed

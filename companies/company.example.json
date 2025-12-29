@@ -1,0 +1,37 @@
+{
+  "company_key": "company_example",
+  "display_name": "Your Company Name Here",
+  "qbo": {
+    "realm_id": "REPLACE_WITH_YOUR_REALM_ID",
+    "deposit_account": "REPLACE_WITH_DEPOSIT_ACCOUNT_NAME",
+    "tax_mode": "vat_inclusive_7_5",
+    "tax_rate": 0.075,
+    "tax_code_id": "REPLACE_WITH_TAX_CODE_ID",
+    "tax_rate_id": "REPLACE_WITH_TAX_RATE_ID",
+    "tax_code_name": null,
+    "tax_components": [],
+    "default_item_id": "1",
+    "default_income_account_id": "1",
+    "department_mapping": {}
+  },
+  "epos": {
+    "username_env_key": "EPOS_USERNAME_EXAMPLE",
+    "password_env_key": "EPOS_PASSWORD_EXAMPLE"
+  },
+  "transform": {
+    "group_by": ["date", "tender"],
+    "date_format": "%Y-%m-%d",
+    "receipt_prefix": "SR",
+    "receipt_number_format": "date_tender_sequence",
+    "location_mapping": {}
+  },
+  "output": {
+    "csv_prefix": "sales_receipts",
+    "metadata_file": "last_transform.json",
+    "uploaded_docnumbers_file": "uploaded_docnumbers.json"
+  },
+  "slack": {
+    "webhook_url_env_key": "SLACK_WEBHOOK_URL_EXAMPLE"
+  }
+}
+
