@@ -72,6 +72,35 @@ That's it! The pipeline will download, split, transform, upload, archive, and re
 
 ---
 
+## Running the Pipeline for All Companies (Daily Run)
+
+The `run_all_companies.py` script orchestrates running the pipeline for all configured companies in sequence. It's designed for daily automation via cron or Task Scheduler.
+
+**What it does:**
+
+- Runs `run_pipeline.py` once per configured company
+- Uses the pipeline's default behavior (processes "yesterday" if no date is supplied)
+- Automatically discovers companies via `get_available_companies()`
+- Explicitly ignores template/example configs (e.g., `company_example`)
+
+**Usage:**
+
+```bash
+python run_all_companies.py
+```
+
+**Failure behavior:**
+
+- If one company fails, execution stops immediately
+- This is intentional to avoid silent partial failures
+- Each company still emits its own Slack notifications (if configured)
+
+**Design note:**
+
+This script is intentionally thin — all business logic remains in `run_pipeline.py`. This makes it suitable for cron / Task Scheduler / daily automation where you want a single entry point that processes all companies sequentially.
+
+---
+
 ## Architecture Overview
 
 ### RAW-First Processing
