@@ -1,0 +1,68 @@
+{
+  "company_key": "company_b",
+  "display_name": "GOLDPLATES FEASTHOUSE LTD.",
+  "qbo": {
+    "realm_id": "9130357766900456",
+    "deposit_account": "1250000 - Undeposited Funds",
+    "tax_mode": "tax_inclusive_composite",
+    "tax_code_id": "22",
+    "tax_code_name": "Sales tax",
+    "tax_rate": 0.125,
+    "tax_components": [
+      {"name": "VAT", "rate": 0.075, "tax_rate_id": "17"},
+      {"name": "Lagos State", "rate": 0.05, "tax_rate_id": "30"}
+    ],
+    "default_item_id": "39",
+    "default_income_account_id": "421",
+    "department_mapping": {
+      "1004 (VI)": "10",
+      "Bask Lounge (Chevron)": "25",
+      "Hotel (Ayangbure)": "17",
+      "Lounge (Ayangbure)": "18",
+      "Main Restaurant (Ayangbure)": "13",
+      "Main Restaurant (Dream Park)": "15",
+      "Shawarma Stand (Ayangbure)": "12",
+      "Shawarma Stand (Chevron)": "26",
+      "Shawarma Stand (Dream Park)": "16",
+      "TALEA MALL (MAIN)": "28",
+      "Club (Ayangbure)": "14",
+      "MAIN STORE (C.L.H)": "22",
+      "MAIN STORE (HQ)": "20",
+      "MAIN STORE (IKORODU)": "21",
+      "Marble Garden Plaza": "11",
+      "Pastry Pay Point (Chevron)": "27"
+    }
+  },
+  "epos": {
+    "username_env_key": "EPOS_USERNAME_B",
+    "password_env_key": "EPOS_PASSWORD_B"
+  },
+  "transform": {
+    "group_by": ["date", "location", "tender"],
+    "date_format": "%d/%m/%Y",
+    "receipt_prefix": "SR",
+    "receipt_number_format": "date_location_sequence",
+    "location_mapping": {
+      "TALEA MALL REST (CHEVRON)": "TALE",
+      "1004 (VI)": "VI04",
+      "AYANGBURE (MAIN)": "AYMN",
+      "AYANGBURE STAND": "AYST",
+      "DREAM PARK (MAIN)": "DPKM",
+      "DREAM PARK STAND": "DPKS",
+      "CLUB (AYANGBURE)": "CLAY",
+      "HOTEL (AYANGBURE)": "HTAY",
+      "LOUNGE (AYANGBURE)": "LGAY",
+      "BASK LOUNGE (CHEVRON)": "BSKC",
+      "SHAWARMA STAND (CHEVRON)": "SHWC",
+      "PASTRY PAY POINT (CHEVRON)": "PSTR"
+    }
+  },
+  "output": {
+    "csv_prefix": "gp_sales_receipts",
+    "metadata_file": "last_gp_transform.json",
+    "uploaded_docnumbers_file": "uploaded_docnumbers_gp.json"
+  },
+  "slack": {
+    "webhook_url_env_key": "SLACK_WEBHOOK_URL_B"
+  }
+}

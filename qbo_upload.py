@@ -3,33 +3,29 @@ from __future__ import annotations
 import os
 import glob
 import json
+import argparse
+import sys
 from typing import Optional, Dict, Callable, Any
 from urllib.parse import quote
 from datetime import datetime
 
 import pandas as pd
 import requests
-from qbo_auth import get_access_token, refresh_access_token, load_tokens, save_tokens
 from load_env import load_env_file
+from company_config import load_company_config, get_available_companies
+from token_manager import get_access_token, refresh_access_token, verify_realm_match
 
-# Load .env if present so QBO_* vars are available
+# Load .env if present so QBO_* vars are available (shared secrets only)
 load_env_file()
 
-# === CONFIG: QBO company info (auth is handled in qbo_auth.py) ===
-try:
-    REALM_ID = os.environ["QBO_REALM_ID"]  # QBO Company ID as string
-except KeyError:
-    raise RuntimeError(
-        "QBO_REALM_ID environment variable is not set. "
-        "Set it in your environment or .env file."
-    )
 BASE_URL = "https://quickbooks.api.intuit.com"
 
 # Tax code id for your 7.5% VAT ("7.5% S")
 TAX_CODE_ID = "2"
 
-# Map our tender/memo text to QBO PaymentMethod IDs (from your latest query)
-PAYMENT_METHOD_BY_NAME = {
+# Legacy PaymentMethod mapping (Company A) - kept for backward compatibility
+# Note: PaymentMethods are now queried from QBO by name per company
+LEGACY_PAYMENT_METHOD_BY_NAME = {
     "Card": "5",
     "Cash": "1",
     "Cash/Transfer": "8",
@@ -69,9 +65,9 @@ def get_repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def load_uploaded_docnumbers(repo_root: str) -> set:
+def load_uploaded_docnumbers(repo_root: str, config) -> set:
     """Load set of DocNumbers that have been successfully uploaded."""
-    ledger_path = os.path.join(repo_root, "uploaded_docnumbers.json")
+    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
     if not os.path.exists(ledger_path):
         return set()
     
@@ -80,16 +76,16 @@ def load_uploaded_docnumbers(repo_root: str) -> set:
             data = json.load(f)
             return set(data.get("docnumbers", []))
     except Exception as e:
-        print(f"[WARN] Failed to load uploaded_docnumbers.json: {e}")
+        print(f"[WARN] Failed to load {config.uploaded_docnumbers_file}: {e}")
         return set()
 
 
-def save_uploaded_docnumber(repo_root: str, docnumber: str) -> None:
+def save_uploaded_docnumber(repo_root: str, docnumber: str, config) -> None:
     """Add a DocNumber to the uploaded ledger."""
-    ledger_path = os.path.join(repo_root, "uploaded_docnumbers.json")
+    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
     
     # Load existing
-    docnumbers = load_uploaded_docnumbers(repo_root)
+    docnumbers = load_uploaded_docnumbers(repo_root, config)
     docnumbers.add(docnumber)
     
     # Save back
@@ -102,12 +98,13 @@ def save_uploaded_docnumber(repo_root: str, docnumber: str) -> None:
         with open(ledger_path, "w") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"[WARN] Failed to save uploaded_docnumbers.json: {e}")
+        print(f"[WARN] Failed to save {config.uploaded_docnumbers_file}: {e}")
 
 
 def check_qbo_existing_docnumbers(
     docnumbers: list[str],
     token_mgr: TokenManager,
+    realm_id: str,
     batch_size: int = 50
 ) -> set:
     """
@@ -122,7 +119,7 @@ def check_qbo_existing_docnumbers(
         # Build query: select Id, DocNumber from SalesReceipt where DocNumber in ('SR-...', 'SR-...', ...)
         docnumber_list = "', '".join(d.replace("'", "''") for d in batch)
         query = f"select Id, DocNumber from SalesReceipt where DocNumber in ('{docnumber_list}')"
-        url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
+        url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
         
         resp = _make_qbo_request("GET", url, token_mgr)
         if resp.status_code == 200:
@@ -139,29 +136,92 @@ def check_qbo_existing_docnumbers(
     return existing
 
 
-def find_latest_single_csv(repo_root: str) -> str:
+def find_latest_single_csv(repo_root: str, config) -> str:
     """
-    Find the most recently modified single_sales_receipts_*.csv file
-    in repo root.
+    Find the most recently modified CSV file matching company's prefix pattern.
     """
-    pattern = os.path.join(repo_root, "single_sales_receipts_*.csv")
+    pattern = os.path.join(repo_root, f"{config.csv_prefix}_*.csv")
     files = glob.glob(pattern)
     if not files:
         raise FileNotFoundError(
-            f"No single_sales_receipts_*.csv files found in {repo_root}"
+            f"No {config.csv_prefix}_*.csv files found in {repo_root}"
         )
     return max(files, key=os.path.getmtime)
 
 
-def infer_payment_method_id(memo: str) -> Optional[str]:
+def get_payment_method_id_by_name(name: str, token_mgr: TokenManager, realm_id: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """
+    Resolve a PaymentMethod name to a PaymentMethod Id with simple caching.
+    
+    - If the name exists in cache, reuse its Id.
+    - Otherwise, try a QBO query by Name.
+    - Returns None if payment method not found or name is empty.
+    """
+    if not name or not name.strip():
+        return None
+    
+    name_clean = name.strip()
+    if name_clean in cache:
+        return cache[name_clean]
+    
+    safe_name = name_clean.replace("'", "''")
+    query = f"select Id, Name from PaymentMethod where Name = '{safe_name}'"
+    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
+    
+    resp = _make_qbo_request("GET", url, token_mgr)
+    payment_method_id: Optional[str] = None
+    if resp.status_code == 200:
+        data = resp.json()
+        payment_methods = data.get("QueryResponse", {}).get("PaymentMethod", [])
+        if payment_methods:
+            payment_method_id = payment_methods[0].get("Id")
+    
+    if payment_method_id:
+        cache[name_clean] = payment_method_id
+    else:
+        # Cache None to avoid repeated failed queries
+        cache[name_clean] = None
+    
+    return payment_method_id
+
+
+def infer_payment_method_id(memo: str, token_mgr: TokenManager = None, realm_id: str = None, cache: Dict[str, Optional[str]] = None) -> Optional[str]:
     """
     Try to map the memo text (tender type) to a QBO PaymentMethod Id.
-    We use exact matches: 'Cash', 'Card', 'Card/Transfer', etc.
+    
+    If token_mgr and realm_id are provided, queries QBO by name.
+    Otherwise, falls back to legacy hardcoded mapping (Company A).
+    
+    Includes mapping for common variations (e.g., "Card" -> "Card payment").
     """
     if not memo:
         return None
     memo_clean = memo.strip()
-    return PAYMENT_METHOD_BY_NAME.get(memo_clean)
+    
+    # Payment method name mapping (CSV value -> QBO name)
+    # This handles cases where CSV uses different names than QBO
+    PAYMENT_METHOD_MAPPING = {
+        "Card": "Card payment",  # CSV "Card" -> QBO "Card payment"
+    }
+    
+    # Map CSV value to QBO name if needed
+    qbo_name = PAYMENT_METHOD_MAPPING.get(memo_clean, memo_clean)
+    
+    # If we have QBO access, query by name (preferred)
+    if token_mgr and realm_id and cache is not None:
+        # Try mapped name first
+        payment_method_id = get_payment_method_id_by_name(qbo_name, token_mgr, realm_id, cache)
+        if payment_method_id:
+            return payment_method_id
+        # If mapped name not found, try original name as fallback
+        if qbo_name != memo_clean:
+            payment_method_id = get_payment_method_id_by_name(memo_clean, token_mgr, realm_id, cache)
+            if payment_method_id:
+                return payment_method_id
+        return None
+    
+    # Fallback to legacy mapping (backward compatibility)
+    return LEGACY_PAYMENT_METHOD_BY_NAME.get(memo_clean)
 
 
 def _qbo_headers(access_token: str) -> dict:
@@ -172,22 +232,16 @@ def _qbo_headers(access_token: str) -> dict:
     }
 
 
-def _refresh_token_and_get_new_access_token() -> str:
-    """Refresh the access token and return the new one."""
-    tokens = load_tokens()
-    if not tokens:
-        raise RuntimeError("Cannot refresh token: qbo_tokens.json not found or empty")
-    tokens = refresh_access_token(tokens)
-    return tokens["access_token"]
-
-
 class TokenManager:
     """
     Manages QBO access token state during a run.
     Automatically refreshes token on 401 errors.
+    Uses token_manager for company-specific token isolation.
     """
-    def __init__(self):
-        self.access_token = get_access_token()
+    def __init__(self, company_key: str, realm_id: str):
+        self.company_key = company_key
+        self.realm_id = realm_id
+        self.access_token = get_access_token(company_key, realm_id)
     
     def get(self) -> str:
         """Get the current access token."""
@@ -195,7 +249,8 @@ class TokenManager:
     
     def refresh(self) -> str:
         """Refresh the access token and update internal state."""
-        self.access_token = _refresh_token_and_get_new_access_token()
+        tokens = refresh_access_token(self.company_key, self.realm_id)
+        self.access_token = tokens["access_token"]
         return self.access_token
 
 
@@ -238,13 +293,13 @@ def _make_qbo_request(
     return resp
 
 
-def get_department_id(name: str, token_mgr: TokenManager, cache: Dict[str, Optional[str]]) -> Optional[str]:
+def get_tax_code_id_by_name(name: str, token_mgr: TokenManager, realm_id: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
     """
-    Resolve a Department (shown as "Location" in the QBO UI) name to a Department Id with simple caching.
-
+    Resolve a TaxCode name to a TaxCode Id with simple caching.
+    
     - If the name exists in cache, reuse its Id.
     - Otherwise, try a QBO query by Name.
-    - Returns None if department not found or name is empty.
+    - Returns None if tax code not found or name is empty.
     """
     if not name or not name.strip():
         return None
@@ -254,8 +309,56 @@ def get_department_id(name: str, token_mgr: TokenManager, cache: Dict[str, Optio
         return cache[name_clean]
     
     safe_name = name_clean.replace("'", "''")
+    query = f"select Id, Name from TaxCode where Name = '{safe_name}'"
+    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
+    
+    resp = _make_qbo_request("GET", url, token_mgr)
+    tax_code_id: Optional[str] = None
+    if resp.status_code == 200:
+        data = resp.json()
+        tax_codes = data.get("QueryResponse", {}).get("TaxCode", [])
+        if tax_codes:
+            tax_code_id = tax_codes[0].get("Id")
+    
+    if tax_code_id:
+        cache[name_clean] = tax_code_id
+    else:
+        # Cache None to avoid repeated failed queries
+        cache[name_clean] = None
+    
+    return tax_code_id
+
+
+def get_department_id(name: str, token_mgr: TokenManager, realm_id: str, cache: Dict[str, Optional[str]], config=None) -> Optional[str]:
+    """
+    Resolve a Department (shown as "Location" in the QBO UI) name to a Department Id with simple caching.
+
+    - First checks if there's a department_mapping in config (maps CSV location -> QBO Department ID)
+    - If the name exists in cache, reuse its Id.
+    - Otherwise, try a QBO query by Name.
+    - Returns None if department not found or name is empty.
+    """
+    if not name or not name.strip():
+        return None
+    
+    name_clean = name.strip()
+    
+    # Check config mapping first (if available)
+    if config:
+        department_mapping = config.get_qbo_config().get("department_mapping", {})
+        if name_clean in department_mapping:
+            department_id = department_mapping[name_clean]
+            cache[name_clean] = department_id  # Cache it for future use
+            return department_id
+    
+    # Check cache
+    if name_clean in cache:
+        return cache[name_clean]
+    
+    # Query QBO by name
+    safe_name = name_clean.replace("'", "''")
     query = f"select Id from Department where Name = '{safe_name}'"
-    url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
+    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
     
     resp = _make_qbo_request("GET", url, token_mgr)
     department_id: Optional[str] = None
@@ -274,24 +377,28 @@ def get_department_id(name: str, token_mgr: TokenManager, cache: Dict[str, Optio
     return department_id
 
 
-def get_or_create_item_id(name: str, token_mgr: TokenManager, cache: Dict[str, str]) -> str:
+def get_or_create_item_id(name: str, token_mgr: TokenManager, realm_id: str, config, cache: Dict[str, str]) -> str:
     """
     Resolve an Item name to an Item Id with simple caching.
 
     - If the name exists in cache, reuse its Id.
     - Otherwise, try a QBO query by Name.
     - Optionally auto-create a Service item if not found.
-    - If all else fails, fall back to DEFAULT_ITEM_ID.
+    - If all else fails, fall back to default_item_id from config.
     """
+    default_item_id = config.get_qbo_config().get("default_item_id", "1")
+    default_income_account_id = config.get_qbo_config().get("default_income_account_id", "1")
+    auto_create_items = True  # Can be made configurable later
+    
     if not name:
-        return DEFAULT_ITEM_ID
+        return default_item_id
 
     if name in cache:
         return cache[name]
 
     safe_name = name.replace("'", "''")
     query = f"select Id from Item where Name = '{safe_name}'"
-    url = f"{BASE_URL}/v3/company/{REALM_ID}/query?query={quote(query)}&minorversion=70"
+    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
 
     resp = _make_qbo_request("GET", url, token_mgr)
     item_id: Optional[str] = None
@@ -301,12 +408,12 @@ def get_or_create_item_id(name: str, token_mgr: TokenManager, cache: Dict[str, s
         if items:
             item_id = items[0].get("Id")
 
-    if not item_id and AUTO_CREATE_ITEMS:
-        create_url = f"{BASE_URL}/v3/company/{REALM_ID}/item?minorversion=70"
+    if not item_id and auto_create_items:
+        create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
         payload = {
             "Name": name,
             "Type": "Service",
-            "IncomeAccountRef": {"value": DEFAULT_INCOME_ACCOUNT_ID},
+            "IncomeAccountRef": {"value": default_income_account_id},
         }
         create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
         if create_resp.status_code in (200, 201):
@@ -321,7 +428,7 @@ def get_or_create_item_id(name: str, token_mgr: TokenManager, cache: Dict[str, s
                 pass
 
     if not item_id:
-        item_id = DEFAULT_ITEM_ID
+        item_id = default_item_id
 
     cache[name] = item_id
     return item_id
@@ -330,8 +437,11 @@ def get_or_create_item_id(name: str, token_mgr: TokenManager, cache: Dict[str, s
 def build_sales_receipt_payload(
     group: pd.DataFrame,
     token_mgr: TokenManager,
+    realm_id: str,
+    config,
     item_cache: Dict[str, str],
     department_cache: Dict[str, Optional[str]],
+    payment_method_cache: Dict[str, Optional[str]] = None,
 ) -> dict:
     """
     Build a SalesReceipt payload from a group of CSV rows (one SalesReceiptNo).
@@ -345,7 +455,23 @@ def build_sales_receipt_payload(
     """
     first_row = group.iloc[0]
 
-    txn_date = str(first_row[DATE_COL])
+    # Parse date from CSV using company's date_format and convert to ISO format (YYYY-MM-DD) for QBO
+    txn_date_str = str(first_row[DATE_COL])
+    try:
+        # Parse using the company's date format
+        date_obj = datetime.strptime(txn_date_str, config.date_format)
+        # Convert to ISO format (YYYY-MM-DD) for QBO
+        txn_date = date_obj.strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        # Fallback: try to parse as ISO format or use pandas
+        try:
+            date_obj = pd.to_datetime(txn_date_str).to_pydatetime()
+            txn_date = date_obj.strftime("%Y-%m-%d")
+        except Exception:
+            # Last resort: use as-is (may cause QBO errors)
+            print(f"[WARN] Could not parse date '{txn_date_str}', using as-is. QBO may reject it.")
+            txn_date = txn_date_str
+    
     memo = str(first_row[MEMO_COL])
     doc_number = str(first_row[DOCNUM_COL])
     location_name = str(first_row.get(LOCATION_COL, "")).strip()
@@ -357,7 +483,7 @@ def build_sales_receipt_payload(
     for _, row in group.iterrows():
         # Product/Service
         item_name = str(row.get(ITEM_NAME_COL, "")).strip()
-        item_ref_id = get_or_create_item_id(item_name, token_mgr, item_cache)
+        item_ref_id = get_or_create_item_id(item_name, token_mgr, realm_id, config, item_cache)
 
         # Quantity (default to 1 if missing/NaN or <=0)
         try:
@@ -384,32 +510,81 @@ def build_sales_receipt_payload(
         # so that QBO's validation rule Amount == UnitPrice * Qty holds.
         amount_gross = amount_csv
 
-        # Service date: fall back to TxnDate if missing
-        service_date = str(row.get(SERVICE_DATE_COL, txn_date))
+        # Service date: fall back to TxnDate if missing or invalid
+        # Parse service date using company's date_format and convert to ISO format
+        service_date_str = str(row.get(SERVICE_DATE_COL, "")).strip()
+        if not service_date_str or service_date_str == "nan" or service_date_str.lower() == "none":
+            # Use TxnDate if Service Date is missing or empty
+            service_date = txn_date
+        else:
+            try:
+                # Parse using the company's date format
+                service_date_obj = datetime.strptime(service_date_str, config.date_format)
+                service_date = service_date_obj.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                # If already in ISO format or can't parse, try pandas or use TxnDate
+                try:
+                    service_date_obj = pd.to_datetime(service_date_str).to_pydatetime()
+                    service_date = service_date_obj.strftime("%Y-%m-%d")
+                except Exception:
+                    # Fallback to TxnDate (already in ISO format)
+                    service_date = txn_date
 
         # Description: prefer ItemDescription, fall back to memo
         description = str(row.get(ITEM_DESC_COL, memo))
 
+        # Tax code handling: both companies now use vat_inclusive_7_5 mode
+        # Use tax_code_id from config (Company A: "2", Company B: "22")
+        tax_code_id = config.tax_code_id
+        if not tax_code_id:
+            # Fallback: try to query by name if tax_code_name is provided
+            if hasattr(config, 'tax_code_name') and config.tax_code_name:
+                if not hasattr(build_sales_receipt_payload, '_tax_code_cache'):
+                    build_sales_receipt_payload._tax_code_cache = {}
+                tax_code_id = get_tax_code_id_by_name(
+                    config.tax_code_name, 
+                    token_mgr, 
+                    realm_id, 
+                    build_sales_receipt_payload._tax_code_cache
+                )
+                if not tax_code_id:
+                    print(f"[WARN] Tax code '{config.tax_code_name}' not found in QBO. Line will be created without tax code.")
+            else:
+                # Default fallback
+                tax_code_id = "2" if config.company_key == "company_a" else "22"
+        
         sales_item_detail = {
             "ItemRef": {"value": item_ref_id},
             "Qty": qty_val,
             # UnitPrice will be set after we compute the net amount below
             "UnitPrice": None,
             "ServiceDate": service_date,
-            "TaxCodeRef": {"value": TAX_CODE_ID},  # 7.5% S
         }
+        
+        # Add tax code reference if we have one (for both Company A and Company B)
+        if tax_code_id:
+            sales_item_detail["TaxCodeRef"] = {"value": tax_code_id}
 
-        # To match QBO's "good" behaviour, we store line Amount as NET (exclusive of VAT)
-        # and provide TaxInclusiveAmt as the original gross from EPOS.
-        raw_amount_net = amount_gross - tax_amount
-        if raw_amount_net < 0:
-            raw_amount_net = 0.0
+        # Calculate NET amount (exclusive of tax) from GROSS (tax-inclusive amount)
+        # For Company A (vat_inclusive_7_5): use ItemTaxAmount from CSV if available
+        # For Company B (tax_inclusive_composite): calculate from config tax_rate
+        if config.tax_mode == "tax_inclusive_composite":
+            # Company B: Calculate net using the full composite tax rate (12.5% = 7.5% + 5%)
+            tax_rate = config.tax_rate or 0.125
+            raw_amount_net = round(amount_gross / (1 + tax_rate), 2)
+        else:
+            # Company A: Use ItemTaxAmount from CSV
+            raw_amount_net = amount_gross - tax_amount
+            if raw_amount_net < 0:
+                raw_amount_net = 0.0
 
         # Net unit price so that Amount == UnitPrice * Qty holds for QBO validation.
         unit_price_net = round(raw_amount_net / qty_val, 2) if qty_val else raw_amount_net
         amount_net = round(unit_price_net * qty_val, 2)
         sales_item_detail["UnitPrice"] = unit_price_net
 
+        # TaxInclusiveAmt tells QBO what the original gross amount is
+        # This is needed for both Company A and Company B to show correct totals
         sales_item_detail["TaxInclusiveAmt"] = amount_gross
 
         lines.append(
@@ -427,63 +602,151 @@ def build_sales_receipt_payload(
         "TxnDate": txn_date,
         "PrivateNote": memo,
         "DocNumber": doc_number,
-        # Tell QBO these line amounts are tax-inclusive (like the manual CSV import)
-        "GlobalTaxCalculation": "TaxInclusive",
         "Line": lines,
     }
-
-    # Explicit tax summary so QBO keeps the overall total equal to our gross_total
-    # and only backs out the VAT portion for display, mirroring "good" receipts.
-    try:
-        # If we have a sensible net_total (from the per-line calculations), use that;
-        # otherwise fall back to deriving from the configured VAT rate.
-        tax_rate = 0.075  # 7.5%
-        net_base = round(net_total or (gross_total / (1 + tax_rate)), 2)
-        total_tax = round(gross_total - net_base, 2)
-
-        payload["TxnTaxDetail"] = {
-            "TotalTax": total_tax,
-            "TaxLine": [
-                {
-                    "Amount": total_tax,
+    
+    # Tax handling based on company config
+    if config.tax_mode == "vat_inclusive_7_5":
+        # Tax-inclusive mode for Company A (single-rate VAT)
+        payload["GlobalTaxCalculation"] = "TaxInclusive"
+        
+        # Explicit tax summary for tax-inclusive calculation
+        try:
+            # Get tax rate from config (Company A: 0.075 = 7.5%)
+            tax_rate = config.tax_rate
+            tax_percent = tax_rate * 100  # Convert to percentage for QBO
+            
+            net_base = round(net_total or (gross_total / (1 + tax_rate)), 2)
+            total_tax = round(gross_total - net_base, 2)
+            
+            # Get TaxRate ID from config (required by QBO when TxnTaxDetail is provided)
+            tax_rate_id = config.get_qbo_config().get("tax_rate_id")
+            if not tax_rate_id:
+                # Fallback: try using tax_code_id if tax_rate_id not set (Company A: "2" works for both)
+                tax_rate_id = config.tax_code_id
+                if not tax_rate_id:
+                    raise ValueError("tax_rate_id or tax_code_id must be set in config for tax-inclusive mode")
+            
+            payload["TxnTaxDetail"] = {
+                "TotalTax": total_tax,
+                "TaxLine": [
+                    {
+                        "Amount": total_tax,
+                        "DetailType": "TaxLineDetail",
+                        "TaxLineDetail": {
+                            "TaxRateRef": {"value": tax_rate_id},
+                            "PercentBased": True,
+                            "TaxPercent": tax_percent,
+                            "NetAmountTaxable": net_base,
+                        },
+                    }
+                ],
+            }
+        except Exception:
+            # If anything goes wrong, fall back to letting QBO compute.
+            pass
+    elif config.tax_mode == "tax_inclusive_composite":
+        # Tax-inclusive mode for Company B with composite tax (12.5% = 7.5% VAT + 5% Lagos)
+        # 
+        # Strategy: Same as Company A but with TWO TaxLines in TxnTaxDetail
+        # - Line items have TaxInclusiveAmt = gross amount
+        # - GlobalTaxCalculation = "TaxInclusive"
+        # - TxnTaxDetail has explicit breakdown for each tax component
+        # - Subtotal = gross, Total = gross (tax is INCLUDED, shown as breakdown)
+        payload["GlobalTaxCalculation"] = "TaxInclusive"
+        
+        try:
+            # Get tax components from config
+            tax_components = config.get_qbo_config().get("tax_components", [])
+            if not tax_components:
+                raise ValueError("tax_components must be set in config for tax_inclusive_composite mode")
+            
+            # KEY FIX: Use net_total (sum of per-line amounts) for TxnTaxDetail
+            # This matches how Company A does it in the reference script
+            # The reference script uses: net_base = net_total or (gross_total / (1 + tax_rate))
+            # This ensures TxnTaxDetail matches the actual sum of line amounts
+            total_tax_rate = sum(c.get("rate", 0) for c in tax_components)  # 0.125 for 12.5%
+            net_base = round(net_total or (gross_total / (1 + total_tax_rate)), 2)
+            total_tax = round(gross_total - net_base, 2)
+            
+            # Build TaxLines for each component
+            # Distribute tax proportionally, with last component getting the remainder
+            tax_lines = []
+            allocated_tax = 0.0
+            
+            for i, component in enumerate(tax_components):
+                rate = component.get("rate", 0)  # e.g., 0.075 for 7.5%
+                tax_rate_id = component.get("tax_rate_id")
+                
+                if not tax_rate_id:
+                    raise ValueError(f"tax_rate_id missing for component: {component.get('name')}")
+                
+                if i == len(tax_components) - 1:
+                    # Last component gets the remainder to avoid rounding errors
+                    component_tax = round(total_tax - allocated_tax, 2)
+                else:
+                    # Calculate proportional share: (rate / total_rate) * total_tax
+                    component_tax = round((rate / total_tax_rate) * total_tax, 2)
+                    allocated_tax += component_tax
+                
+                tax_lines.append({
+                    "Amount": component_tax,
                     "DetailType": "TaxLineDetail",
                     "TaxLineDetail": {
-                        "TaxRateRef": {"value": TAX_CODE_ID},
+                        "TaxRateRef": {"value": tax_rate_id},
                         "PercentBased": True,
-                        "TaxPercent": 7.5,
+                        "TaxPercent": rate * 100,
                         "NetAmountTaxable": net_base,
                     },
-                }
-            ],
-        }
-    except Exception:
-        # If anything goes wrong with our explicit tax calc, fall back to letting QBO compute.
-        pass
+                })
+            
+            payload["TxnTaxDetail"] = {
+                "TotalTax": total_tax,
+                "TaxLine": tax_lines,
+            }
+        except Exception as e:
+            # If anything goes wrong, log and let QBO try to compute
+            print(f"[WARN] Error building composite tax detail: {e}. QBO may not display tax correctly.")
+            pass
+    # Note: Company A uses vat_inclusive_7_5 (single-rate with explicit TxnTaxDetail)
+    #       Company B uses tax_inclusive_composite (multi-rate with explicit TxnTaxDetail for each component)
 
-    # Payment method (tender type) from memo
-    payment_method_id = infer_payment_method_id(memo)
+    # Payment method (tender type) from memo - query QBO by name
+    if payment_method_cache is None:
+        payment_method_cache = {}
+    payment_method_id = infer_payment_method_id(memo, token_mgr, realm_id, payment_method_cache)
     if payment_method_id:
         payload["PaymentMethodRef"] = {"value": payment_method_id}
+    elif memo:
+        # Only warn if memo exists but payment method not found
+        print(f"[WARN] Payment method '{memo}' not found in QBO, skipping PaymentMethodRef")
 
     # Location from CSV -> QBO Department (Location tracking)
     if location_name:
-        department_id = get_department_id(location_name, token_mgr, department_cache)
+        department_id = get_department_id(location_name, token_mgr, realm_id, department_cache, config)
         if department_id:
             payload["DepartmentRef"] = {"value": department_id}
         else:
             print(f"[WARN] Department/Location '{location_name}' not found in QBO, skipping DepartmentRef")
+    
+    # Deposit account from config (for Company B, may be in CSV; for Company A, use config default)
+    deposit_account_name = str(first_row.get("*DepositAccount", "")).strip()
+    if deposit_account_name:
+        # Try to resolve deposit account by name (Company B pattern)
+        # For now, we'll let QBO use its default if not specified
+        pass
 
     # No CustomerRef -> customer left blank (as desired)
     return payload
 
 
-def send_sales_receipt(payload: dict, token_mgr: TokenManager):
+def send_sales_receipt(payload: dict, token_mgr: TokenManager, realm_id: str):
     """
     Send a Sales Receipt to QuickBooks API.
     
     Raises RuntimeError if the API returns a non-2xx status code.
     """
-    url = f"{BASE_URL}/v3/company/{REALM_ID}/salesreceipt?minorversion=70"
+    url = f"{BASE_URL}/v3/company/{realm_id}/salesreceipt?minorversion=70"
 
     response = _make_qbo_request(
         "POST",
@@ -541,12 +804,46 @@ def send_sales_receipt(payload: dict, token_mgr: TokenManager):
 
 
 def main():
-    # Initialize token manager once (will refresh automatically on 401)
-    token_mgr = TokenManager()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Upload Sales Receipts to QuickBooks for a specific company."
+    )
+    parser.add_argument(
+        "--company",
+        required=True,
+        choices=get_available_companies(),
+        help="Company identifier (REQUIRED). Available: %(choices)s",
+    )
+    args = parser.parse_args()
+    
+    # Load company configuration
+    try:
+        config = load_company_config(args.company)
+    except Exception as e:
+        print(f"Error: Failed to load company config for '{args.company}': {e}")
+        sys.exit(1)
+    
+    # Safety check: verify realm_id matches tokens
+    try:
+        verify_realm_match(config.company_key, config.realm_id)
+    except RuntimeError as e:
+        print(f"Error: Realm ID safety check failed: {e}")
+        sys.exit(1)
+    
+    # Log company info for safety
+    print("=" * 60)
+    print(f"COMPANY: {config.display_name} ({config.company_key})")
+    print(f"REALM ID: {config.realm_id}")
+    print(f"DEPOSIT ACCOUNT: {config.deposit_account}")
+    print(f"TAX MODE: {config.tax_mode}")
+    print("=" * 60)
+    
+    # Initialize token manager (will refresh automatically on 401)
+    token_mgr = TokenManager(config.company_key, config.realm_id)
 
     repo_root = get_repo_root()
 
-    csv_path = find_latest_single_csv(repo_root)
+    csv_path = find_latest_single_csv(repo_root, config)
     print(f"Using CSV: {csv_path}")
 
     df = pd.read_csv(csv_path)
@@ -556,7 +853,7 @@ def main():
     print(f"Found {len(grouped)} distinct SalesReceiptNo groups")
 
     # Layer A: Load local ledger of uploaded DocNumbers
-    uploaded_docnumbers = load_uploaded_docnumbers(repo_root)
+    uploaded_docnumbers = load_uploaded_docnumbers(repo_root, config)
     print(f"Loaded {len(uploaded_docnumbers)} DocNumbers from local ledger")
 
     # Collect all DocNumbers to check
@@ -564,7 +861,7 @@ def main():
     
     # Layer B: Check QBO for existing DocNumbers (optional safety check)
     print("Checking QBO for existing DocNumbers...")
-    qbo_existing = check_qbo_existing_docnumbers(all_docnumbers, token_mgr)
+    qbo_existing = check_qbo_existing_docnumbers(all_docnumbers, token_mgr, config.realm_id)
     print(f"Found {len(qbo_existing)} existing DocNumbers in QBO")
     
     # Combine both sources
@@ -574,6 +871,27 @@ def main():
 
     item_cache: Dict[str, str] = {}
     department_cache: Dict[str, Optional[str]] = {}
+    payment_method_cache: Dict[str, Optional[str]] = {}
+    
+    # Pre-fetch tax code for Company B (tax_inclusive_composite mode) to validate it exists
+    if config.tax_mode == "tax_inclusive_composite" and config.tax_code_name:
+        tax_code_cache: Dict[str, Optional[str]] = {}
+        tax_code_id = get_tax_code_id_by_name(
+            config.tax_code_name,
+            token_mgr,
+            config.realm_id,
+            tax_code_cache
+        )
+        if tax_code_id:
+            print(f"[INFO] Found Tax Code '{config.tax_code_name}' with ID: {tax_code_id}")
+            # Store in function-level cache for use in build_sales_receipt_payload
+            if not hasattr(build_sales_receipt_payload, '_tax_code_cache'):
+                build_sales_receipt_payload._tax_code_cache = {}
+            build_sales_receipt_payload._tax_code_cache[config.tax_code_name] = tax_code_id
+        else:
+            print(f"[WARN] Tax Code '{config.tax_code_name}' not found in QBO.")
+            print(f"       Receipts will be created without tax codes.")
+            print(f"       You can add 'tax_code_id' to {config.company_key}.json to specify it directly.")
     
     stats = {
         "attempted": 0,
@@ -592,12 +910,12 @@ def main():
             continue
         
         try:
-            payload = build_sales_receipt_payload(group_df, token_mgr, item_cache, department_cache)
+            payload = build_sales_receipt_payload(group_df, token_mgr, config.realm_id, config, item_cache, department_cache, payment_method_cache)
             print(f"\nSending SalesReceiptNo: {group_key}")
-            send_sales_receipt(payload, token_mgr)
+            send_sales_receipt(payload, token_mgr, config.realm_id)
             
             # Success - add to local ledger
-            save_uploaded_docnumber(repo_root, group_key)
+            save_uploaded_docnumber(repo_root, group_key, config)
             stats["uploaded"] += 1
         except Exception as e:
             print(f"\n[ERROR] Failed to upload SalesReceiptNo {group_key}: {e}")
@@ -612,7 +930,7 @@ def main():
     print(f"Failed: {stats['failed']}")
     
     # Write stats to metadata for Slack notification
-    metadata_path = os.path.join(repo_root, "last_epos_transform.json")
+    metadata_path = os.path.join(repo_root, config.metadata_file)
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r") as f:
@@ -622,6 +940,16 @@ def main():
                 json.dump(metadata, f, indent=2)
         except Exception as e:
             print(f"[WARN] Failed to update metadata with upload stats: {e}")
+    
+    # Exit with error code if any uploads failed
+    if stats['failed'] > 0:
+        print(f"\n[ERROR] {stats['failed']} upload(s) failed. Exiting with error code.")
+        sys.exit(1)
+    
+    # Exit with error code if no uploads succeeded (and there were attempts)
+    if stats['attempted'] > 0 and stats['uploaded'] == 0 and stats['skipped'] == 0:
+        print(f"\n[ERROR] All {stats['attempted']} upload attempt(s) failed. Exiting with error code.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

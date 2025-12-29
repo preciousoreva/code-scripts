@@ -1,11 +1,26 @@
 # QuickBooks tokens and credentials
+# Current: SQLite database (per-company tokens)
+qbo_tokens.sqlite
+qbo_tokens.sqlite-wal
+qbo_tokens.sqlite-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# Legacy: JSON token files (no longer used)
 qbo_tokens.json
 qbo_tokens_cache.json
+qbo_tokens_gp.json
+qbo_tokens_cache_gp.json
+
+# Uploaded docnumbers ledger (per-company)
+uploaded_docnumbers*.json
+
 
 # Environment-specific configuration
 # Note: .env.example is NOT ignored (it's a template that should be committed)
 .env
 .env.local
+.env.gp
 
 # Python cache
 __pycache__/
@@ -17,16 +32,21 @@ __pycache__/
 # Temporary processing files (these get archived, but exclude from git)
 *.csv
 last_epos_transform.json
-uploaded_docnumbers.json
+transform_metadata.json
 
-# Spill files (temporary, get archived after use)
-uploads/spill/
+# RAW spill staging (future-date rows awaiting processing)
+# These files are managed by run_pipeline.py and archived after use
+uploads/spill_raw/
+
+# Split staging (temporary per-run, cleaned up after success)
+# Used for range mode split files and single-day staging
+uploads/range_raw/
 
 # Logs
 logs/
 *.log
 
-# Archived files (optional - exclude if you don't want to track archived data)
+# Archived files (authoritative after successful runs, but exclude from git)
 Uploaded/
 
 # IDE
@@ -51,3 +71,7 @@ myenv/
 token_broker.py
 start_broker.ps1
 README-infra.md
+
+# Safety: raw EPOS downloads (should be auto-archived after success)
+BookKeeping_*.csv
+CombinedRaw_*.csv

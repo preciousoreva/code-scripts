@@ -3,6 +3,8 @@ import sys
 import json
 import shutil
 import argparse
+import os
+import re
 from pathlib import Path
 from typing import Optional
 import logging
@@ -13,11 +15,36 @@ from slack_notify import (
     notify_pipeline_success,
     notify_pipeline_failure,
     notify_pipeline_start,
+    notify_pipeline_update,
 )
-from qbo_query import cmd_reconcile
+# qbo_query imported lazily (only when reconciliation is needed) to avoid QBO_REALM_ID requirement
+from company_config import load_company_config, get_available_companies
+from token_manager import verify_realm_match
+import pandas as pd
+from typing import List
 
-# Load .env file to make environment variables available
+# Load .env file to make environment variables available (shared secrets only)
 load_env_file()
+
+
+def company_dir_name(display_name: str) -> str:
+    """
+    Convert company display name to Title_Case_With_Underscores.
+    Safe for filesystem paths across OSes.
+    
+    Examples:
+        - Akponora Ventures Ltd → Akponora_Ventures_Ltd
+        - Precious & Sons Nigeria → Precious_Sons_Nigeria
+        - MAIN STORE (HQ) → Main_Store_Hq
+    """
+    # Remove special characters (anything not alphanumeric or space)
+    name = re.sub(r"[^A-Za-z0-9 ]+", " ", str(display_name or "").strip())
+    # Collapse multiple spaces
+    name = re.sub(r"\s+", " ", name).strip()
+    if not name:
+        return "Company"
+    # Title case each word and join with underscores
+    return "_".join(word.capitalize() for word in name.split())
 
 
 def run_step(label: str, script_name: str, args: list = None) -> None:
@@ -88,12 +115,132 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-def archive_files(repo_root: Path) -> None:
+def archive_range_raw_files(
+    repo_root: Path,
+    company_dir: str,
+    company_key: str,
+    from_date: str,
+    to_date: str,
+    original_csv_path: Path
+) -> None:
+    """
+    Archive the original range CSV and all split raw files after successful range completion.
+    
+    Moves:
+        uploads/range_raw/<company_dir>/<from>_to_<to>/
+    To:
+        Uploaded/ranges/<company_dir>/<from>_to_<to>/
+    
+    Uses human-readable company_dir (Title_Case_With_Underscores) for folder names.
+    Falls back to legacy company_key folders if company_dir folders don't exist.
+    
+    Renames the original CSV to ORIGINAL_<filename>.csv.
+    
+    This function is only called after ALL per-day loops complete successfully.
+    If any per-day step fails, this function is NOT called (range remains atomic).
+    
+    Args:
+        repo_root: Repository root path
+        company_dir: Human-readable company folder name (Title_Case_With_Underscores)
+        company_key: Company identifier (for legacy fallback)
+        from_date: Start date in YYYY-MM-DD format
+        to_date: End date in YYYY-MM-DD format
+        original_csv_path: Path to the original downloaded CSV file (may not exist if already moved)
+    """
+    date_range = f"{from_date}_to_{to_date}"
+    
+    # Primary path using human-readable company_dir
+    range_raw_dir = repo_root / "uploads" / "range_raw" / company_dir / date_range
+    archive_dir = repo_root / "Uploaded" / "ranges" / company_dir / date_range
+    
+    # Legacy fallback: check if old company_key folder exists instead
+    used_legacy = False
+    if not range_raw_dir.exists():
+        legacy_range_raw_dir = repo_root / "uploads" / "range_raw" / company_key / date_range
+        if legacy_range_raw_dir.exists():
+            logging.warning(
+                f"Range raw directory not found at '{company_dir}', using legacy path '{company_key}'"
+            )
+            range_raw_dir = legacy_range_raw_dir
+            # Keep archive destination with new naming (company_dir), not legacy
+            used_legacy = True
+        else:
+            logging.warning(f"Range raw directory not found: {range_raw_dir}")
+            logging.warning(f"  (Also checked legacy path: {legacy_range_raw_dir})")
+            return
+    
+    # Create archive directory
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Move original CSV to archive with ORIGINAL_ prefix (if it still exists in repo root)
+    if original_csv_path.exists() and original_csv_path.is_file():
+        original_archive_name = f"ORIGINAL_{original_csv_path.name}"
+        original_archive_path = archive_dir / original_archive_name
+        # Check if already exists (shouldn't happen, but safety check)
+        if not original_archive_path.exists():
+            shutil.move(str(original_csv_path), str(original_archive_path))
+            logging.info(f"Moved original CSV: {original_csv_path.name} -> {original_archive_name}")
+        else:
+            logging.warning(f"Original CSV already archived: {original_archive_name}")
+    else:
+        logging.info(f"Original CSV not found in repo root (may have been moved already): {original_csv_path.name}")
+    
+    # Move all files from range_raw_dir to archive_dir
+    items_moved = 0
+    for item in list(range_raw_dir.iterdir()):  # Convert to list to avoid iteration issues
+        dest = archive_dir / item.name
+        if item.is_file():
+            if not dest.exists():  # Safety check: don't overwrite
+                shutil.move(str(item), str(dest))
+                logging.info(f"Moved split file: {item.name}")
+                items_moved += 1
+            else:
+                logging.warning(f"Split file already exists in archive: {item.name}")
+        elif item.is_dir():
+            if not dest.exists():
+                shutil.move(str(item), str(dest))
+                logging.info(f"Moved directory: {item.name}")
+                items_moved += 1
+            else:
+                logging.warning(f"Directory already exists in archive: {item.name}")
+    
+    # Remove empty range_raw_dir
+    try:
+        range_raw_dir.rmdir()
+        logging.info(f"Removed empty range raw directory: {range_raw_dir}")
+    except OSError:
+        # Directory not empty or already removed - this is OK
+        pass
+    
+    # Remove empty parent directories if possible (cleanup)
+    # Use the actual parent (could be company_dir or company_key if legacy)
+    parent_folder = company_key if used_legacy else company_dir
+    try:
+        parent_dir = repo_root / "uploads" / "range_raw" / parent_folder
+        if parent_dir.exists() and not any(parent_dir.iterdir()):
+            parent_dir.rmdir()
+            logging.info(f"Removed empty parent directory: {parent_dir}")
+    except OSError:
+        pass
+    
+    try:
+        grandparent_dir = repo_root / "uploads" / "range_raw"
+        if grandparent_dir.exists() and not any(grandparent_dir.iterdir()):
+            grandparent_dir.rmdir()
+            logging.info(f"Removed empty grandparent directory: {grandparent_dir}")
+    except OSError:
+        pass
+    
+    logging.info(f"[OK] Archived range raw files to Uploaded/ranges/{company_dir}/{date_range}/")
+    logging.info(f"  Moved {items_moved} item(s) from range_raw directory")
+
+
+def archive_files(repo_root: Path, config) -> None:
     """
     Phase 4: Archive processed files after successful upload.
-    Reads last_epos_transform.json and moves files to Uploaded/<date>/ folder.
+    Reads metadata file and moves files to Uploaded/<date>/ folder.
     """
-    metadata_path = repo_root / "last_epos_transform.json"
+    metadata_path = repo_root / config.metadata_file
     
     if not metadata_path.exists():
         logging.warning("Metadata file not found. Skipping archive step.")
@@ -163,186 +310,1150 @@ def archive_files(repo_root: Path) -> None:
         else:
             logging.warning(f"Processed file not found or is not a file: {processed_file}")
     
-    # Move spill files that were created during this run (if they match target_date)
-    spill_files = metadata.get("spill_files", [])
-    target_date = metadata.get("target_date") or normalized_date
-    if spill_files and target_date:
-        for spill_file in spill_files:
-            # spill_file is relative path like "uploads/spill/BookKeeping_spill_2025-12-25.csv"
-            # Only archive spill files that match the target_date
-            spill_filename = Path(spill_file).name
-            # Extract date from filename: BookKeeping_spill_YYYY-MM-DD.csv
-            if f"spill_{target_date}.csv" in spill_filename:
-                spill_path = repo_root / spill_file
-                if spill_path.exists() and spill_path.is_file():
-                    dest_spill = archive_dir / spill_filename
-                    shutil.move(str(spill_path), str(dest_spill))
-                    logging.info(f"Moved newly created spill file: {spill_filename} -> Uploaded/{normalized_date}/")
-                else:
-                    logging.warning(f"Spill file not found: {spill_path}")
-            else:
-                # This spill file is for a different date - keep it in uploads/spill/
-                logging.info(f"Keeping spill file {spill_filename} in uploads/spill/ (for future date)")
-    
-    # Move spill files that were used/merged during processing
-    used_spill_files = metadata.get("used_spill_files", [])
-    if used_spill_files:
-        logging.info(f"Archiving {len(used_spill_files)} used spill file(s)...")
-        for spill_file in used_spill_files:
-            # spill_file is relative path like "uploads/spill/BookKeeping_spill_2025-12-25.csv"
-            spill_path = repo_root / spill_file
-            if spill_path.exists() and spill_path.is_file():
-                spill_filename = spill_path.name
-                dest_spill = archive_dir / spill_filename
-                shutil.move(str(spill_path), str(dest_spill))
-                logging.info(f"Moved used spill file: {spill_filename} -> Uploaded/{normalized_date}/")
-            else:
-                logging.warning(f"Used spill file not found: {spill_path}")
+    # NOTE: Transformed spill archiving has been removed (Step 3).
+    # RAW spill files (uploads/spill_raw/) are now archived separately in run_pipeline.py
+    # after each day's processing completes successfully.
     
     # Move metadata file to archive as well
-    dest_metadata = archive_dir / "last_epos_transform.json"
+    dest_metadata = archive_dir / config.metadata_file
     shutil.move(str(metadata_path), str(dest_metadata))
-    logging.info(f"Moved metadata: last_epos_transform.json -> Uploaded/{normalized_date}/")
+    logging.info(f"Moved metadata: {config.metadata_file} -> Uploaded/{normalized_date}/")
     
     logging.info(f"[OK] Phase 4: Archive completed. Files archived to Uploaded/{normalized_date}/")
 
 
-def main(target_date: Optional[str] = None) -> int:
+def merge_raw_csvs(base_csv: Path, extra_csvs: List[Path], out_csv: Path) -> dict:
     """
-    Full pipeline:
+    Merge multiple raw CSV files into one combined file.
+    
+    Args:
+        base_csv: Primary raw CSV file
+        extra_csvs: Additional CSV files to merge (e.g., raw spill files)
+        out_csv: Output path for combined CSV
+    
+    Returns:
+        Dict with merge statistics: {base_rows, extra_rows, total_rows}
+    """
+    df_base = pd.read_csv(base_csv)
+    base_rows = len(df_base)
+    frames = [df_base]
+    extra_rows = 0
+    for p in extra_csvs:
+        df_extra = pd.read_csv(p)
+        frames.append(df_extra)
+        extra_rows += len(df_extra)
+    df_all = pd.concat(frames, ignore_index=True)
+    df_all.to_csv(out_csv, index=False)
+    return {
+        "base_rows": base_rows,
+        "extra_rows": extra_rows,
+        "total_rows": len(df_all)
+    }
+
+
+def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir: str, repo_root: Path) -> tuple:
+    """
+    Split a downloaded EPOS CSV into per-day raw files.
+    Also writes future out-of-range rows as raw spill files.
+    
+    Works for both range mode (from_date != to_date) and single-day mode (from_date == to_date).
+    
+    Args:
+        csv_path: Path to the downloaded CSV file
+        from_date: Start date in YYYY-MM-DD format
+        to_date: End date in YYYY-MM-DD format
+        company_dir: Human-readable company folder name (Title_Case_With_Underscores)
+        repo_root: Repository root path
+    
+    Returns:
+        Tuple of three items:
+        - date_to_file: Dict mapping in-range date strings (YYYY-MM-DD) to file paths
+        - future_spill_to_file: Dict mapping out-of-range future dates to raw spill file paths
+        - split_stats: Dict with row counts for logging/notifications:
+            - total_rows: Total rows in original CSV
+            - in_range_rows: Rows written to in-range split files
+            - future_rows: Rows written to future spill files
+            - past_rows: Rows for dates before from_date (ignored but logged)
+            - null_rows: Rows with unparseable dates (ignored)
+            - future_spill_details: Dict {date_str: row_count} for Slack notifications
+    """
+    from datetime import timezone, timedelta
+    
+    # WAT timezone (UTC+1)
+    WAT_TZ = timezone(timedelta(hours=1))
+    
+    # Parse date range
+    from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+    to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+    
+    # Generate all dates in range
+    date_list = []
+    current = from_dt
+    while current <= to_dt:
+        date_list.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    
+    # Load CSV
+    df = pd.read_csv(csv_path)
+    total_rows = len(df)
+    
+    # Parse dates from Date/Time column (fallback to Date)
+    def parse_date(value):
+        """Parse common date/time strings into a naive datetime."""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        s = str(value).strip()
+        if s == "":
+            return None
+        for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                pass
+        dt = pd.to_datetime(s, errors="coerce")
+        if pd.isna(dt):
+            return None
+        return dt.to_pydatetime()
+    
+    # Get date column (prefer Date/Time, fallback to Date)
+    date_col = "Date/Time" if "Date/Time" in df.columns else "Date"
+    if date_col not in df.columns:
+        raise ValueError(f"CSV must contain either 'Date/Time' or 'Date' column")
+    
+    dates_series = df[date_col].apply(parse_date)
+    
+    # Convert to WAT timezone and extract date portion
+    def get_date_in_wat(dt):
+        try:
+            if dt is None or pd.isna(dt):
+                return None
+        except (TypeError, ValueError):
+            return None
+        try:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=WAT_TZ)
+            elif dt.tzinfo != WAT_TZ:
+                dt = dt.astimezone(WAT_TZ)
+            return dt.date().strftime("%Y-%m-%d")
+        except (AttributeError, ValueError, TypeError):
+            return None
+    
+    date_strings = dates_series.apply(get_date_in_wat)
+    
+    # Count null/unparseable dates
+    null_count = int(date_strings.isna().sum())
+    if null_count > 0:
+        logging.warning(f"Found {null_count} row(s) with null/unparseable dates (will be ignored)")
+    
+    # Count past dates (< from_date) - log but don't save
+    all_dates = date_strings.dropna().unique()
+    past_dates = [d for d in all_dates if d < from_date]
+    past_count = 0
+    if past_dates:
+        past_mask = date_strings.isin(past_dates)
+        past_count = int(past_mask.sum())
+        logging.info(f"Found {past_count} row(s) for past dates (< {from_date}): {', '.join(sorted(past_dates))} (ignored)")
+    
+    # Create directory for split files using human-readable company folder name
+    split_dir = repo_root / "uploads" / "range_raw" / company_dir / f"{from_date}_to_{to_date}"
+    split_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Split by date (in-range) - track row counts without re-reading
+    date_to_file = {}
+    in_range_count = 0
+    for target_date_str in date_list:
+        target_mask = date_strings == target_date_str
+        target_df = df[target_mask].copy().reset_index(drop=True)
+        
+        if len(target_df) > 0:
+            # Create filename: BookKeeping_YYYY-MM-DD.csv
+            split_filename = f"BookKeeping_{target_date_str}.csv"
+            split_path = split_dir / split_filename
+            target_df.to_csv(split_path, index=False)
+            date_to_file[target_date_str] = str(split_path)
+            in_range_count += len(target_df)
+            logging.info(f"Created split file for {target_date_str}: {split_filename} ({len(target_df)} rows)")
+        else:
+            logging.warning(f"No rows found for {target_date_str}, skipping split file")
+    
+    # Identify and write future out-of-range rows as raw spill files
+    # Future = date > to_date
+    future_spill_to_file = {}
+    future_spill_details = {}  # {date: row_count} for notifications
+    future_count = 0
+    
+    # Get all unique dates that are future (> to_date)
+    future_dates = [d for d in all_dates if d > to_date]
+    
+    if future_dates:
+        # Create spill_raw directory
+        spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
+        spill_raw_dir.mkdir(parents=True, exist_ok=True)
+        
+        logging.info(f"\nFound {len(future_dates)} future date(s) outside range (> {to_date})")
+        
+        for future_date_str in sorted(future_dates):
+            future_mask = date_strings == future_date_str
+            future_df = df[future_mask].copy().reset_index(drop=True)
+            
+            if len(future_df) > 0:
+                spill_filename = f"BookKeeping_raw_spill_{future_date_str}.csv"
+                spill_path = spill_raw_dir / spill_filename
+                future_df.to_csv(spill_path, index=False)
+                future_spill_to_file[future_date_str] = str(spill_path)
+                future_spill_details[future_date_str] = len(future_df)
+                future_count += len(future_df)
+                logging.info(f"Created raw spill file for {future_date_str}: {spill_filename} ({len(future_df)} rows)")
+    
+    # Log summary (no re-reading CSVs needed)
+    logging.info(f"\nSplit summary: {in_range_count} rows in-range, {future_count} rows future spill, {past_count} rows past (ignored), {null_count} rows null (ignored)")
+    
+    # Build stats dict for caller
+    split_stats = {
+        "total_rows": total_rows,
+        "in_range_rows": in_range_count,
+        "future_rows": future_count,
+        "past_rows": past_count,
+        "null_rows": null_count,
+        "future_spill_details": future_spill_details,
+    }
+    
+    return date_to_file, future_spill_to_file, split_stats
+
+
+def reconcile_company(company_key: str, target_date: str, config, repo_root: Path) -> dict:
+    """
+    Reconcile EPOS totals vs QBO totals for a specific company and date.
+    Returns a reconcile dict for inclusion in summary.
+    
+    Args:
+        company_key: Company identifier
+        target_date: Target date in YYYY-MM-DD format
+        config: CompanyConfig object
+        repo_root: Repository root path
+    
+    Returns:
+        Dict with reconcile status, totals, and counts
+    """
+    reconcile_result = {
+        "status": "NOT RUN",
+        "reason": "unknown"
+    }
+    
+    try:
+        # Determine the processed CSV prefix for this company.
+        # CompanyConfig implementations differ across iterations, so we support multiple attribute shapes.
+        csv_prefix = None
+        try:
+            output_cfg = getattr(config, "output_config", None)
+            if isinstance(output_cfg, dict):
+                csv_prefix = output_cfg.get("csv_prefix")
+        except Exception:
+            csv_prefix = None
+
+        if not csv_prefix:
+            csv_prefix = getattr(config, "csv_prefix", None)
+
+        if not csv_prefix:
+            # Fallbacks (historical defaults)
+            csv_prefix = "single_sales_receipts"
+
+        # Get EPOS total from processed CSV
+        # Check repo root first (before archiving), then Uploaded folder (after archiving)
+        csv_pattern = f"{csv_prefix}_*.csv"
+        csv_files = []
+
+        # Check repo root first (where CSV is before archiving)
+        csv_files = list(repo_root.glob(csv_pattern))
+
+        # Fallback to Uploaded folder if not found in repo root
+        if not csv_files:
+            uploaded_dir = repo_root / "Uploaded" / target_date
+            if uploaded_dir.exists():
+                csv_files = list(uploaded_dir.glob(csv_pattern))
+
+        if not csv_files:
+            reconcile_result["reason"] = "processed CSV file not found"
+            return reconcile_result
+
+        # Use most recent CSV
+        latest_csv = max(csv_files, key=lambda p: p.stat().st_mtime)
+        df = pd.read_csv(latest_csv)
+
+                # Filter by target_date if *SalesReceiptDate column exists
+        if "*SalesReceiptDate" in df.columns:
+            # Parse *SalesReceiptDate using the company-configured format when possible.
+            # Company A often uses YYYY-MM-DD; Company B may use DD/MM/YYYY.
+            date_format = getattr(config, "date_format", None)
+
+            # Attempt strict parse first if a format is provided
+            if isinstance(date_format, str) and date_format.strip():
+                try:
+                    df["_sr_date"] = pd.to_datetime(
+                        df["*SalesReceiptDate"],
+                        format=date_format,
+                        errors="coerce",
+                    )
+                except Exception:
+                    df["_sr_date"] = pd.to_datetime(df["*SalesReceiptDate"], errors="coerce")
+            else:
+                # Heuristic: if values contain '/', prefer dayfirst=True
+                sample = df["*SalesReceiptDate"].dropna().astype(str).head(20)
+                dayfirst = any("/" in s for s in sample)
+                df["_sr_date"] = pd.to_datetime(
+                    df["*SalesReceiptDate"],
+                    errors="coerce",
+                    dayfirst=dayfirst,
+                )
+
+            target_dt = pd.to_datetime(target_date, errors="coerce")
+            if pd.isna(target_dt):
+                reconcile_result["reason"] = f"invalid target_date: {target_date}"
+                return reconcile_result
+
+            df = df[df["_sr_date"].dt.date == target_dt.date()].copy()
+            df = df.drop(columns=["_sr_date"], errors="ignore")
+
+        # Calculate EPOS totals
+        if "*ItemAmount" in df.columns:
+            epos_total = float(df["*ItemAmount"].sum())
+        else:
+            epos_total = 0.0
+
+        epos_count = df["*SalesReceiptNo"].nunique() if "*SalesReceiptNo" in df.columns else 0
+
+        # Get QBO total using query_qbo_for_company.py
+        query_script = repo_root / "query_qbo_for_company.py"
+        if not query_script.exists():
+            reconcile_result["reason"] = "query_qbo_for_company.py not found"
+            return reconcile_result
+
+        # Query QBO for receipts on target_date (get Id and TotalAmt)
+        cmd = [
+            sys.executable,
+            str(query_script),
+            "--company", company_key,
+            "query",
+            f"SELECT Id, TotalAmt FROM SalesReceipt WHERE TxnDate = '{target_date}'"
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
+
+        if result.returncode != 0:
+            reconcile_result["reason"] = f"QBO query failed: {result.stderr[:100]}"
+            return reconcile_result
+
+        try:
+            qbo_data = json.loads(result.stdout)
+            receipts = qbo_data.get("QueryResponse", {}).get("SalesReceipt", [])
+            if not isinstance(receipts, list):
+                receipts = [receipts] if receipts else []
+
+            qbo_total = sum(float(r.get("TotalAmt", 0) or 0) for r in receipts)
+            qbo_count = len(receipts)
+
+            # Compare
+            difference = abs(qbo_total - epos_total)
+            tolerance = 1.0  # Allow ₦1.00 difference for rounding
+
+            if difference <= tolerance:
+                status = "MATCH"
+            else:
+                status = "MISMATCH"
+
+            reconcile_result = {
+                "status": status,
+                "epos_total": epos_total,
+                "epos_count": epos_count,
+                "qbo_total": qbo_total,
+                "qbo_count": qbo_count,
+                "difference": difference
+            }
+
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            reconcile_result["reason"] = f"Failed to parse QBO response: {str(e)[:100]}"
+            return reconcile_result
+
+    except Exception as e:
+        logging.warning(f"Reconciliation failed: {e}")
+        reconcile_result["reason"] = str(e)[:100]
+        return reconcile_result
+
+    return reconcile_result
+
+
+def main(company_key: str, target_date: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None) -> int:
+    """
+    Full pipeline for a specific company:
 
     1) epos_playwright.py
        - Logs into EPOS and downloads the latest bookkeeping CSV
          into the repo root directory.
 
-    2) epos_to_qb_single.py
+    2) transform.py
        - Reads the latest raw EPOS file from repo root
          and produces a single consolidated QuickBooks-ready CSV
-         in repo root (single_sales_receipts_*.csv).
-       - Writes metadata to last_epos_transform.json
+         in repo root (company-specific prefix).
+       - Writes metadata to company-specific metadata file
 
     3) qbo_upload.py
-       - Reads the latest single_sales_receipts_*.csv from repo root
-         and creates Sales Receipts in the QBO sandbox via API.
+       - Reads the latest CSV from repo root
+         and creates Sales Receipts in the QBO company via API.
 
     4) Archive (run_pipeline.py)
-       - After successful upload, reads last_epos_transform.json
+       - After successful upload, reads metadata file
        - Creates Uploaded/<date>/ folder
        - Moves raw CSV, processed CSV(s), and metadata to archive folder
     
     Args:
+        company_key: Company identifier ('company_a' or 'company_b') - REQUIRED
         target_date: Target business date in YYYY-MM-DD format. If None, uses yesterday.
+        from_date: Start date for range mode in YYYY-MM-DD format (must be used with to_date)
+        to_date: End date for range mode in YYYY-MM-DD format (must be used with from_date)
     """
-    # Determine target_date: use provided, or default to yesterday
-    if not target_date:
-        target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        logging.info(f"No target_date provided, using yesterday: {target_date}")
-    else:
-        logging.info(f"Using provided target_date: {target_date}")
+    # Load company configuration
+    try:
+        config = load_company_config(company_key)
+    except Exception as e:
+        logging.error(f"Failed to load company config for '{company_key}': {e}")
+        available = get_available_companies()
+        if available:
+            logging.error(f"Available companies: {', '.join(available)}")
+        else:
+            logging.error("No company configs found. Please create config files in companies/ directory.")
+        raise SystemExit(1)
     
-    pipeline_name = "EPOS -> QuickBooks Pipeline"
-    date_range_str = target_date  # Use target_date for notifications
+    # Safety check: verify realm_id matches tokens
+    try:
+        verify_realm_match(company_key, config.realm_id)
+    except RuntimeError as e:
+        logging.error(f"Realm ID safety check failed: {e}")
+        raise SystemExit(1)
+    
+    # Log company info for safety
+    logging.info("=" * 60)
+    logging.info(f"COMPANY: {config.display_name} ({company_key})")
+    logging.info(f"REALM ID: {config.realm_id}")
+    logging.info(f"DEPOSIT ACCOUNT: {config.deposit_account}")
+    logging.info(f"TAX MODE: {config.tax_mode}")
+    logging.info("=" * 60)
+    
+    # Determine mode: range mode if both from_date and to_date are provided
+    is_range_mode = from_date is not None and to_date is not None
+    
+    if is_range_mode:
+        logging.info(f"Range mode: {from_date} to {to_date}")
+        date_range_str = f"{from_date} to {to_date}"
+    else:
+        # Single-day mode: determine target_date
+        if not target_date:
+            target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            logging.info(f"No target_date provided, using yesterday: {target_date}")
+        else:
+            logging.info(f"Using provided target_date: {target_date}")
+        date_range_str = target_date
+    
+    pipeline_name = f"{config.display_name} -> QuickBooks Pipeline"
 
-    logging.info("Starting EPOS -> QuickBooks pipeline...\n")
-    notify_pipeline_start(pipeline_name, log_file, date_range_str)
+    logging.info(f"Starting {pipeline_name}...\n")
+    
+    # Send ONE start notification (for range or single day)
+    start_metadata = {
+        "target_date": target_date if not is_range_mode else None,
+        "from_date": from_date if is_range_mode else None,
+        "to_date": to_date if is_range_mode else None,
+        "company_key": company_key,
+        "company_name": config.display_name
+    }
+    notify_pipeline_start(pipeline_name, log_file, date_range_str, config.slack_webhook_url, start_metadata)
+
+    # Track warnings for watchdog notification (sent ONCE if any warnings occur)
+    warnings = []
+    watchdog_sent = False
 
     try:
-        # Phase 1: Download from EPOS with target_date
-        run_step(
-            "Phase 1: Download EPOS CSV (epos_playwright)",
-            "epos_playwright.py",
-            ["--target-date", target_date]
-        )
-
-        # Phase 2: Transform to single QuickBooks-ready CSV with target_date filtering
-        run_step(
-            "Phase 2: Transform to single CSV (epos_to_qb_single)",
-            "epos_to_qb_single.py",
-            ["--target-date", target_date]
-        )
-
-        # Phase 3: Upload to QBO sandbox
-        run_step("Phase 3: Upload to QBO (qbo_upload)", "qbo_upload.py")
-
-        # Phase 4: Archive files after successful upload
-        logging.info("\n=== Phase 4: Archive Files ===")
-        try:
-            archive_files(repo_root)
-        except Exception as e:
-            logging.error(f"[ERROR] Phase 4: Archive failed: {e}")
-            # Don't fail the pipeline if archiving fails - upload already succeeded
-            logging.warning("Continuing despite archive failure (upload was successful)")
-
-        # Phase 5: Reconcile EPOS vs QBO totals
-        logging.info("\n=== Phase 5: Reconciliation ===")
-        try:
-            # Read target_date or normalized_date from metadata before it gets archived
-            metadata_path = repo_root / "last_epos_transform.json"
-            reconcile_date = None
+        if is_range_mode:
+            # RANGE MODE: Atomic processing - one download, split, then process per day
+            # 
+            # Range mode semantics:
+            # - One EPOS download for the entire range
+            # - One Slack start notification for the range
+            # - Per-day processing: transform, upload, reconcile, archive
+            # - Per-day completion notifications (NO per-day start notifications)
+            # - One final Slack completion notification for the entire range
+            # - If any per-day step fails with SystemExit, the entire range stops
+            # - Original range CSV and split files are archived only after ALL days complete successfully
+            #
+            # Spill handling:
+            # - Spill files created during day N are written to uploads/spill/
+            # - Spill files are automatically merged when processing day N+1 (if date matches)
+            # - Spill files are archived only once they are used (via archive_files())
+            logging.info("\n=== RANGE MODE: Processing date range ===")
+            logging.info("Range mode is atomic: all days must complete successfully for final archival")
             
+            # Compute human-readable company folder name for filesystem paths
+            company_dir = company_dir_name(config.display_name)
+            logging.info(f"Using company folder: {company_dir}")
+            
+            # Deterministic range-mode raw CSV detection: snapshot repo-root CSVs before download
+            # This ensures we use exactly the file created by the download, not a stale CSV
+            before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+            
+            # Phase 1: Download EPOS CSV once for the entire range
+            run_step(
+                "Phase 1: Download EPOS CSV (epos_playwright) - Range",
+                "epos_playwright.py",
+                ["--company", company_key, "--from-date", from_date, "--to-date", to_date]
+            )
+            
+            # Snapshot repo-root CSVs after download and detect new files via set difference
+            after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+            new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
+            
+            # Defensive: exclude processed CSVs if any appeared (shouldn't happen, but safety check)
+            new_csvs = [
+                p for p in new_csvs
+                if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
+            ]
+            
+            if not new_csvs:
+                error_msg = "[ERROR] Range mode: no new raw EPOS CSV appeared in repo root after download"
+                logging.error(error_msg)
+                raise SystemExit(error_msg)
+            
+            if len(new_csvs) > 1:
+                logging.warning(
+                    "Range mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
+                    ", ".join(p.name for p in new_csvs),
+                )
+            
+            downloaded_csv = new_csvs[-1]
+            logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
+            
+            # Split CSV into per-day files
+            logging.info("\n=== Splitting CSV into per-day files ===")
+            date_to_file, future_spill_to_file, split_stats = split_csv_by_date(downloaded_csv, from_date, to_date, company_dir, repo_root)
+            
+            if not date_to_file:
+                raise SystemExit("No data found in date range after splitting")
+            
+            # Add warnings for future raw spills (for Slack notification)
+            if future_spill_to_file:
+                logging.info(f"Future raw spill files created for: {', '.join(sorted(future_spill_to_file.keys()))}")
+                for spill_date, row_count in split_stats.get("future_spill_details", {}).items():
+                    warnings.append(f"Future raw spill: {spill_date} ({row_count} rows)")
+                
+                # Send watchdog notification for future spills (high-signal)
+                if not watchdog_sent:
+                    logging.info("\n=== Watchdog: Sending update notification (post-split) ===")
+                    watchdog_summary = {
+                        "from_date": from_date,
+                        "to_date": to_date,
+                        "company_key": company_key,
+                        "company_name": config.display_name,
+                        "phase": "Split",
+                        "phase_status": "Completed",
+                        "warnings": warnings.copy(),
+                    }
+                    notify_pipeline_update(pipeline_name, log_file, watchdog_summary, config.slack_webhook_url)
+                    watchdog_sent = True
+            
+            # Set up spill_raw directory for merging existing raw spills
+            spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
+            
+            # Generate date list for iteration
+            from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+            to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+            date_list = []
+            current = from_dt
+            while current <= to_dt:
+                date_list.append(current.strftime("%Y-%m-%d"))
+                current += timedelta(days=1)
+            
+            # Track per-day results for final summary
+            per_day_results = []
+            
+            # Process each day in the range (atomic: any SystemExit stops the range)
+            for day_date in date_list:
+                if day_date not in date_to_file:
+                    logging.warning(f"No data for {day_date}, skipping")
+                    continue
+                
+                logging.info(f"\n{'='*60}")
+                logging.info(f"Processing day: {day_date}")
+                logging.info(f"{'='*60}")
+                
+                day_raw_file = date_to_file[day_date]
+                used_raw_spill_for_day = []  # Track raw spills used for this day
+                
+                # Check for existing raw spill file for this day and merge if present
+                raw_spill_path = spill_raw_dir / f"BookKeeping_raw_spill_{day_date}.csv"
+                raw_file_to_use = day_raw_file
+                
+                if raw_spill_path.exists():
+                    logging.info(f"Found raw spill file for {day_date}: {raw_spill_path.name}")
+                    
+                    # Merge day_raw_file + raw_spill into a combined file
+                    split_dir = Path(day_raw_file).parent
+                    combined_path = split_dir / f"CombinedRaw_{day_date}.csv"
+                    
+                    merge_stats = merge_raw_csvs(
+                        Path(day_raw_file),
+                        [raw_spill_path],
+                        combined_path
+                    )
+                    logging.info(f"Merged split ({merge_stats['base_rows']} rows) + raw spill ({merge_stats['extra_rows']} rows) -> final ({merge_stats['total_rows']} rows): {combined_path.name}")
+                    
+                    raw_file_to_use = str(combined_path)
+                    used_raw_spill_for_day.append(raw_spill_path)
+                    warnings.append(f"{day_date}: merged target split ({merge_stats['base_rows']} rows) + raw spill ({merge_stats['extra_rows']} rows) -> final ({merge_stats['total_rows']} rows)")
+                
+                # Phase 2: Transform using raw file (combined or original)
+                run_step(
+                    f"Phase 2: Transform to single CSV (transform) - {day_date}",
+                    "transform.py",
+                    ["--company", company_key, "--target-date", day_date, "--raw-file", raw_file_to_use]
+                )
+                
+                # Check for spill files after Phase 2
+                metadata_path = repo_root / config.metadata_file
+                if metadata_path.exists():
+                    try:
+                        with open(metadata_path, "r") as f:
+                            phase2_metadata = json.load(f)
+                        rows_non_target = phase2_metadata.get("rows_non_target", 0)
+                        if rows_non_target > 0:
+                            warnings.append(f"{day_date}: {rows_non_target} non-target row(s) ignored by transform")
+                    except Exception:
+                        pass
+                
+                # Phase 3: Upload to QBO
+                run_step(
+                    f"Phase 3: Upload to QBO (qbo_upload) - {day_date}",
+                    "qbo_upload.py",
+                    ["--company", company_key]
+                )
+                
+                # Check upload stats after Phase 3
+                if metadata_path.exists():
+                    try:
+                        with open(metadata_path, "r") as f:
+                            phase3_metadata = json.load(f)
+                        upload_stats = phase3_metadata.get("upload_stats")
+                        if upload_stats:
+                            skipped = upload_stats.get("skipped", 0)
+                            failed = upload_stats.get("failed", 0)
+                            if skipped > 0:
+                                warnings.append(f"{day_date}: {skipped} duplicate receipt(s) skipped")
+                            if failed > 0:
+                                warnings.append(f"{day_date}: {failed} upload(s) failed")
+                    except Exception:
+                        pass
+                
+                # Phase 4: Reconcile EPOS vs QBO totals
+                # Reconciliation mismatches are warnings, not fatal (range continues)
+                logging.info(f"\n=== Phase 4: Reconciliation - {day_date} ===")
+                reconcile_result = None
+                try:
+                    reconcile_result = reconcile_company(company_key, day_date, config, repo_root)
+                    if reconcile_result.get("status") == "MATCH":
+                        logging.info(f"[OK] Reconciliation: MATCH (EPOS: ₦{reconcile_result.get('epos_total', 0):,.2f}, QBO: ₦{reconcile_result.get('qbo_total', 0):,.2f})")
+                    elif reconcile_result.get("status") == "MISMATCH":
+                        diff = reconcile_result.get("difference", 0)
+                        logging.warning(f"[WARN] Reconciliation: MISMATCH (Difference: ₦{diff:,.2f})")
+                        warnings.append(f"{day_date}: Reconciliation mismatch (₦{diff:,.2f})")
+                    else:
+                        reason = reconcile_result.get("reason", "unknown")
+                        logging.warning(f"[WARN] Reconciliation: NOT RUN ({reason})")
+                        warnings.append(f"{day_date}: Reconciliation not run ({reason})")
+                except Exception as e:
+                    logging.error(f"[ERROR] Phase 4: Reconciliation failed: {e}")
+                    logging.warning("Continuing despite reconciliation failure (upload was successful)")
+                    reconcile_result = {"status": "NOT RUN", "reason": str(e)[:100]}
+                    warnings.append(f"{day_date}: Reconciliation failed ({str(e)[:50]})")
+                
+                # Phase 5: Archive files
+                logging.info(f"\n=== Phase 5: Archive Files - {day_date} ===")
+                try:
+                    archive_files(repo_root, config)
+                    
+                    # Archive used raw spill files after successful archive
+                    if used_raw_spill_for_day:
+                        # Get the archive directory from the normalized_date
+                        archive_dir = repo_root / "Uploaded" / day_date
+                        archive_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        for raw_spill_path in used_raw_spill_for_day:
+                            if raw_spill_path.exists() and raw_spill_path.is_file():
+                                dest_name = f"RAW_SPILL_{raw_spill_path.name}"
+                                dest_path = archive_dir / dest_name
+                                shutil.move(str(raw_spill_path), str(dest_path))
+                                logging.info(f"Archived used raw spill: {raw_spill_path.name} -> Uploaded/{day_date}/{dest_name}")
+                            else:
+                                logging.warning(f"Raw spill file not found for archiving: {raw_spill_path}")
+                except Exception as e:
+                    logging.error(f"[ERROR] Phase 5: Archive failed: {e}")
+                    logging.warning("Continuing despite archive failure (upload was successful)")
+                
+                # Send per-day completion notification (but NOT start notification)
+                metadata = None
+                if metadata_path.exists():
+                    try:
+                        with open(metadata_path, "r") as f:
+                            metadata = json.load(f)
+                    except Exception:
+                        pass
+                
+                summary = {
+                    "target_date": day_date,
+                    "company_key": company_key,
+                    "company_name": config.display_name,
+                    "is_range_day": True,
+                    "range": f"{from_date} to {to_date}"
+                }
+                if metadata:
+                    summary.update(metadata)
+                if reconcile_result:
+                    summary["reconcile"] = reconcile_result
+                
+                # Store per-day result for final summary
+                per_day_results.append({
+                    "date": day_date,
+                    "reconcile": reconcile_result,
+                    "warnings": [w for w in warnings if w.startswith(f"{day_date}:")]
+                })
+                
+                notify_pipeline_success(
+                    f"{pipeline_name} - {day_date}",
+                    log_file,
+                    day_date,
+                    summary,
+                    config.slack_webhook_url
+                )
+                logging.info(f"Completed processing for {day_date} ✅")
+            
+            # All per-day loops completed successfully - archive range raw files
+            logging.info("\n" + "="*60)
+            logging.info("All days processed successfully - archiving range raw files")
+            logging.info("="*60)
+            
+            try:
+                archive_range_raw_files(repo_root, company_dir, company_key, from_date, to_date, downloaded_csv)
+            except Exception as e:
+                logging.error(f"[ERROR] Failed to archive range raw files: {e}")
+                logging.warning("Continuing despite archive failure (all days processed successfully)")
+                warnings.append(f"Range archive failed: {str(e)[:50]}")
+            
+            # Final success notification for the entire range
+            logging.info("\n" + "="*60)
+            logging.info("Range mode completed successfully ✅")
+            logging.info("="*60)
+            
+            # Build final summary with per-day reconciliation results
+            final_summary = {
+                "from_date": from_date,
+                "to_date": to_date,
+                "company_key": company_key,
+                "company_name": config.display_name,
+                "days_processed": len(date_to_file),
+                "per_day_results": per_day_results,
+                "warnings": warnings
+            }
+            notify_pipeline_success(pipeline_name, log_file, date_range_str, final_summary, config.slack_webhook_url)
+            return 0
+        
+        else:
+            # SINGLE-DAY MODE: Now uses same deterministic raw file selection as range mode
+            # This ensures consistency and prevents data loss from future rows
+            logging.info("\n=== SINGLE-DAY MODE: Processing target date ===")
+            
+            # Compute human-readable company folder name (same as range mode)
+            company_dir = company_dir_name(config.display_name)
+            logging.info(f"Using company folder: {company_dir}")
+            
+            # Deterministic CSV detection: snapshot repo-root CSVs before download
+            before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+            
+            # Phase 1: Download from EPOS with target_date and company config
+            run_step(
+                "Phase 1: Download EPOS CSV (epos_playwright)",
+                "epos_playwright.py",
+                ["--company", company_key, "--target-date", target_date]
+            )
+            
+            # Snapshot repo-root CSVs after download and detect new files via set difference
+            after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+            new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
+            
+            # Defensive: exclude processed CSVs if any appeared
+            new_csvs = [
+                p for p in new_csvs
+                if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
+            ]
+            
+            if not new_csvs:
+                error_msg = "[ERROR] Single-day mode: no new raw EPOS CSV appeared in repo root after download"
+                logging.error(error_msg)
+                raise SystemExit(error_msg)
+            
+            if len(new_csvs) > 1:
+                logging.warning(
+                    "Single-day mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
+                    ", ".join(p.name for p in new_csvs),
+                )
+            
+            downloaded_csv = new_csvs[-1]
+            logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
+            
+            # Split CSV into per-day files (same mechanism as range mode)
+            # For single-day, from_date == to_date
+            logging.info("\n=== Splitting CSV by date ===")
+            date_to_file, future_spill_to_file, split_stats = split_csv_by_date(
+                downloaded_csv, target_date, target_date, company_dir, repo_root
+            )
+            
+            # Check if we have data for the target date
+            if target_date not in date_to_file:
+                error_msg = f"[ERROR] No rows found for target_date {target_date} after splitting; abort."
+                logging.error(error_msg)
+                raise SystemExit(error_msg)
+            
+            day_raw_file = date_to_file[target_date]
+            used_raw_spill_for_day = []  # Track raw spills used for this day
+            
+            # Add warnings for future raw spills (for Slack notification)
+            if future_spill_to_file:
+                logging.info(f"Future raw spill files created for: {', '.join(sorted(future_spill_to_file.keys()))}")
+                for spill_date, row_count in split_stats.get("future_spill_details", {}).items():
+                    warnings.append(f"Future raw spill: {spill_date} ({row_count} rows)")
+            
+            # Set up spill_raw directory for merging existing raw spills
+            spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
+            
+            # Check for existing raw spill file for target_date and merge if present
+            raw_spill_path = spill_raw_dir / f"BookKeeping_raw_spill_{target_date}.csv"
+            raw_file_to_use = day_raw_file
+            
+            if raw_spill_path.exists():
+                logging.info(f"Found raw spill file for {target_date}: {raw_spill_path.name}")
+                
+                # Merge day_raw_file + raw_spill into a combined file
+                split_dir = Path(day_raw_file).parent
+                combined_path = split_dir / f"CombinedRaw_{target_date}.csv"
+                
+                merge_stats = merge_raw_csvs(
+                    Path(day_raw_file),
+                    [raw_spill_path],
+                    combined_path
+                )
+                logging.info(f"Merged split ({merge_stats['base_rows']} rows) + raw spill ({merge_stats['extra_rows']} rows) -> final ({merge_stats['total_rows']} rows): {combined_path.name}")
+                
+                raw_file_to_use = str(combined_path)
+                used_raw_spill_for_day.append(raw_spill_path)
+                warnings.append(f"{target_date}: merged target split ({merge_stats['base_rows']} rows) + raw spill ({merge_stats['extra_rows']} rows) -> final ({merge_stats['total_rows']} rows)")
+            
+            # Send watchdog notification if we have future spills or merged spills (high-signal only)
+            if (future_spill_to_file or used_raw_spill_for_day) and not watchdog_sent:
+                logging.info("\n=== Watchdog: Sending update notification (post-split) ===")
+                watchdog_summary = {
+                    "target_date": target_date,
+                    "company_key": company_key,
+                    "company_name": config.display_name,
+                    "phase": "Split/Merge",
+                    "phase_status": "Completed",
+                    "warnings": warnings.copy(),  # Copy current warnings
+                }
+                notify_pipeline_update(pipeline_name, log_file, watchdog_summary, config.slack_webhook_url)
+                watchdog_sent = True
+            
+            # Phase 2: Transform using raw file (combined or original)
+            run_step(
+                "Phase 2: Transform to single CSV (transform)",
+                "transform.py",
+                ["--company", company_key, "--target-date", target_date, "--raw-file", raw_file_to_use]
+            )
+            
+            # Check for spill files after Phase 2 (transformed spill - still logged but we don't rely on it)
+            metadata_path = repo_root / config.metadata_file
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "r") as f:
+                        phase2_metadata = json.load(f)
+                    rows_non_target = phase2_metadata.get("rows_non_target", 0)
+                    if rows_non_target > 0:
+                        warnings.append(f"{rows_non_target} non-target row(s) ignored by transform")
+                except Exception:
+                    pass  # Ignore metadata read errors
+
+            # Phase 3: Upload to QBO
+            run_step(
+                "Phase 3: Upload to QBO (qbo_upload)",
+                "qbo_upload.py",
+                ["--company", company_key]
+            )
+            
+            # Check upload stats after Phase 3 for partial failures
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "r") as f:
+                        phase3_metadata = json.load(f)
+                    upload_stats = phase3_metadata.get("upload_stats")
+                    if upload_stats:
+                        skipped = upload_stats.get("skipped", 0)
+                        failed = upload_stats.get("failed", 0)
+                        if skipped > 0:
+                            warnings.append(f"{skipped} duplicate receipt(s) skipped")
+                        if failed > 0:
+                            warnings.append(f"{failed} upload(s) failed (continuing)")
+                except Exception:
+                    pass  # Ignore metadata read errors
+
+            # Phase 4: Reconcile EPOS vs QBO totals (BEFORE archiving so CSV is still in repo root)
+            logging.info("\n=== Phase 4: Reconciliation ===")
+            reconcile_result = None
+            try:
+                reconcile_result = reconcile_company(company_key, target_date, config, repo_root)
+                if reconcile_result.get("status") == "MATCH":
+                    logging.info(f"[OK] Reconciliation: MATCH (EPOS: ₦{reconcile_result.get('epos_total', 0):,.2f}, QBO: ₦{reconcile_result.get('qbo_total', 0):,.2f})")
+                elif reconcile_result.get("status") == "MISMATCH":
+                    diff = reconcile_result.get("difference", 0)
+                    logging.warning(f"[WARN] Reconciliation: MISMATCH (Difference: ₦{diff:,.2f})")
+                else:
+                    reason = reconcile_result.get("reason", "unknown")
+                    logging.warning(f"[WARN] Reconciliation: NOT RUN ({reason})")
+            except Exception as e:
+                logging.error(f"[ERROR] Phase 4: Reconciliation failed: {e}")
+                logging.warning("Continuing despite reconciliation failure (upload was successful)")
+                reconcile_result = {"status": "NOT RUN", "reason": str(e)[:100]}
+
+            # Phase 5: Archive files after successful upload and reconciliation
+            logging.info("\n=== Phase 5: Archive Files ===")
+            try:
+                archive_files(repo_root, config)
+                
+                # Archive used raw spill files after successful archive
+                if used_raw_spill_for_day:
+                    # Get the archive directory for this date
+                    archive_dir = repo_root / "Uploaded" / target_date
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    for raw_spill_path in used_raw_spill_for_day:
+                        if raw_spill_path.exists() and raw_spill_path.is_file():
+                            dest_name = f"RAW_SPILL_{raw_spill_path.name}"
+                            dest_path = archive_dir / dest_name
+                            shutil.move(str(raw_spill_path), str(dest_path))
+                            logging.info(f"Archived used raw spill: {raw_spill_path.name} -> Uploaded/{target_date}/{dest_name}")
+                        else:
+                            logging.warning(f"Raw spill file not found for archiving: {raw_spill_path}")
+            except Exception as e:
+                logging.error(f"[ERROR] Phase 5: Archive failed: {e}")
+                # Don't fail the pipeline if archiving fails - upload already succeeded
+                logging.warning("Continuing despite archive failure (upload was successful)")
+            
+            # Single-day mode cleanup: remove scratch split directory after successful archive
+            # Move any remaining files to Uploaded/<target_date>/ before deleting
+            split_dir = repo_root / "uploads" / "range_raw" / company_dir / f"{target_date}_to_{target_date}"
+            if split_dir.exists():
+                logging.info(f"\n=== Cleaning up single-day split directory ===")
+                archive_dir = repo_root / "Uploaded" / target_date
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Move remaining .csv files with appropriate prefixes
+                remaining_files = list(split_dir.glob("*.csv"))
+                for csv_file in remaining_files:
+                    # Determine prefix based on filename pattern
+                    if csv_file.name.startswith("BookKeeping_") and not csv_file.name.startswith("BookKeeping_raw_spill_"):
+                        prefix = "RAW_SPLIT_"
+                    elif csv_file.name.startswith("CombinedRaw_"):
+                        prefix = "RAW_COMBINED_"
+                    else:
+                        prefix = "RAW_INPUT_"
+                    
+                    dest_name = f"{prefix}{csv_file.name}"
+                    dest_path = archive_dir / dest_name
+                    
+                    # Don't overwrite if file already exists in archive
+                    if not dest_path.exists():
+                        shutil.move(str(csv_file), str(dest_path))
+                        logging.info(f"Moved remaining split file: {csv_file.name} -> Uploaded/{target_date}/{dest_name}")
+                    else:
+                        logging.info(f"Skipped (already archived): {csv_file.name}")
+                        # Remove the duplicate from split dir
+                        csv_file.unlink()
+                
+                # Remove split_dir if now empty
+                try:
+                    if split_dir.exists() and not any(split_dir.iterdir()):
+                        split_dir.rmdir()
+                        logging.info(f"Removed empty split directory: {split_dir.name}")
+                except OSError as e:
+                    logging.warning(f"Could not remove split directory: {e}")
+                
+                # Attempt to clean up parent directories if empty
+                try:
+                    company_range_dir = repo_root / "uploads" / "range_raw" / company_dir
+                    if company_range_dir.exists() and not any(company_range_dir.iterdir()):
+                        company_range_dir.rmdir()
+                        logging.info(f"Removed empty company range directory: {company_range_dir.name}")
+                except OSError:
+                    pass  # Directory not empty or other error
+                
+                try:
+                    range_raw_dir = repo_root / "uploads" / "range_raw"
+                    if range_raw_dir.exists() and not any(range_raw_dir.iterdir()):
+                        range_raw_dir.rmdir()
+                        logging.info(f"Removed empty range_raw directory")
+                except OSError:
+                    pass  # Directory not empty or other error
+                
+                logging.info("[OK] Single-day split directory cleanup complete")
+            
+            # Archive the original downloaded EPOS CSV from repo root
+            if downloaded_csv.exists() and downloaded_csv.is_file():
+                archive_dir = repo_root / "Uploaded" / target_date
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                original_dest = archive_dir / f"ORIGINAL_{downloaded_csv.name}"
+                
+                if original_dest.exists():
+                    # Don't overwrite - suffix with timestamp
+                    timestamp = datetime.now().strftime("%H%M%S")
+                    original_dest = archive_dir / f"ORIGINAL_{downloaded_csv.stem}_{timestamp}{downloaded_csv.suffix}"
+                    logging.warning(f"Archive destination exists, using timestamped name: {original_dest.name}")
+                
+                shutil.move(str(downloaded_csv), str(original_dest))
+                logging.info(f"Archived original EPOS CSV: {downloaded_csv.name} -> Uploaded/{target_date}/{original_dest.name}")
+            else:
+                logging.warning(f"Original downloaded CSV not found for archival: {downloaded_csv}")
+
+            # Success notification - load metadata for summary
+            metadata = None
+            metadata_path = repo_root / config.metadata_file
             if metadata_path.exists():
                 try:
                     with open(metadata_path, "r") as f:
                         metadata = json.load(f)
-                    # Prefer target_date, fallback to normalized_date
-                    reconcile_date = metadata.get("target_date") or metadata.get("normalized_date")
                 except Exception as e:
-                    logging.warning(f"Could not read metadata for reconciliation: {e}")
+                    logging.warning(f"Could not load metadata for notification: {e}")
             
-            # Use target_date if available, otherwise use yesterday as fallback
-            if not reconcile_date:
-                reconcile_date = target_date or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-                logging.info(f"No target_date/normalized_date in metadata, using: {reconcile_date}")
-            else:
-                logging.info(f"Reconciling for date: {reconcile_date}")
+            # Build summary with company info and metadata
+            summary = {
+                "target_date": target_date,
+                "company_key": company_key,
+                "company_name": config.display_name
+            }
+            if metadata:
+                summary.update(metadata)
             
-            # Run reconciliation (non-fatal - wrapped to catch SystemExit)
-            try:
-                cmd_reconcile(reconcile_date, None, tolerance=0.00)
-                logging.info("[OK] Phase 5: Reconciliation completed successfully.")
-            except SystemExit:
-                # cmd_reconcile calls sys.exit(1) on errors, catch it here
-                logging.warning("Reconciliation encountered errors but pipeline continues")
-            except Exception as e:
-                logging.error(f"[ERROR] Phase 5: Reconciliation failed: {e}")
-                logging.warning("Continuing despite reconciliation failure (upload was successful)")
-        except Exception as e:
-            logging.error(f"[ERROR] Phase 5: Reconciliation setup failed: {e}")
-            logging.warning("Continuing despite reconciliation failure (upload was successful)")
+            # Add reconciliation results to summary
+            if reconcile_result:
+                summary["reconcile"] = reconcile_result
+            
+            notify_pipeline_success(pipeline_name, log_file, date_range_str, summary, config.slack_webhook_url)
+            logging.info("\nPipeline completed successfully ✅")
+            return 0
 
-        # Success notification - load metadata for summary
+    except SystemExit as e:
+        logging.error("Pipeline failed", exc_info=True)
+        
+        # In range mode, if we fail during per-day processing, do NOT archive range files
+        if is_range_mode:
+            logging.warning("Range mode failed - range raw files will NOT be archived")
+        
+        # Try to load metadata with upload stats for better error reporting
         metadata = None
-        metadata_path = repo_root / "last_epos_transform.json"
+        metadata_path = repo_root / config.metadata_file
         if metadata_path.exists():
             try:
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
-            except Exception as e:
-                logging.warning(f"Could not load metadata for notification: {e}")
+            except Exception:
+                pass
         
-        notify_pipeline_success(pipeline_name, log_file, date_range_str, metadata)
-        logging.info("\nPipeline completed successfully ✅")
-        return 0
-
-    except SystemExit as e:
-        logging.error("Pipeline failed", exc_info=True)
-        notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
+        # Build summary with company info and metadata
+        summary = {
+            "target_date": target_date if not is_range_mode else None,
+            "from_date": from_date if is_range_mode else None,
+            "to_date": to_date if is_range_mode else None,
+            "company_key": company_key,
+            "company_name": config.display_name
+        }
+        if metadata:
+            summary.update(metadata)
+        
+        notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str, config.slack_webhook_url, summary)
         return 1
     except Exception as e:
         logging.error("Pipeline failed with unexpected error", exc_info=True)
-        notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str)
+        
+        # In range mode, if we fail during per-day processing, do NOT archive range files
+        if is_range_mode:
+            logging.warning("Range mode failed - range raw files will NOT be archived")
+        
+        # Try to load metadata with upload stats for better error reporting
+        metadata = None
+        metadata_path = repo_root / config.metadata_file
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+            except Exception:
+                pass
+        
+        # Build summary with company info and metadata
+        summary = {
+            "target_date": target_date if not is_range_mode else None,
+            "from_date": from_date if is_range_mode else None,
+            "to_date": to_date if is_range_mode else None,
+            "company_key": company_key,
+            "company_name": config.display_name
+        }
+        if metadata:
+            summary.update(metadata)
+        
+        notify_pipeline_failure(pipeline_name, log_file, str(e), date_range_str, config.slack_webhook_url, summary)
         return 1
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run EPOS -> QuickBooks pipeline for target business date."
+        description="Run EPOS -> QuickBooks pipeline for target business date or date range.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Single day (default)
+  python run_pipeline.py --company company_a --target-date 2025-12-25
+  python run_pipeline.py --company company_b  # Uses yesterday as target-date
+  
+  # Date range
+  python run_pipeline.py --company company_b --from-date 2025-12-02 --to-date 2025-12-04
+        """
+    )
+    parser.add_argument(
+        "--company",
+        required=True,
+        choices=get_available_companies(),
+        help="Company identifier (REQUIRED). Available: %(choices)s",
     )
     parser.add_argument(
         "--target-date",
-        help="Target business date in YYYY-MM-DD format (default: yesterday)",
+        help="Target business date in YYYY-MM-DD format (default: yesterday, ignored if --from-date and --to-date are provided)",
+    )
+    parser.add_argument(
+        "--from-date",
+        help="Start date for range mode in YYYY-MM-DD format (must be used with --to-date)",
+    )
+    parser.add_argument(
+        "--to-date",
+        help="End date for range mode in YYYY-MM-DD format (must be used with --from-date)",
     )
     args = parser.parse_args()
     
-    raise SystemExit(main(args.target_date))
+    if not args.company:
+        parser.error("--company is REQUIRED. Available companies: " + ", ".join(get_available_companies()))
+    
+    # Validation: --from-date and --to-date must be provided together
+    if (args.from_date is None) != (args.to_date is None):
+        parser.error("--from-date and --to-date must be provided together")
+    
+    raise SystemExit(main(args.company, args.target_date, args.from_date, args.to_date))
 

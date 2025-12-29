@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 import urllib.request
 import ssl
 
@@ -12,11 +13,19 @@ except ImportError:  # pragma: no cover - best effort
     certifi = None
 
 
-def send_slack_success(message: str) -> None:
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+def send_slack_success(message: str, webhook_url: str = None) -> None:
+    """
+    Send a Slack notification.
+    
+    Args:
+        message: Message to send
+        webhook_url: Optional webhook URL. If not provided, falls back to SLACK_WEBHOOK_URL env var.
+    """
+    if not webhook_url:
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL")
 
     if not webhook_url:
-        logging.info("SLACK_WEBHOOK_URL not set, skipping Slack notification.")
+        logging.info("Slack webhook URL not set, skipping Slack notification.")
         return
 
     payload = {
@@ -46,91 +55,247 @@ def send_slack_success(message: str) -> None:
         logging.error(f"Failed to send Slack message: {e}")
 
 
+def notify_pipeline_update(
+    pipeline_name: str,
+    log_file: Path,
+    summary: Dict[str, Any],
+    webhook_url: str = None
+) -> None:
+    """
+    Send a state-based watchdog/update message (sent ONCE if noteworthy).
+    
+    This is NOT a timer/heartbeat. Only call when there are warnings/anomalies
+    that warrant mid-run notification (e.g., spill files, duplicates, partial failures).
+    
+    Args:
+        pipeline_name: Name of the pipeline
+        log_file: Path to log file
+        summary: Dictionary containing update information (phase, warnings, etc.)
+        webhook_url: Optional webhook URL
+    """
+    message = format_run_summary(pipeline_name, log_file, summary, status="update")
+    send_slack_success(message, webhook_url)
+
+
 def notify_pipeline_success(
     pipeline_name: str,
     log_file: Path,
     date_range: str = None,
-    metadata: dict = None
+    metadata: dict = None,
+    webhook_url: str = None
 ) -> None:
-    message = (
-        f"✅ *{pipeline_name} completed successfully*\n"
-        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
-        f"• Log: `{log_file.name}`"
-    )
-    if date_range:
-        message += f"\n• Target Date: {date_range}"
+    """
+    Send a Slack notification when the pipeline completes successfully.
     
-    # Add summary from metadata if available
+    Args:
+        pipeline_name: Name of the pipeline
+        log_file: Path to log file
+        date_range: Optional date range string (for backward compatibility)
+        metadata: Optional metadata dict with summary information
+        webhook_url: Optional webhook URL
+    """
+    # Build summary from metadata and date_range
+    summary = {}
     if metadata:
-        target_date = metadata.get("target_date")
-        if target_date:
-            message += f"\n• Target Date: {target_date}"
-        
-        dates_present = metadata.get("dates_present", [])
-        if dates_present:
-            message += f"\n• Dates Present: {', '.join(dates_present)}"
-        
-        rows_total = metadata.get("rows_total")
-        rows_kept = metadata.get("rows_kept")
-        rows_spilled = metadata.get("rows_spilled")
-        if rows_total is not None:
-            message += f"\n• Rows: {rows_kept} kept, {rows_spilled} spilled (total: {rows_total})"
-        
-        spill_files = metadata.get("spill_files", [])
-        if spill_files:
-            message += f"\n• Spill Files: {len(spill_files)} file(s)"
-        
-        upload_stats = metadata.get("upload_stats")
-        if upload_stats:
-            attempted = upload_stats.get("attempted", 0)
-            uploaded = upload_stats.get("uploaded", 0)
-            skipped = upload_stats.get("skipped", 0)
-            failed = upload_stats.get("failed", 0)
-            message += f"\n• Upload: {uploaded} uploaded, {skipped} skipped, {failed} failed (attempted: {attempted})"
+        summary.update(metadata)
+    if date_range and not summary.get("target_date") and not summary.get("date_range"):
+        summary["date_range"] = date_range
     
-    send_slack_success(message)
+    message = format_run_summary(pipeline_name, log_file, summary, status="success")
+    send_slack_success(message, webhook_url)
+
+
+def format_run_summary(
+    pipeline_name: str,
+    log_file: Path,
+    summary: Dict[str, Any],
+    status: str,
+    error: Optional[str] = None
+) -> str:
+    """
+    Format a consolidated run summary message for Slack.
+    
+    Args:
+        pipeline_name: Name of the pipeline
+        log_file: Path to log file
+        summary: Dictionary containing run summary data
+        status: One of "success", "failure", "update"
+        error: Error message (for failure status)
+    
+    Returns:
+        Formatted Slack message string
+    """
+    # Status headers
+    if status == "success":
+        header = f"✅ *{pipeline_name} completed*"
+    elif status == "failure":
+        header = f"❌ *{pipeline_name} failed*"
+    elif status == "update":
+        header = f"⚠️ *{pipeline_name} update*"
+    else:
+        header = f"*{pipeline_name}*"
+    
+    message = f"{header}\n"
+    message += f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+    message += f"• Log: `{log_file.name}`\n"
+    
+    # Date information
+    if summary.get("target_date"):
+        message += f"• Target Date: {summary['target_date']}\n"
+    elif summary.get("date_range"):
+        message += f"• Date Range: {summary['date_range']}\n"
+    
+    # Phase information (for update/failure)
+    if status in ("update", "failure"):
+        if summary.get("phase"):
+            message += f"• Phase: {summary['phase']}\n"
+        if summary.get("phase_status"):
+            message += f"• Status: {summary['phase_status']}\n"
+        if status == "failure" and summary.get("phase_failed"):
+            message += f"• Phase Failed: {summary['phase_failed']}\n"
+    
+    # Failure reason
+    if status == "failure" and error:
+        reason = extract_error_reason(error)
+        message += f"• Reason: {reason}\n"
+    
+    # Row statistics
+    rows_kept = summary.get("rows_kept")
+    rows_spilled = summary.get("rows_spilled")
+    rows_total = summary.get("rows_total")
+    if rows_total is not None:
+        message += f"• Rows: {rows_kept} kept, {rows_spilled} spilled (total: {rows_total})\n"
+    
+    # Spill files
+    spill_files = summary.get("spill_files", [])
+    if spill_files:
+        message += f"• Spill Files: {len(spill_files)} file(s)\n"
+    
+    # Upload statistics
+    upload_stats = summary.get("upload_stats")
+    if upload_stats:
+        attempted = upload_stats.get("attempted", 0)
+        uploaded = upload_stats.get("uploaded", 0)
+        skipped = upload_stats.get("skipped", 0)
+        failed = upload_stats.get("failed", 0)
+        message += f"• Upload: {uploaded} uploaded, {skipped} skipped, {failed} failed (attempted: {attempted})\n"
+    
+    # Reconciliation
+    reconcile = summary.get("reconcile")
+    if reconcile:
+        reconcile_status = reconcile.get("status", "NOT RUN")
+        if reconcile_status == "MATCH":
+            message += f"• Reconciliation: MATCH\n"
+        elif reconcile_status == "MISMATCH":
+            message += f"• Reconciliation: MISMATCH\n"
+        else:
+            message += f"• Reconciliation: NOT RUN\n"
+        
+        if reconcile_status != "NOT RUN":
+            epos_total = reconcile.get("epos_total", 0)
+            epos_count = reconcile.get("epos_count", 0)
+            qbo_total = reconcile.get("qbo_total", 0)
+            qbo_count = reconcile.get("qbo_count", 0)
+            difference = reconcile.get("difference", 0)
+            
+            message += f"  – EPOS: ₦{epos_total:,.2f} ({epos_count} receipts)\n"
+            message += f"  – QBO: ₦{qbo_total:,.2f} ({qbo_count} receipts)\n"
+            message += f"  – Difference: ₦{difference:,.2f}\n"
+        else:
+            reason_not_run = reconcile.get("reason", "upload incomplete")
+            message += f"  – Reconciliation not run ({reason_not_run})\n"
+    elif status == "failure":
+        # If failure and no reconcile data, indicate it wasn't run
+        message += f"• Reconciliation: NOT RUN\n"
+        message += f"  – Reconciliation not run (upload incomplete)\n"
+    
+    # Warnings/Notes (for update messages)
+    warnings = summary.get("warnings", [])
+    if warnings and len(warnings) > 0:
+        message += f"• Notes:\n"
+        for warning in warnings[:6]:  # Limit to 6 warnings
+            message += f"  – {warning}\n"
+    
+    return message
 
 
 def notify_pipeline_start(
     pipeline_name: str,
     log_file: Path,
     date_range: str = None,
+    webhook_url: str = None,
+    metadata: Dict[str, Any] = None
 ) -> None:
+    """
+    Send a Slack notification when the pipeline starts.
+    
+    Args:
+        pipeline_name: Name of the pipeline
+        log_file: Path to log file
+        date_range: Optional date range string
+        webhook_url: Optional webhook URL
+        metadata: Optional metadata dict with target_date, company_key, etc.
+    """
+    summary = {}
+    if metadata:
+        summary.update(metadata)
+    if date_range:
+        summary["date_range"] = date_range
+    
     message = (
         f"🚀 *{pipeline_name} started*\n"
         f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
         f"• Log: `{log_file.name}`"
     )
-    if date_range:
-        message += f"\n• Date Range: {date_range}"
-    send_slack_success(message)
+    
+    if summary.get("target_date"):
+        message += f"\n• Target Date: {summary['target_date']}"
+    elif summary.get("date_range"):
+        message += f"\n• Date Range: {summary['date_range']}"
+    
+    send_slack_success(message, webhook_url)
 
 
 def extract_error_reason(error: str) -> str:
     """
     Extract a concise, user-friendly reason from an error message.
     Returns a professional summary of the error.
+    Updated for multi-company + SQLite setup.
     """
     error_lower = error.lower()
+    error_original = error  # Keep original for exact matches
     
-    # Token-related errors
+    # Duplicate receipt errors
+    if "duplicate" in error_lower and ("docnumber" in error_lower or "document number" in error_lower):
+        return "Duplicate receipt detected (DocNumber already exists in QBO)."
+    
+    # Line validation errors
+    if "amount must equal" in error_lower and ("unitprice" in error_lower or "qty" in error_lower):
+        return "Line validation failed (Amount must equal UnitPrice × Qty)."
+    
+    # Department/location mapping errors
+    if "department" in error_lower and ("not found" in error_lower or "invalid" in error_lower or "mapping" in error_lower):
+        return "Missing/invalid Department mapping for this location."
+    
+    # Token-related errors (updated for SQLite)
     if "invalid_grant" in error_lower or "invalid refresh token" in error_lower:
-        return "Incorrect or invalid refresh token. Please update qbo_tokens.json with valid tokens."
+        return "Invalid refresh token. Re-authenticate via OAuth flow and update qbo_tokens.sqlite."
     if "invalid_client" in error_lower or "qbo_client_id" in error_lower or "qbo_client_secret" in error_lower:
-        return "Invalid QuickBooks credentials. Please check QBO_CLIENT_ID and QBO_CLIENT_SECRET in .env file."
-    if "qbo_realm_id" in error_lower or "realm_id" in error_lower:
-        return "Missing QBO_REALM_ID. Please set it in your .env file."
-    if "qbo_tokens.json" in error_lower and ("not found" in error_lower or "empty" in error_lower):
-        return "Missing or empty qbo_tokens.json. Please create it with valid OAuth tokens."
+        return "Invalid QuickBooks credentials. Check QBO_CLIENT_ID and QBO_CLIENT_SECRET in .env file."
+    if "qbo_tokens.sqlite" in error_lower and ("not found" in error_lower or "empty" in error_lower or "no tokens found" in error_lower):
+        return "No tokens found in qbo_tokens.sqlite. Run OAuth flow first using --company selection."
     if "refresh token" in error_lower and ("expired" in error_lower or "invalid" in error_lower):
-        return "Refresh token expired or invalid. Please re-authenticate and update qbo_tokens.json."
+        return "Refresh token expired or invalid. Re-authenticate via OAuth flow for this company."
+    if "company_key" in error_lower or "realm_id" in error_lower:
+        if "not found" in error_lower or "missing" in error_lower:
+            return "Company configuration error. Use --company selection (company_a or company_b)."
     
     # File-related errors
     if "file not found" in error_lower or "no such file" in error_lower:
         if "csv" in error_lower:
             return "Required CSV file not found. Check if EPOS download completed successfully."
         return "Required file not found. Check pipeline logs for details."
-    if "single_sales_receipts" in error_lower:
+    if "single_sales_receipts" in error_lower or "gp_sales_receipts" in error_lower:
         return "Processed CSV file not found. Phase 2 (transformation) may have failed."
     
     # Network/API errors
@@ -146,7 +311,7 @@ def extract_error_reason(error: str) -> str:
     # Phase-specific errors
     if "phase 1" in error_lower or "epos_playwright" in error_lower:
         return "EPOS download failed. Check EPOS credentials and website accessibility."
-    if "phase 2" in error_lower or "epos_to_qb" in error_lower:
+    if "phase 2" in error_lower or "transform" in error_lower:
         return "CSV transformation failed. Check input file format and data."
     if "phase 3" in error_lower or "qbo_upload" in error_lower:
         return "QuickBooks upload failed. Check API credentials and data format."
@@ -168,15 +333,27 @@ def notify_pipeline_failure(
     pipeline_name: str,
     log_file: Path,
     error: str,
-    date_range: str = None
+    date_range: str = None,
+    webhook_url: str = None,
+    metadata: dict = None
 ) -> None:
-    reason = extract_error_reason(error)
-    message = (
-        f"❌ *{pipeline_name} failed*\n"
-        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
-        f"• Reason: {reason}\n"
-        f"• Log: `{log_file.name}`"
-    )
-    if date_range:
-        message += f"\n• Date Range: {date_range}"
-    send_slack_success(message)
+    """
+    Send a Slack notification when the pipeline fails.
+    
+    Args:
+        pipeline_name: Name of the pipeline
+        log_file: Path to log file
+        error: Error message or exception string
+        date_range: Optional date range string (for backward compatibility)
+        webhook_url: Optional webhook URL
+        metadata: Optional metadata dict with summary information
+    """
+    # Build summary from metadata and date_range
+    summary = {}
+    if metadata:
+        summary.update(metadata)
+    if date_range and not summary.get("target_date") and not summary.get("date_range"):
+        summary["date_range"] = date_range
+    
+    message = format_run_summary(pipeline_name, log_file, summary, status="failure", error=error)
+    send_slack_success(message, webhook_url)

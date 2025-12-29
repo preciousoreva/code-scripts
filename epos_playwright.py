@@ -1,11 +1,14 @@
 import re
 import sys
-from datetime import datetime
+import argparse
+from datetime import datetime, timedelta
 from playwright.sync_api import Playwright, sync_playwright, expect
 import os
 
 # Load .env file if it exists (makes credential management easier)
 from load_env import load_env_file
+from company_config import load_company_config, get_available_companies
+
 load_env_file()
 
 
@@ -87,48 +90,64 @@ def click_date_simple(page, target_date: str) -> None:
     raise RuntimeError(f"Could not find calendar day for date {target_date}")
 
 
-def get_target_date_from_args() -> str:
-    """Get target_date from command line args or environment variable. Defaults to yesterday."""
-    from datetime import timedelta
+def get_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Download EPOS CSV for a specific company and date."
+    )
+    parser.add_argument(
+        "--company",
+        required=True,
+        choices=get_available_companies(),
+        help="Company identifier (REQUIRED). Available: %(choices)s",
+    )
+    parser.add_argument(
+        "--target-date",
+        help="Target business date in YYYY-MM-DD format (default: yesterday, ignored if --from-date and --to-date are provided)",
+    )
+    parser.add_argument(
+        "--from-date",
+        help="Start date for range in YYYY-MM-DD format (must be used with --to-date)",
+    )
+    parser.add_argument(
+        "--to-date",
+        help="End date for range in YYYY-MM-DD format (must be used with --from-date)",
+    )
+    args = parser.parse_args()
     
-    # Check command line args
-    if "--target-date" in sys.argv:
-        idx = sys.argv.index("--target-date")
-        if idx + 1 < len(sys.argv):
-            return sys.argv[idx + 1]
+    # Validation: --from-date and --to-date must be provided together
+    if (args.from_date is None) != (args.to_date is None):
+        parser.error("--from-date and --to-date must be provided together")
     
-    # Check environment variable
-    target_date = os.environ.get("TARGET_DATE")
-    if target_date:
-        return target_date
-    
-    # Default to yesterday
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    return yesterday
+    return args
 
 
-def run(playwright: Playwright, target_date: str = None) -> None:
-    # Get credentials from environment variables
-    epos_username = os.environ.get("EPOS_USERNAME")
-    epos_password = os.environ.get("EPOS_PASSWORD")
-    
-    if not epos_username:
+def run(playwright: Playwright, config, from_date: str = None, to_date: str = None, target_date: str = None) -> None:
+    # Get credentials from company config
+    try:
+        epos_username = config.epos_username
+        epos_password = config.epos_password
+    except RuntimeError as e:
         raise RuntimeError(
-            "EPOS_USERNAME environment variable is not set. "
-            "Please set it before running the pipeline:\n"
-            "  export EPOS_USERNAME='your_username'"
-        )
-    if not epos_password:
-        raise RuntimeError(
-            "EPOS_PASSWORD environment variable is not set. "
-            "Please set it before running the pipeline:\n"
-            "  export EPOS_PASSWORD='your_password'"
+            f"Failed to get EPOS credentials for {config.display_name}: {e}\n"
+            f"Please set {config._data['epos']['username_env_key']} and "
+            f"{config._data['epos']['password_env_key']} in your .env file."
         )
     
-    # Use provided target_date or default to yesterday
-    if not target_date:
-        from datetime import timedelta
-        target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    # Determine date range: prefer from_date/to_date if provided, else use target_date
+    if from_date and to_date:
+        date_from = from_date
+        date_to = to_date
+        print(f"Downloading EPOS CSV for {config.display_name} (range: {date_from} to {date_to})")
+    elif target_date:
+        date_from = target_date
+        date_to = target_date
+        print(f"Downloading EPOS CSV for {config.display_name} (date: {target_date})")
+    else:
+        # Default to yesterday
+        date_from = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        date_to = date_from
+        print(f"Downloading EPOS CSV for {config.display_name} (date: {date_from})")
     
     browser = playwright.chromium.launch(headless=True)
     context = browser.new_context()
@@ -140,18 +159,18 @@ def run(playwright: Playwright, target_date: str = None) -> None:
     page.get_by_role("textbox", name="Password").fill(epos_password)
     page.get_by_role("button", name="Log in").click()
     
-    # Select Custom date range for the target date
+    # Select Custom date range
     page.get_by_label("Show data from").select_option("Custom")
     
     # FROM date
     page.locator("#MainContent_timeControl_btnFromDate").click()
     page.wait_for_timeout(500)
-    click_date_simple(page, target_date)
+    click_date_simple(page, date_from)
     
-    # TO date (same as FROM for single day)
+    # TO date
     page.locator("#MainContent_timeControl_btnToDate").click()
     page.wait_for_timeout(500)
-    click_date_simple(page, target_date)
+    click_date_simple(page, date_to)
     
     # Apply date range
     page.locator("#MainContent_timeControl_btnApplyDate").click()
@@ -176,6 +195,30 @@ def run(playwright: Playwright, target_date: str = None) -> None:
 
 
 if __name__ == "__main__":
-    target_date = get_target_date_from_args()
+    args = get_args()
+    
+    # Load company configuration
+    try:
+        config = load_company_config(args.company)
+    except Exception as e:
+        print(f"Error: Failed to load company config for '{args.company}': {e}")
+        sys.exit(1)
+    
+    # Determine date parameters: if both from_date and to_date are provided, use them and ignore target_date
+    from_date = args.from_date
+    to_date = args.to_date
+    target_date = None
+    
+    if from_date and to_date:
+        # Range mode: ignore target_date
+        target_date = None
+    elif args.target_date:
+        # Single day mode
+        target_date = args.target_date
+    else:
+        # Default to yesterday
+        target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        print(f"No --target-date provided, using yesterday: {target_date}")
+    
     with sync_playwright() as playwright:
-        run(playwright, target_date)
+        run(playwright, config, from_date=from_date, to_date=to_date, target_date=target_date)
