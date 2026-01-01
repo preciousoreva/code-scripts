@@ -351,12 +351,55 @@ def merge_raw_csvs(base_csv: Path, extra_csvs: List[Path], out_csv: Path) -> dic
     }
 
 
-def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir: str, repo_root: Path) -> tuple:
+def compute_trading_date(dt_wat: datetime, start_hour: int, start_minute: int) -> datetime.date:
+    """
+    Compute the trading date for a given datetime in WAT.
+    
+    Trading day logic:
+    - If dt_wat.time() < cutoff (start_hour:start_minute), trading_date = (dt_wat.date() - 1 day)
+    - Otherwise, trading_date = dt_wat.date()
+    
+    Example:
+        dt = 2025-01-31 04:59:00, cutoff = 05:00 => trading_date = 2025-01-30
+        dt = 2025-01-31 05:00:00, cutoff = 05:00 => trading_date = 2025-01-31
+    
+    Args:
+        dt_wat: Datetime in WAT timezone
+        start_hour: Trading day start hour (default: 5)
+        start_minute: Trading day start minute (default: 0)
+    
+    Returns:
+        Trading date as a date object
+    """
+    from datetime import time
+    
+    cutoff = time(start_hour, start_minute)
+    dt_time = dt_wat.time()
+    
+    if dt_time < cutoff:
+        # Before cutoff: belongs to previous trading day
+        trading_date = (dt_wat.date() - timedelta(days=1))
+    else:
+        # At or after cutoff: belongs to current trading day
+        trading_date = dt_wat.date()
+    
+    return trading_date
+
+
+def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir: str, repo_root: Path, config=None) -> tuple:
     """
     Split a downloaded EPOS CSV into per-day raw files.
     Also writes future out-of-range rows as raw spill files.
     
     Works for both range mode (from_date != to_date) and single-day mode (from_date == to_date).
+    
+    If trading_day_enabled is True in config:
+        - Computes trading_date for each row based on datetime in WAT and trading day cutoff
+        - Writes rows to uploads/range_raw/<company_dir>/<from>_to_<to>/BookKeeping_<trading_date>.csv
+        - Does NOT create spill files in this mode
+    If trading_day_enabled is False (default):
+        - Uses calendar date (existing behavior)
+        - Creates spill files for future dates
     
     Args:
         csv_path: Path to the downloaded CSV file
@@ -364,23 +407,36 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         to_date: End date in YYYY-MM-DD format
         company_dir: Human-readable company folder name (Title_Case_With_Underscores)
         repo_root: Repository root path
+        config: Optional CompanyConfig object (required if trading_day_enabled is True)
     
     Returns:
         Tuple of three items:
         - date_to_file: Dict mapping in-range date strings (YYYY-MM-DD) to file paths
-        - future_spill_to_file: Dict mapping out-of-range future dates to raw spill file paths
+        - future_spill_to_file: Dict mapping out-of-range future dates to raw spill file paths (empty if trading_day_enabled)
         - split_stats: Dict with row counts for logging/notifications:
             - total_rows: Total rows in original CSV
             - in_range_rows: Rows written to in-range split files
-            - future_rows: Rows written to future spill files
+            - future_rows: Rows written to future spill files (0 if trading_day_enabled)
             - past_rows: Rows for dates before from_date (ignored but logged)
             - null_rows: Rows with unparseable dates (ignored)
-            - future_spill_details: Dict {date_str: row_count} for Slack notifications
+            - future_spill_details: Dict {date_str: row_count} for Slack notifications (empty if trading_day_enabled)
     """
     from datetime import timezone, timedelta
     
     # WAT timezone (UTC+1)
     WAT_TZ = timezone(timedelta(hours=1))
+    
+    # Check if trading day mode is enabled
+    trading_day_enabled = False
+    trading_day_start_hour = 5
+    trading_day_start_minute = 0
+    if config:
+        trading_day_enabled = config.trading_day_enabled
+        trading_day_start_hour = config.trading_day_start_hour
+        trading_day_start_minute = config.trading_day_start_minute
+    
+    if trading_day_enabled:
+        logging.info(f"Trading day mode enabled: cutoff={trading_day_start_hour:02d}:{trading_day_start_minute:02d} WAT")
     
     # Parse date range
     from_dt = datetime.strptime(from_date, "%Y-%m-%d")
@@ -422,23 +478,56 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
     
     dates_series = df[date_col].apply(parse_date)
     
-    # Convert to WAT timezone and extract date portion
+    # Convert to WAT timezone and compute trading date or calendar date
+    # Also track calendar dates for trading day boundary stats
     def get_date_in_wat(dt):
         try:
             if dt is None or pd.isna(dt):
-                return None
+                return None, None
         except (TypeError, ValueError):
-            return None
+            return None, None
         try:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=WAT_TZ)
             elif dt.tzinfo != WAT_TZ:
                 dt = dt.astimezone(WAT_TZ)
-            return dt.date().strftime("%Y-%m-%d")
+            
+            calendar_date = dt.date()
+            
+            if trading_day_enabled:
+                # Compute trading date based on cutoff
+                trading_date = compute_trading_date(dt, trading_day_start_hour, trading_day_start_minute)
+                return trading_date.strftime("%Y-%m-%d"), calendar_date.strftime("%Y-%m-%d")
+            else:
+                # Use calendar date (existing behavior)
+                return calendar_date.strftime("%Y-%m-%d"), None
         except (AttributeError, ValueError, TypeError):
-            return None
+            return None, None
     
-    date_strings = dates_series.apply(get_date_in_wat)
+    # Apply function and extract both trading dates and calendar dates
+    date_results = dates_series.apply(get_date_in_wat)
+    date_strings = date_results.apply(lambda x: x[0] if isinstance(x, tuple) else x)
+    
+    # Extract calendar dates for trading day stats (only when trading_day_enabled)
+    calendar_date_strings = None
+    if trading_day_enabled:
+        calendar_date_strings = date_results.apply(lambda x: x[1] if isinstance(x, tuple) and x[1] else None)
+    
+    # Log trading day assignments for debugging (sample a few rows)
+    if trading_day_enabled:
+        sample_indices = min(5, len(df))
+        for idx in range(sample_indices):
+            dt_val = dates_series.iloc[idx]
+            if dt_val is not None and not pd.isna(dt_val):
+                try:
+                    if dt_val.tzinfo is None:
+                        dt_wat = dt_val.replace(tzinfo=WAT_TZ)
+                    else:
+                        dt_wat = dt_val.astimezone(WAT_TZ)
+                    trading_date = compute_trading_date(dt_wat, trading_day_start_hour, trading_day_start_minute)
+                    logging.info(f"Trading day sample: row_datetime={dt_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT => trading_date={trading_date}")
+                except Exception:
+                    pass
     
     # Count null/unparseable dates
     null_count = int(date_strings.isna().sum())
@@ -478,32 +567,37 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
     
     # Identify and write future out-of-range rows as raw spill files
     # Future = date > to_date
+    # NOTE: In trading day mode, we do NOT create spill files (all rows are assigned to trading dates)
     future_spill_to_file = {}
     future_spill_details = {}  # {date: row_count} for notifications
     future_count = 0
     
-    # Get all unique dates that are future (> to_date)
-    future_dates = [d for d in all_dates if d > to_date]
-    
-    if future_dates:
-        # Create spill_raw directory
-        spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
-        spill_raw_dir.mkdir(parents=True, exist_ok=True)
+    if not trading_day_enabled:
+        # Only create spill files in calendar day mode
+        # Get all unique dates that are future (> to_date)
+        future_dates = [d for d in all_dates if d > to_date]
         
-        logging.info(f"\nFound {len(future_dates)} future date(s) outside range (> {to_date})")
-        
-        for future_date_str in sorted(future_dates):
-            future_mask = date_strings == future_date_str
-            future_df = df[future_mask].copy().reset_index(drop=True)
+        if future_dates:
+            # Create spill_raw directory
+            spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
+            spill_raw_dir.mkdir(parents=True, exist_ok=True)
             
-            if len(future_df) > 0:
-                spill_filename = f"BookKeeping_raw_spill_{future_date_str}.csv"
-                spill_path = spill_raw_dir / spill_filename
-                future_df.to_csv(spill_path, index=False)
-                future_spill_to_file[future_date_str] = str(spill_path)
-                future_spill_details[future_date_str] = len(future_df)
-                future_count += len(future_df)
-                logging.info(f"Created raw spill file for {future_date_str}: {spill_filename} ({len(future_df)} rows)")
+            logging.info(f"\nFound {len(future_dates)} future date(s) outside range (> {to_date})")
+            
+            for future_date_str in sorted(future_dates):
+                future_mask = date_strings == future_date_str
+                future_df = df[future_mask].copy().reset_index(drop=True)
+                
+                if len(future_df) > 0:
+                    spill_filename = f"BookKeeping_raw_spill_{future_date_str}.csv"
+                    spill_path = spill_raw_dir / spill_filename
+                    future_df.to_csv(spill_path, index=False)
+                    future_spill_to_file[future_date_str] = str(spill_path)
+                    future_spill_details[future_date_str] = len(future_df)
+                    future_count += len(future_df)
+                    logging.info(f"Created raw spill file for {future_date_str}: {spill_filename} ({len(future_df)} rows)")
+    else:
+        logging.info("Trading day mode: skipping spill file creation (all rows assigned to trading dates)")
     
     # Log summary (no re-reading CSVs needed)
     logging.info(f"\nSplit summary: {in_range_count} rows in-range, {future_count} rows future spill, {past_count} rows past (ignored), {null_count} rows null (ignored)")
@@ -517,6 +611,57 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         "null_rows": null_count,
         "future_spill_details": future_spill_details,
     }
+    
+    # Compute trading day boundary stats if trading day mode is enabled
+    if trading_day_enabled and calendar_date_strings is not None:
+        cutoff_str = f"{trading_day_start_hour:02d}:{trading_day_start_minute:02d}"
+        trading_day_stats = {
+            "cutoff": cutoff_str,
+            "by_date": {}
+        }
+        
+        # For each trading date in the range, compute boundary stats
+        for target_date_str in date_list:
+            if target_date_str not in date_to_file:
+                continue  # Skip dates with no rows
+            
+            # Get rows for this trading date
+            target_mask = date_strings == target_date_str
+            target_calendar_dates = calendar_date_strings[target_mask]
+            
+            # Count rows where calendar_date == trading_date + 1 day (pre-cutoff reassigned)
+            target_trading_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+            next_calendar_date = (target_trading_date + timedelta(days=1)).strftime("%Y-%m-%d")
+            
+            pre_cutoff_reassigned = 0
+            same_calendar_day = 0
+            total_for_trading_day = int(target_mask.sum())
+            
+            # Count reassigned and same-day rows
+            for cal_date_str in target_calendar_dates:
+                if cal_date_str is None or pd.isna(cal_date_str):
+                    continue
+                if cal_date_str == next_calendar_date:
+                    # Calendar date is D+1, but assigned to trading date D (pre-cutoff)
+                    pre_cutoff_reassigned += 1
+                elif cal_date_str == target_date_str:
+                    # Calendar date equals trading date
+                    same_calendar_day += 1
+            
+            trading_day_stats["by_date"][target_date_str] = {
+                "total": total_for_trading_day,
+                "pre_cutoff_reassigned": pre_cutoff_reassigned,
+                "same_calendar_day": same_calendar_day
+            }
+            
+            # Log trading day adjustment for this date
+            if pre_cutoff_reassigned > 0:
+                logging.info(f"Trading-day adjustment for {target_date_str}: pre-cutoff reassigned={pre_cutoff_reassigned} (cutoff={cutoff_str} WAT)")
+        
+        split_stats["trading_day_stats"] = trading_day_stats
+    else:
+        # No trading day stats for calendar day mode
+        split_stats["trading_day_stats"] = None
     
     return date_to_file, future_spill_to_file, split_stats
 
@@ -832,10 +977,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             
             # Split CSV into per-day files
             logging.info("\n=== Splitting CSV into per-day files ===")
-            date_to_file, future_spill_to_file, split_stats = split_csv_by_date(downloaded_csv, from_date, to_date, company_dir, repo_root)
+            date_to_file, future_spill_to_file, split_stats = split_csv_by_date(downloaded_csv, from_date, to_date, company_dir, repo_root, config)
             
             if not date_to_file:
                 raise SystemExit("No data found in date range after splitting")
+            
+            # Store trading day stats for later use in summaries
+            trading_day_stats = split_stats.get("trading_day_stats")
             
             # Add warnings for future raw spills (for Slack notification)
             if future_spill_to_file:
@@ -855,6 +1003,8 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                         "phase_status": "Completed",
                         "warnings": warnings.copy(),
                     }
+                    if trading_day_stats:
+                        watchdog_summary["trading_day_stats"] = trading_day_stats
                     notify_pipeline_update(pipeline_name, log_file, watchdog_summary, config.slack_webhook_url)
                     watchdog_sent = True
             
@@ -928,10 +1078,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                         pass
                 
                 # Phase 3: Upload to QBO
+                qbo_upload_args = ["--company", company_key]
+                if config.trading_day_enabled:
+                    qbo_upload_args.extend(["--target-date", day_date])
                 run_step(
                     f"Phase 3: Upload to QBO (qbo_upload) - {day_date}",
                     "qbo_upload.py",
-                    ["--company", company_key]
+                    qbo_upload_args
                 )
                 
                 # Check upload stats after Phase 3
@@ -1016,6 +1169,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 if reconcile_result:
                     summary["reconcile"] = reconcile_result
                 
+                # Add trading day stats for this day if available
+                if trading_day_stats and day_date in trading_day_stats.get("by_date", {}):
+                    summary["trading_day_stats"] = {
+                        "cutoff": trading_day_stats["cutoff"],
+                        "by_date": {day_date: trading_day_stats["by_date"][day_date]}
+                    }
+                
                 # Store per-day result for final summary
                 per_day_results.append({
                     "date": day_date,
@@ -1059,6 +1219,38 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 "per_day_results": per_day_results,
                 "warnings": warnings
             }
+            if trading_day_stats:
+                final_summary["trading_day_stats"] = trading_day_stats
+            
+            # Compute Range Totals by summing per-day reconciliation results
+            included_days = 0
+            epos_total_sum = 0.0
+            qbo_total_sum = 0.0
+            epos_count_sum = 0
+            qbo_count_sum = 0
+            
+            for day_result in per_day_results:
+                reconcile = day_result.get("reconcile")
+                if reconcile and reconcile.get("status") in ("MATCH", "MISMATCH"):
+                    included_days += 1
+                    epos_total_sum += reconcile.get("epos_total", 0) or 0
+                    qbo_total_sum += reconcile.get("qbo_total", 0) or 0
+                    epos_count_sum += reconcile.get("epos_count", 0) or 0
+                    qbo_count_sum += reconcile.get("qbo_count", 0) or 0
+            
+            # Only add range_totals if we have at least one day with reconciliation
+            if included_days > 0:
+                difference_sum = round(epos_total_sum - qbo_total_sum, 2)
+                final_summary["range_totals"] = {
+                    "included_days": included_days,
+                    "total_days": len(date_to_file),
+                    "epos_total": round(epos_total_sum, 2),
+                    "qbo_total": round(qbo_total_sum, 2),
+                    "epos_count": epos_count_sum,
+                    "qbo_count": qbo_count_sum,
+                    "difference": difference_sum,
+                }
+            
             notify_pipeline_success(pipeline_name, log_file, date_range_str, final_summary, config.slack_webhook_url)
             return 0
         
@@ -1109,8 +1301,11 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             # For single-day, from_date == to_date
             logging.info("\n=== Splitting CSV by date ===")
             date_to_file, future_spill_to_file, split_stats = split_csv_by_date(
-                downloaded_csv, target_date, target_date, company_dir, repo_root
+                downloaded_csv, target_date, target_date, company_dir, repo_root, config
             )
+            
+            # Store trading day stats for later use in summaries
+            trading_day_stats = split_stats.get("trading_day_stats")
             
             # Check if we have data for the target date
             if target_date not in date_to_file:
@@ -1163,6 +1358,8 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                     "phase_status": "Completed",
                     "warnings": warnings.copy(),  # Copy current warnings
                 }
+                if trading_day_stats:
+                    watchdog_summary["trading_day_stats"] = trading_day_stats
                 notify_pipeline_update(pipeline_name, log_file, watchdog_summary, config.slack_webhook_url)
                 watchdog_sent = True
             
@@ -1186,10 +1383,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                     pass  # Ignore metadata read errors
 
             # Phase 3: Upload to QBO
+            qbo_upload_args = ["--company", company_key]
+            if config.trading_day_enabled:
+                qbo_upload_args.extend(["--target-date", target_date])
             run_step(
                 "Phase 3: Upload to QBO (qbo_upload)",
                 "qbo_upload.py",
-                ["--company", company_key]
+                qbo_upload_args
             )
             
             # Check upload stats after Phase 3 for partial failures
@@ -1348,6 +1548,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             if reconcile_result:
                 summary["reconcile"] = reconcile_result
             
+            # Add trading day stats if available
+            if trading_day_stats and target_date in trading_day_stats.get("by_date", {}):
+                summary["trading_day_stats"] = {
+                    "cutoff": trading_day_stats["cutoff"],
+                    "by_date": {target_date: trading_day_stats["by_date"][target_date]}
+                }
+            
             notify_pipeline_success(pipeline_name, log_file, date_range_str, summary, config.slack_webhook_url)
             logging.info("\nPipeline completed successfully ✅")
             return 0
@@ -1421,11 +1628,11 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   # Single day (default)
-  python run_pipeline.py --company company_a --target-date 2025-12-25
-  python run_pipeline.py --company company_b  # Uses yesterday as target-date
+  python3 run_pipeline.py --company company_a --target-date 2025-12-25
+  python3 run_pipeline.py --company company_b  # Uses yesterday as target-date
   
   # Date range
-  python run_pipeline.py --company company_b --from-date 2025-12-02 --to-date 2025-12-04
+  python3 run_pipeline.py --company company_b --from-date 2025-12-02 --to-date 2025-12-04
         """
     )
     parser.add_argument(

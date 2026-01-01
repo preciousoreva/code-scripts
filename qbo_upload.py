@@ -5,7 +5,7 @@ import glob
 import json
 import argparse
 import sys
-from typing import Optional, Dict, Callable, Any
+from typing import Optional, Dict, Callable, Any, Tuple
 from urllib.parse import quote
 from datetime import datetime
 
@@ -105,20 +105,33 @@ def check_qbo_existing_docnumbers(
     docnumbers: list[str],
     token_mgr: TokenManager,
     realm_id: str,
-    batch_size: int = 50
-) -> set:
+    batch_size: int = 50,
+    target_date: Optional[str] = None
+) -> Tuple[set, dict]:
     """
     Check QBO for existing SalesReceipts by DocNumber.
-    Returns set of DocNumbers that already exist in QBO.
+    
+    Args:
+        docnumbers: List of DocNumbers to check
+        token_mgr: TokenManager instance
+        realm_id: QBO Realm ID
+        batch_size: Batch size for queries
+        target_date: Optional target date (YYYY-MM-DD). If provided, only receipts with matching TxnDate are considered "existing".
+    
+    Returns:
+        Tuple of (existing_docnumbers, date_mismatches):
+        - existing_docnumbers: Set of DocNumbers that exist in QBO with matching TxnDate (or any TxnDate if target_date not provided)
+        - date_mismatches: Dict {DocNumber: TxnDate} for receipts that exist but have different TxnDate
     """
     existing = set()
+    date_mismatches = {}
     
     # Query in batches to avoid URL length limits
     for i in range(0, len(docnumbers), batch_size):
         batch = docnumbers[i:i + batch_size]
-        # Build query: select Id, DocNumber from SalesReceipt where DocNumber in ('SR-...', 'SR-...', ...)
+        # Build query: select Id, DocNumber, TxnDate from SalesReceipt where DocNumber in ('SR-...', 'SR-...', ...)
         docnumber_list = "', '".join(d.replace("'", "''") for d in batch)
-        query = f"select Id, DocNumber from SalesReceipt where DocNumber in ('{docnumber_list}')"
+        query = f"select Id, DocNumber, TxnDate from SalesReceipt where DocNumber in ('{docnumber_list}')"
         url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
         
         resp = _make_qbo_request("GET", url, token_mgr)
@@ -130,10 +143,23 @@ def check_qbo_existing_docnumbers(
             
             for receipt in receipts:
                 doc_num = receipt.get("DocNumber")
-                if doc_num:
+                if not doc_num:
+                    continue
+                
+                txn_date = receipt.get("TxnDate")
+                
+                # If target_date is provided, only consider it "existing" if TxnDate matches
+                if target_date and txn_date:
+                    if txn_date == target_date:
+                        existing.add(doc_num)
+                    else:
+                        # Receipt exists but with different TxnDate - this is a date mismatch
+                        date_mismatches[doc_num] = txn_date
+                else:
+                    # No target_date provided - consider any match as existing
                     existing.add(doc_num)
     
-    return existing
+    return existing, date_mismatches
 
 
 def find_latest_single_csv(repo_root: str, config) -> str:
@@ -442,6 +468,7 @@ def build_sales_receipt_payload(
     item_cache: Dict[str, str],
     department_cache: Dict[str, Optional[str]],
     payment_method_cache: Dict[str, Optional[str]] = None,
+    target_date: Optional[str] = None,
 ) -> dict:
     """
     Build a SalesReceipt payload from a group of CSV rows (one SalesReceiptNo).
@@ -455,22 +482,28 @@ def build_sales_receipt_payload(
     """
     first_row = group.iloc[0]
 
-    # Parse date from CSV using company's date_format and convert to ISO format (YYYY-MM-DD) for QBO
-    txn_date_str = str(first_row[DATE_COL])
-    try:
-        # Parse using the company's date format
-        date_obj = datetime.strptime(txn_date_str, config.date_format)
-        # Convert to ISO format (YYYY-MM-DD) for QBO
-        txn_date = date_obj.strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        # Fallback: try to parse as ISO format or use pandas
+    # Determine TxnDate: use target_date if trading_day_enabled and target_date is provided, otherwise parse from CSV
+    if config.trading_day_enabled and target_date:
+        # Trading day mode: use the target_date (trading date) directly
+        txn_date = target_date
+        print(f"[INFO] Trading day mode: using target_date={target_date} for TxnDate (overriding CSV date)")
+    else:
+        # Calendar day mode: parse date from CSV using company's date_format
+        txn_date_str = str(first_row[DATE_COL])
         try:
-            date_obj = pd.to_datetime(txn_date_str).to_pydatetime()
+            # Parse using the company's date format
+            date_obj = datetime.strptime(txn_date_str, config.date_format)
+            # Convert to ISO format (YYYY-MM-DD) for QBO
             txn_date = date_obj.strftime("%Y-%m-%d")
-        except Exception:
-            # Last resort: use as-is (may cause QBO errors)
-            print(f"[WARN] Could not parse date '{txn_date_str}', using as-is. QBO may reject it.")
-            txn_date = txn_date_str
+        except (ValueError, TypeError):
+            # Fallback: try to parse as ISO format or use pandas
+            try:
+                date_obj = pd.to_datetime(txn_date_str).to_pydatetime()
+                txn_date = date_obj.strftime("%Y-%m-%d")
+            except Exception:
+                # Last resort: use as-is (may cause QBO errors)
+                print(f"[WARN] Could not parse date '{txn_date_str}', using as-is. QBO may reject it.")
+                txn_date = txn_date_str
     
     memo = str(first_row[MEMO_COL])
     doc_number = str(first_row[DOCNUM_COL])
@@ -814,6 +847,10 @@ def main():
         choices=get_available_companies(),
         help="Company identifier (REQUIRED). Available: %(choices)s",
     )
+    parser.add_argument(
+        "--target-date",
+        help="Target date in YYYY-MM-DD format (used when trading_day_enabled is True)",
+    )
     args = parser.parse_args()
     
     # Load company configuration
@@ -852,22 +889,42 @@ def main():
     grouped = df.groupby(GROUP_COL)
     print(f"Found {len(grouped)} distinct SalesReceiptNo groups")
 
-    # Layer A: Load local ledger of uploaded DocNumbers
-    uploaded_docnumbers = load_uploaded_docnumbers(repo_root, config)
-    print(f"Loaded {len(uploaded_docnumbers)} DocNumbers from local ledger")
+    # Layer A: Load local ledger of uploaded DocNumbers (for reference/stats only)
+    ledger_docnumbers = load_uploaded_docnumbers(repo_root, config)
+    print(f"Loaded {len(ledger_docnumbers)} DocNumbers from local ledger")
 
     # Collect all DocNumbers to check
     all_docnumbers = list(grouped.groups.keys())
     
-    # Layer B: Check QBO for existing DocNumbers (optional safety check)
+    # Layer B: Check QBO for existing DocNumbers (QBO is the source of truth)
+    # Also check TxnDate if target_date is provided (for trading-day mode)
     print("Checking QBO for existing DocNumbers...")
-    qbo_existing = check_qbo_existing_docnumbers(all_docnumbers, token_mgr, config.realm_id)
-    print(f"Found {len(qbo_existing)} existing DocNumbers in QBO")
+    qbo_existing, date_mismatches = check_qbo_existing_docnumbers(
+        all_docnumbers, token_mgr, config.realm_id, target_date=args.target_date
+    )
+    print(f"Found {len(qbo_existing)} existing DocNumbers in QBO with matching TxnDate")
     
-    # Combine both sources
-    skip_docnumbers = uploaded_docnumbers | qbo_existing
+    # Warn about date mismatches (receipts exist but with wrong TxnDate)
+    if date_mismatches:
+        print(f"\n[WARN] Found {len(date_mismatches)} receipt(s) in QBO with different TxnDate:")
+        for docnum, wrong_date in sorted(date_mismatches.items()):
+            print(f"  {docnum}: exists in QBO with TxnDate={wrong_date} (expected {args.target_date})")
+        print(f"  These will be attempted for upload (will fail with duplicate DocNumber error)")
+    
+    # Detect stale ledger entries (in ledger but NOT in QBO with matching TxnDate)
+    stale_ledger_entries = ledger_docnumbers - qbo_existing - set(date_mismatches.keys())
+    stale_in_current_batch = stale_ledger_entries & set(all_docnumbers)
+    
+    if stale_in_current_batch:
+        print(f"\n[WARN] Stale ledger entries detected: {len(stale_in_current_batch)} DocNumber(s) in ledger but not in QBO")
+        for docnum in sorted(stale_in_current_batch):
+            print(f"  Stale ledger entry detected: {docnum} is in {config.uploaded_docnumbers_file} but not in QBO; will attempt upload.")
+    
+    # Skip ONLY if DocNumber exists in QBO with matching TxnDate
+    # Receipts with date mismatches will be attempted (and will fail, but that's expected)
+    skip_docnumbers = qbo_existing
     if skip_docnumbers:
-        print(f"Skipping {len(skip_docnumbers)} DocNumbers (already uploaded or exist in QBO)")
+        print(f"Skipping {len(skip_docnumbers)} DocNumbers (confirmed existing in QBO with matching TxnDate)")
 
     item_cache: Dict[str, str] = {}
     department_cache: Dict[str, Optional[str]] = {}
@@ -898,19 +955,35 @@ def main():
         "skipped": 0,
         "uploaded": 0,
         "failed": 0,
+        "stale_ledger_entries_detected": len(stale_in_current_batch),
+        "date_mismatches_detected": len(date_mismatches),
     }
 
     for group_key, group_df in grouped:
         stats["attempted"] += 1
         
-        # Skip if already uploaded or exists in QBO
+        # Skip ONLY if exists in QBO with matching TxnDate (QBO is source of truth)
         if group_key in skip_docnumbers:
-            print(f"\nSkipping SalesReceiptNo: {group_key} (already uploaded or exists)")
+            print(f"\nSkipping SalesReceiptNo: {group_key} (exists in QBO with matching TxnDate)")
             stats["skipped"] += 1
+            # Add to ledger if confirmed in QBO (healing: sync ledger with QBO truth)
+            if group_key not in ledger_docnumbers:
+                save_uploaded_docnumber(repo_root, group_key, config)
+                print(f"  Added {group_key} to ledger (confirmed in QBO)")
             continue
         
+        # Check if this receipt has a date mismatch (exists but with wrong TxnDate)
+        # We'll attempt upload anyway - it will fail with duplicate DocNumber error, but that's expected
+        if group_key in date_mismatches:
+            wrong_date = date_mismatches[group_key]
+            print(f"\n[WARN] SalesReceiptNo: {group_key} exists in QBO with TxnDate={wrong_date} (expected {args.target_date})")
+            print(f"       Attempting upload anyway (will fail with duplicate DocNumber error)")
+        
         try:
-            payload = build_sales_receipt_payload(group_df, token_mgr, config.realm_id, config, item_cache, department_cache, payment_method_cache)
+            payload = build_sales_receipt_payload(
+                group_df, token_mgr, config.realm_id, config, item_cache, department_cache, payment_method_cache,
+                target_date=args.target_date
+            )
             print(f"\nSending SalesReceiptNo: {group_key}")
             send_sales_receipt(payload, token_mgr, config.realm_id)
             
@@ -925,9 +998,21 @@ def main():
     # Print summary
     print(f"\n=== Upload Summary ===")
     print(f"Attempted: {stats['attempted']}")
-    print(f"Skipped (duplicates): {stats['skipped']}")
+    print(f"Skipped (exists in QBO): {stats['skipped']}")
     print(f"Uploaded: {stats['uploaded']}")
     print(f"Failed: {stats['failed']}")
+    if stats['stale_ledger_entries_detected'] > 0:
+        print(f"Stale ledger entries detected: {stats['stale_ledger_entries_detected']} (healed by uploading)")
+    if stats['date_mismatches_detected'] > 0:
+        print(f"Date mismatches detected: {stats['date_mismatches_detected']} receipt(s) exist in QBO with wrong TxnDate")
+        print(f"  These receipts need manual correction in QBO (change TxnDate to {args.target_date}) or delete and re-upload")
+    print(f"\nLedger vs QBO sync:")
+    print(f"  DocNumbers in ledger: {len(ledger_docnumbers)}")
+    print(f"  DocNumbers confirmed in QBO (matching TxnDate): {len(qbo_existing)}")
+    if date_mismatches:
+        print(f"  Date mismatches (wrong TxnDate in QBO): {len(date_mismatches)}")
+    if stale_in_current_batch:
+        print(f"  Stale ledger entries (in ledger, not in QBO): {len(stale_in_current_batch)}")
     
     # Write stats to metadata for Slack notification
     metadata_path = os.path.join(repo_root, config.metadata_file)

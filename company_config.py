@@ -171,6 +171,21 @@ class CompanyConfig:
         # Otherwise, treat it as an environment variable key
         return os.environ.get(webhook_value)
     
+    @property
+    def trading_day_enabled(self) -> bool:
+        """Whether trading day mode is enabled (default: False)."""
+        return self._data.get("trading_day", {}).get("enabled", False)
+    
+    @property
+    def trading_day_start_hour(self) -> int:
+        """Trading day start hour (default: 5)."""
+        return self._data.get("trading_day", {}).get("start_hour", 5)
+    
+    @property
+    def trading_day_start_minute(self) -> int:
+        """Trading day start minute (default: 0)."""
+        return self._data.get("trading_day", {}).get("start_minute", 0)
+    
     def get_qbo_config(self) -> Dict[str, Any]:
         """Get QBO-specific configuration."""
         return self._data["qbo"].copy()

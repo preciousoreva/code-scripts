@@ -63,7 +63,7 @@ The pipeline is designed to be run as a single command and take care of all phas
    **Custom date range:**
 
    ```bash
-   python run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
+   python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025-12-14
    ```
 
 That's it! The pipeline will download, split, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
@@ -195,7 +195,7 @@ Uploaded/YYYY-MM-DD/
   python run_pipeline.py --company company_a --target-date 2025-12-24
 
   # Date range
-  python run_pipeline.py --company company_b --from-date 2025-12-01 --to-date 2025-12-05
+  python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025-12-14
   ```
 
 - `epos_playwright.py`  
@@ -205,7 +205,7 @@ Uploaded/YYYY-MM-DD/
 - `transform.py`  
   Transforms raw EPOS CSV into QuickBooks-ready format using company-specific configuration.
 
-  **Important:** Transform.py does NOT create or merge spill files. It receives a pre-filtered raw file via `--raw-file` and transforms only that data.
+  **Important:** Transform.py receives a pre-filtered raw file via `--raw-file` and transforms only that data. All date filtering and spill handling happens at the RAW level in `run_pipeline.py`.
 
 - `qbo_upload.py`  
   Uploads transformed CSV to QuickBooks Online via REST API.
@@ -214,6 +214,8 @@ Uploaded/YYYY-MM-DD/
 
   - **Deduplication (Layer A)**: Local ledger tracks uploaded DocNumbers
   - **Deduplication (Layer B)**: Bulk QBO API checks before uploading
+    - In **trading-day mode** with `--target-date`: Checks both DocNumber AND TxnDate to ensure receipts exist with the correct trading date
+    - In calendar-day mode: Checks DocNumber only
   - Automatic token refresh on 401 errors
   - Location/Department mapping
   - VAT-inclusive amount handling
@@ -301,7 +303,7 @@ python run_pipeline.py --company company_a --target-date 2025-12-28
 ### Range Mode
 
 ```bash
-python run_pipeline.py --company company_b --from-date 2025-12-26 --to-date 2025-12-28
+python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025-12-14
 ```
 
 **Flow:**
@@ -357,6 +359,19 @@ If `SLACK_WEBHOOK_URL` is configured, the pipeline sends:
 
 - Future RAW spill creation: `"Future raw spill: 2025-12-29 (23 rows)"`
 - RAW spill merge: `"2025-12-28: merged target split (480 rows) + raw spill (23 rows) -> final (503 rows)"`
+
+**Range Mode Final Summary:**
+
+When running in range mode (`--from-date` / `--to-date`), the final success message includes **Range Totals** that sum reconciliation results across all days:
+
+```
+• Range Totals (sum of per-day reconciliation):
+  – EPOS: ₦X (N receipts)
+  – QBO: ₦Y (M receipts)
+  – Difference: ₦(X-Y)
+```
+
+If some days had reconciliation NOT RUN, the header shows: `Range Totals (partial — K/T days included):`
 
 ---
 
@@ -603,8 +618,12 @@ The pipeline supports multiple companies, each with its own configuration file. 
 
 The pipeline includes automatic deduplication:
 
-- **Layer A:** Local ledger (`uploaded_docnumbers.json`)
+- **Layer A:** Local ledger (`uploaded_docnumbers.json`) — tracks DocNumbers that have been uploaded
 - **Layer B:** Bulk QBO API check before upload
+  - **Trading-day mode** (when `trading_day.enabled: true` and `--target-date` is provided): Checks both DocNumber AND TxnDate to ensure receipts exist with the correct trading date. This prevents skipping receipts that exist with the wrong date.
+  - **Calendar-day mode:** Checks DocNumber only
+
+**QBO is the source of truth:** If a DocNumber exists in QBO (with matching TxnDate in trading-day mode), the upload is skipped. Stale ledger entries (in ledger but not in QBO) are detected, logged, and healed by attempting upload.
 
 If you need to re-upload, delete existing receipts first using `query_qbo_for_company.py`.
 
@@ -638,15 +657,14 @@ export QBO_CLIENT_ID="your_id"
 
 ## Design Notes
 
-### Why Transformed Spill Logic Was Removed
+### RAW-First Design
 
-The original design had `transform.py` creating "transformed spill" files for non-target-date rows. This was removed because:
+The pipeline uses a RAW-first approach: all date filtering and spill handling happens at the raw data level in `run_pipeline.py`, before transformation. This ensures:
 
-1. **Double-handling risk:** Rows could be processed twice (once in spill, once in target date)
-2. **Complexity:** Spill merging logic in transform made it stateful and harder to debug
-3. **Date accounting:** Hard to track which rows were processed when
-
-The RAW-first approach is simpler: split at the raw level, merge at the raw level, transform only sees target-date rows.
+1. **Single source of truth:** Date filtering happens once, at download time
+2. **No double-processing:** Rows are assigned to exactly one date
+3. **Stateless transform:** `transform.py` receives pre-filtered data and has no knowledge of spills
+4. **Clear lifecycle:** RAW spill files are created, awaited, merged, and archived — never modified
 
 ### Why RAW-First Is Safer
 

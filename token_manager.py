@@ -73,7 +73,15 @@ def _init_database() -> None:
             conn.close()
         
         # Restrict file permissions
-        DB_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        try:
+            DB_FILE.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        except OSError as e:
+            # On network shares (SMB) or certain filesystems, chmod may be unsupported or treated as read-only.
+            # Token reads/writes can still work, so we treat chmod as best-effort.
+            if getattr(e, "errno", None) in (1, 30, 95):  # EPERM, EROFS, EOPNOTSUPP
+                pass
+            else:
+                raise
 
 
 def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:

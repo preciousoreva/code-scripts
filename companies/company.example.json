@@ -32,6 +32,11 @@
   },
   "slack": {
     "webhook_url_env_key": "SLACK_WEBHOOK_URL_EXAMPLE"
+  },
+  "trading_day": {
+    "enabled": false,
+    "start_hour": 5,
+    "start_minute": 0
   }
 }
 

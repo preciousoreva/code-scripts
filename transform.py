@@ -182,7 +182,8 @@ WAT_TZ = timezone(timedelta(hours=1))
 def filter_rows_by_target_date(
     df: pd.DataFrame,
     target_date: str,
-    raw_file: str
+    raw_file: str,
+    config=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Filter rows by target date and identify non-target rows.
@@ -199,19 +200,34 @@ def filter_rows_by_target_date(
     # Parse dates from Date/Time column
     dates_series = df["Date/Time"].apply(parse_date) if "Date/Time" in df.columns else pd.Series([None] * len(df))
     
-    # Convert to WAT timezone and extract date portion
+    # Convert to WAT timezone and extract date portion (trading day aware if enabled)
     def get_date_in_wat(dt) -> Optional[str]:
         try:
             if dt is None or pd.isna(dt):
                 return None
         except (TypeError, ValueError):
             return None
-        
+
         try:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=WAT_TZ)
             elif dt.tzinfo != WAT_TZ:
                 dt = dt.astimezone(WAT_TZ)
+
+            # If trading day mode is enabled, compute trading date using cutoff
+            trading_enabled = bool(getattr(config, "trading_day_enabled", False))
+            if trading_enabled:
+                start_hour = int(getattr(config, "trading_day_start_hour", 5))
+                start_minute = int(getattr(config, "trading_day_start_minute", 0))
+                cutoff = datetime.combine(dt.date(), datetime.min.time()).replace(
+                    hour=start_hour, minute=start_minute, tzinfo=WAT_TZ
+                )
+                # If dt is before cutoff on its calendar day, it belongs to previous trading day
+                if dt < cutoff:
+                    return (dt.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+                return dt.date().strftime("%Y-%m-%d")
+
+            # Calendar day mode (existing behavior)
             return dt.date().strftime("%Y-%m-%d")
         except (AttributeError, ValueError, TypeError):
             return None
@@ -260,10 +276,15 @@ def filter_rows_by_target_date(
     return target_rows, non_target_rows, stats
 
 
-def transform_dataframe_unified(df: pd.DataFrame, config) -> pd.DataFrame:
+def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[str] = None) -> pd.DataFrame:
     """
     Transform dataframe using company-specific configuration.
     Handles both Company A (date+tender) and Company B (date+location+tender) grouping.
+    
+    Args:
+        df: Input dataframe
+        config: CompanyConfig object
+        target_date: Optional target date in YYYY-MM-DD format (used when trading_day_enabled is True)
     """
     ensure_required_columns(df)
     
@@ -286,7 +307,35 @@ def transform_dataframe_unified(df: pd.DataFrame, config) -> pd.DataFrame:
     out["_parsed_date"] = dates
     out["_date_str"] = [d.strftime(config.date_format) for d in dates]
     out["Customer"] = df.get("Customer Full Name").fillna("")
-    out["*SalesReceiptDate"] = out["_date_str"]
+    
+    # CRITICAL: In trading-day mode, force _parsed_date to trading date for grouping/DocNumber generation
+    # This must happen BEFORE grouping and DocNumber generation to ensure all DocNumbers use trading date
+    if config.trading_day_enabled and target_date:
+        try:
+            target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+            # Force _parsed_date to trading date for all rows (used for grouping and DocNumber generation)
+            # Create a Series with the same length as the dataframe, all set to trading date
+            out["_parsed_date"] = pd.Series([target_dt] * len(out), index=out.index)
+            print(f"[INFO] Trading day mode: forcing _parsed_date to trading_date={target_date} for all {len(out)} rows (grouping/DocNumber generation)")
+        except ValueError:
+            print(f"[WARN] Could not parse target_date {target_date}, using calendar dates for grouping")
+    
+    # Set *SalesReceiptDate: use target_date if trading_day_enabled, otherwise use parsed date
+    if config.trading_day_enabled and target_date:
+        # Trading day mode: use target_date (trading date) for all rows
+        # Convert target_date (YYYY-MM-DD) to company's date_format
+        try:
+            target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+            target_date_formatted = target_dt.strftime(config.date_format)
+            out["*SalesReceiptDate"] = target_date_formatted
+            print(f"[INFO] Trading day mode: setting *SalesReceiptDate to target_date={target_date} (formatted as {target_date_formatted})")
+        except ValueError:
+            # Fallback: use as-is if format conversion fails
+            print(f"[WARN] Could not format target_date {target_date} using {config.date_format}, using as-is")
+            out["*SalesReceiptDate"] = target_date
+    else:
+        # Calendar day mode: use parsed date from CSV
+        out["*SalesReceiptDate"] = out["_date_str"]
     out["*DepositAccount"] = config.deposit_account
     out["Location"] = df.get("Location Name").fillna("")
     
@@ -471,7 +520,7 @@ def main():
     }
     
     if target_date:
-        target_df, non_target_rows, stats = filter_rows_by_target_date(df, target_date, raw_file)
+        target_df, non_target_rows, stats = filter_rows_by_target_date(df, target_date, raw_file, config=config)
         df = target_df
         
         if len(df) == 0:
@@ -501,7 +550,7 @@ def main():
         stats["max_dt"] = dates_present_list[-1] if dates_present_list else None
     
     # Transform using unified transform logic
-    transformed = transform_dataframe_unified(df, config)
+    transformed = transform_dataframe_unified(df, config, target_date=target_date)
     
     # NOTE: Transformed spill system has been deprecated.
     # RAW spill handling is now managed by run_pipeline.py at the raw CSV level:

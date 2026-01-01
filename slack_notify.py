@@ -178,7 +178,10 @@ def format_run_summary(
         uploaded = upload_stats.get("uploaded", 0)
         skipped = upload_stats.get("skipped", 0)
         failed = upload_stats.get("failed", 0)
+        stale_ledger = upload_stats.get("stale_ledger_entries_detected", 0)
         message += f"• Upload: {uploaded} uploaded, {skipped} skipped, {failed} failed (attempted: {attempted})\n"
+        if stale_ledger > 0:
+            message += f"• Stale ledger entries detected: {stale_ledger} (healed by uploading)\n"
     
     # Reconciliation
     reconcile = summary.get("reconcile")
@@ -208,6 +211,62 @@ def format_run_summary(
         # If failure and no reconcile data, indicate it wasn't run
         message += f"• Reconciliation: NOT RUN\n"
         message += f"  – Reconciliation not run (upload incomplete)\n"
+    
+    # Trading day boundary stats (if available)
+    trading_day_stats = summary.get("trading_day_stats")
+    if trading_day_stats:
+        cutoff = trading_day_stats.get("cutoff", "05:00")
+        by_date = trading_day_stats.get("by_date", {})
+        
+        # For single-day or per-day summaries, show stats for the specific date
+        target_date = summary.get("target_date")
+        if target_date and target_date in by_date:
+            day_stats = by_date[target_date]
+            pre_cutoff = day_stats.get("pre_cutoff_reassigned", 0)
+            if pre_cutoff > 0:
+                message += f"• Trading-day adjustment: {pre_cutoff} row(s) from next calendar day (pre-cutoff) assigned to {target_date} (cutoff={cutoff} WAT)\n"
+        # For range mode final summary, show aggregate or per-day stats
+        elif by_date:
+            # Show stats for all dates in range
+            total_reassigned = sum(stats.get("pre_cutoff_reassigned", 0) for stats in by_date.values())
+            if total_reassigned > 0:
+                message += f"• Trading-day adjustment: {total_reassigned} total row(s) reassigned from next calendar day (cutoff={cutoff} WAT)\n"
+                # Optionally show per-day breakdown (limit to 3 dates to avoid clutter)
+                dates_with_reassigned = [
+                    (date, stats.get("pre_cutoff_reassigned", 0))
+                    for date, stats in by_date.items()
+                    if stats.get("pre_cutoff_reassigned", 0) > 0
+                ]
+                if len(dates_with_reassigned) <= 3:
+                    for date, count in dates_with_reassigned:
+                        message += f"  – {date}: {count} row(s)\n"
+    
+    # Range Totals (only for range mode final summary)
+    if status == "success" and summary.get("range_totals"):
+        # Check if this is a range completion message (has from_date and to_date, or date_range contains "to")
+        is_range_mode = (
+            (summary.get("from_date") is not None and summary.get("to_date") is not None) or
+            (summary.get("date_range") and " to " in str(summary.get("date_range")))
+        )
+        
+        if is_range_mode:
+            range_totals = summary["range_totals"]
+            included_days = range_totals.get("included_days", 0)
+            total_days = range_totals.get("total_days", 0)
+            epos_total = range_totals.get("epos_total", 0)
+            qbo_total = range_totals.get("qbo_total", 0)
+            epos_count = range_totals.get("epos_count", 0)
+            qbo_count = range_totals.get("qbo_count", 0)
+            difference = range_totals.get("difference", 0)
+            
+            if included_days == total_days:
+                message += f"• Range Totals (sum of per-day reconciliation):\n"
+            else:
+                message += f"• Range Totals (partial — {included_days}/{total_days} days included):\n"
+            
+            message += f"  – EPOS: ₦{epos_total:,.2f} ({epos_count} receipts)\n"
+            message += f"  – QBO: ₦{qbo_total:,.2f} ({qbo_count} receipts)\n"
+            message += f"  – Difference: ₦{difference:,.2f}\n"
     
     # Warnings/Notes (for update messages)
     warnings = summary.get("warnings", [])
