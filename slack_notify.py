@@ -190,7 +190,7 @@ def format_run_summary(
         if reconcile_status == "MATCH":
             message += f"• Reconciliation: MATCH\n"
         elif reconcile_status == "MISMATCH":
-            message += f"• Reconciliation: MISMATCH\n"
+            message += f"• ⚠️ Reconciliation: MISMATCH\n"
         else:
             message += f"• Reconciliation: NOT RUN\n"
         

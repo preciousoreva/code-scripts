@@ -66,6 +66,14 @@ The pipeline is designed to be run as a single command and take care of all phas
    python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025-12-14
    ```
 
+   **Skip download (use existing split files):**
+
+   ```bash
+   python run_pipeline.py --company company_b --from-date 2025-01-29 --to-date 2025-01-31 --skip-download
+   ```
+
+   > **Note:** `--skip-download` only works in range mode and uses existing split files from `uploads/range_raw/`. Useful when you already have CSV files and want to reprocess without re-downloading from EPOS.
+
 That's it! The pipeline will download, split, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
 
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
@@ -88,7 +96,20 @@ The `run_all_companies.py` script orchestrates running the pipeline for all conf
 **Usage:**
 
 ```bash
+# Process all companies (yesterday's data)
 python run_all_companies.py
+
+# Process all companies for a specific date
+python run_all_companies.py --target-date 2025-12-24
+
+# Process all companies for a date range
+python run_all_companies.py --from-date 2025-12-08 --to-date 2025-12-14
+
+# Process specific companies only
+python run_all_companies.py --companies company_a company_b
+
+# Skip download (use existing split files in range mode)
+python run_all_companies.py --from-date 2025-01-29 --to-date 2025-01-31 --skip-download
 ```
 
 **Failure behavior:**
@@ -196,7 +217,22 @@ Uploaded/YYYY-MM-DD/
 
   # Date range
   python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025-12-14
+
+  # Skip download (use existing split files in uploads/range_raw/)
+  python run_pipeline.py --company company_b --from-date 2025-01-29 --to-date 2025-01-31 --skip-download
   ```
+
+  **Skip Download Mode:**
+
+  The `--skip-download` flag allows you to process existing split CSV files without downloading from EPOS. This is useful when:
+  - You already have split files in `uploads/range_raw/` from a previous run
+  - You want to reprocess data without re-downloading
+  - You're working with manually prepared CSV files
+
+  **Requirements:**
+  - Only works in range mode (`--from-date` and `--to-date` required)
+  - Split files must exist in `uploads/range_raw/<CompanyDir>/<range_folder>/`
+  - Files should be named `BookKeeping_YYYY-MM-DD.csv` or `CombinedRaw_YYYY-MM-DD.csv`
 
 - `epos_playwright.py`  
   Uses **Playwright** to log into EPOS Now, navigate to the BookKeeping report, and download the CSV.
@@ -308,8 +344,8 @@ python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025
 
 **Flow:**
 
-1. **Download:** EPOS CSV for full range → repo root
-2. **Split:** By WAT date (all days)
+1. **Download:** EPOS CSV for full range → repo root (skipped if `--skip-download` is used)
+2. **Split:** By WAT date (all days) — or use existing split files if `--skip-download`
    - Rows for 2025-12-26 → `uploads/range_raw/.../BookKeeping_2025-12-26.csv`
    - Rows for 2025-12-27 → `uploads/range_raw/.../BookKeeping_2025-12-27.csv`
    - Rows for 2025-12-28 → `uploads/range_raw/.../BookKeeping_2025-12-28.csv`
@@ -319,7 +355,16 @@ python run_pipeline.py --company company_b --from-date 2025-12-08 --to-date 2025
    - Transform
    - Upload
    - Archive
-4. **Final archive:** Archive range staging folder and original CSV
+4. **Final archive:** Archive range staging folder and original CSV (if downloaded)
+
+**Skip Download Mode:**
+
+When using `--skip-download`, the pipeline:
+- Skips the EPOS download step
+- Searches for existing split files in `uploads/range_raw/`
+- Processes each day's split file (or `CombinedRaw_` file if spill was merged)
+- Archives split files after successful completion
+- Note: Trading-day cutoff info is included, but per-date reassignment counts are unavailable (requires original raw CSV)
 
 ### Timeline Example: RAW Spill Flow
 

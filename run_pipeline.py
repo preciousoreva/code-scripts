@@ -145,7 +145,7 @@ def archive_range_raw_files(
         company_key: Company identifier (for legacy fallback)
         from_date: Start date in YYYY-MM-DD format
         to_date: End date in YYYY-MM-DD format
-        original_csv_path: Path to the original downloaded CSV file (may not exist if already moved)
+        original_csv_path: Path to the original downloaded CSV file (may be None in skip-download mode, or may not exist if already moved)
     """
     date_range = f"{from_date}_to_{to_date}"
     
@@ -173,17 +173,21 @@ def archive_range_raw_files(
     archive_dir.mkdir(parents=True, exist_ok=True)
     
     # Move original CSV to archive with ORIGINAL_ prefix (if it still exists in repo root)
-    if original_csv_path.exists() and original_csv_path.is_file():
-        original_archive_name = f"ORIGINAL_{original_csv_path.name}"
-        original_archive_path = archive_dir / original_archive_name
-        # Check if already exists (shouldn't happen, but safety check)
-        if not original_archive_path.exists():
-            shutil.move(str(original_csv_path), str(original_archive_path))
-            logging.info(f"Moved original CSV: {original_csv_path.name} -> {original_archive_name}")
+    # Skip if original_csv_path is None (skip-download mode)
+    if original_csv_path is not None:
+        if original_csv_path.exists() and original_csv_path.is_file():
+            original_archive_name = f"ORIGINAL_{original_csv_path.name}"
+            original_archive_path = archive_dir / original_archive_name
+            # Check if already exists (shouldn't happen, but safety check)
+            if not original_archive_path.exists():
+                shutil.move(str(original_csv_path), str(original_archive_path))
+                logging.info(f"Moved original CSV: {original_csv_path.name} -> {original_archive_name}")
+            else:
+                logging.warning(f"Original CSV already archived: {original_archive_name}")
         else:
-            logging.warning(f"Original CSV already archived: {original_archive_name}")
+            logging.info(f"Original CSV not found in repo root (may have been moved already): {original_csv_path.name}")
     else:
-        logging.info(f"Original CSV not found in repo root (may have been moved already): {original_csv_path.name}")
+        logging.info("Skip-download mode: no original CSV to archive")
     
     # Move all files from range_raw_dir to archive_dir
     items_moved = 0
@@ -827,7 +831,7 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
     return reconcile_result
 
 
-def main(company_key: str, target_date: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None) -> int:
+def main(company_key: str, target_date: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, skip_download: bool = False) -> int:
     """
     Full pipeline for a specific company:
 
@@ -855,6 +859,7 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
         target_date: Target business date in YYYY-MM-DD format. If None, uses yesterday.
         from_date: Start date for range mode in YYYY-MM-DD format (must be used with to_date)
         to_date: End date for range mode in YYYY-MM-DD format (must be used with from_date)
+        skip_download: If True, skip EPOS download and use existing split files in uploads/range_raw/ (range mode only)
     """
     # Load company configuration
     try:
@@ -940,50 +945,166 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             company_dir = company_dir_name(config.display_name)
             logging.info(f"Using company folder: {company_dir}")
             
-            # Deterministic range-mode raw CSV detection: snapshot repo-root CSVs before download
-            # This ensures we use exactly the file created by the download, not a stale CSV
-            before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
-            
-            # Phase 1: Download EPOS CSV once for the entire range
-            run_step(
-                "Phase 1: Download EPOS CSV (epos_playwright) - Range",
-                "epos_playwright.py",
-                ["--company", company_key, "--from-date", from_date, "--to-date", to_date]
-            )
-            
-            # Snapshot repo-root CSVs after download and detect new files via set difference
-            after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
-            new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
-            
-            # Defensive: exclude processed CSVs if any appeared (shouldn't happen, but safety check)
-            new_csvs = [
-                p for p in new_csvs
-                if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
-            ]
-            
-            if not new_csvs:
-                error_msg = "[ERROR] Range mode: no new raw EPOS CSV appeared in repo root after download"
-                logging.error(error_msg)
-                raise SystemExit(error_msg)
-            
-            if len(new_csvs) > 1:
-                logging.warning(
-                    "Range mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
-                    ", ".join(p.name for p in new_csvs),
+            if skip_download:
+                # SKIP DOWNLOAD MODE: Use existing split files from uploads/range_raw/
+                logging.info("\n=== SKIP-DOWNLOAD MODE: Using existing split files ===")
+                
+                # Check for existing split files in range_raw directory
+                # First try exact range folder
+                split_dir = repo_root / "uploads" / "range_raw" / company_dir / f"{from_date}_to_{to_date}"
+                
+                # Also check legacy path (company_key instead of company_dir)
+                if not split_dir.exists():
+                    legacy_split_dir = repo_root / "uploads" / "range_raw" / company_key / f"{from_date}_to_{to_date}"
+                    if legacy_split_dir.exists():
+                        split_dir = legacy_split_dir
+                        logging.info(f"Using legacy path: {split_dir}")
+                
+                # If exact range folder doesn't exist, search for any range folder that might contain our dates
+                if not split_dir.exists():
+                    logging.info(f"Exact range folder not found, searching for files in any range folder...")
+                    company_range_dir = repo_root / "uploads" / "range_raw" / company_dir
+                    if not company_range_dir.exists():
+                        company_range_dir = repo_root / "uploads" / "range_raw" / company_key
+                    
+                    if company_range_dir.exists():
+                        # Search all range folders for this company
+                        found_dir = None
+                        for range_folder in company_range_dir.iterdir():
+                            if range_folder.is_dir():
+                                # Check if this folder contains any of our requested date files
+                                test_file = range_folder / f"BookKeeping_{from_date}.csv"
+                                if test_file.exists():
+                                    found_dir = range_folder
+                                    logging.info(f"Found files in range folder: {range_folder.name}")
+                                    break
+                        
+                        if found_dir:
+                            split_dir = found_dir
+                        else:
+                            error_msg = f"[ERROR] Skip-download mode: no split files found for date range {from_date} to {to_date}"
+                            logging.error(error_msg)
+                            logging.error(f"Searched in: {company_range_dir}")
+                            raise SystemExit(error_msg)
+                    else:
+                        error_msg = f"[ERROR] Skip-download mode: range_raw directory not found for company: {company_range_dir}"
+                        logging.error(error_msg)
+                        raise SystemExit(error_msg)
+                
+                # Build date_to_file from existing split files
+                date_to_file = {}
+                future_spill_to_file = {}
+                split_stats = {
+                    "total_rows": 0,
+                    "in_range_rows": 0,
+                    "future_rows": 0,
+                    "past_rows": 0,
+                    "null_rows": 0,
+                    "future_spill_details": {}
+                }
+                
+                # Generate date list for checking
+                from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                to_dt = datetime.strptime(to_date, "%Y-%m-%d")
+                date_list = []
+                current = from_dt
+                while current <= to_dt:
+                    date_list.append(current.strftime("%Y-%m-%d"))
+                    current += timedelta(days=1)
+                
+                # Look for BookKeeping_<date>.csv files
+                for day_date in date_list:
+                    split_file = split_dir / f"BookKeeping_{day_date}.csv"
+                    if split_file.exists():
+                        date_to_file[day_date] = str(split_file)
+                        # Count rows for stats
+                        try:
+                            df = pd.read_csv(split_file)
+                            split_stats["in_range_rows"] += len(df)
+                            split_stats["total_rows"] += len(df)
+                            logging.info(f"Found existing split file for {day_date}: {split_file.name} ({len(df)} rows)")
+                        except Exception as e:
+                            logging.warning(f"Could not read {split_file.name}: {e}")
+                    else:
+                        logging.warning(f"No split file found for {day_date}: {split_file.name}")
+                
+                # Also check for CombinedRaw files (merged with spill)
+                for day_date in date_list:
+                    combined_file = split_dir / f"CombinedRaw_{day_date}.csv"
+                    if combined_file.exists():
+                        # Prefer CombinedRaw over BookKeeping if both exist
+                        date_to_file[day_date] = str(combined_file)
+                        try:
+                            df = pd.read_csv(combined_file)
+                            logging.info(f"Found existing combined file for {day_date}: {combined_file.name} ({len(df)} rows)")
+                        except Exception as e:
+                            logging.warning(f"Could not read {combined_file.name}: {e}")
+                
+                if not date_to_file:
+                    error_msg = f"[ERROR] Skip-download mode: no split files found in {split_dir}"
+                    logging.error(error_msg)
+                    raise SystemExit(error_msg)
+                
+                logging.info(f"Found {len(date_to_file)} existing split file(s) for date range")
+                downloaded_csv = None  # No downloaded CSV in skip-download mode
+                
+                # Create minimal trading_day_stats with cutoff info (if trading day mode is enabled)
+                # We can't compute per-date counts without the original raw CSV, but we can show the cutoff
+                trading_day_stats = None
+                if config and config.trading_day_enabled:
+                    cutoff_str = f"{config.trading_day_start_hour:02d}:{config.trading_day_start_minute:02d}"
+                    trading_day_stats = {
+                        "cutoff": cutoff_str,
+                        "by_date": {}  # Empty - no per-date stats available in skip-download mode
+                    }
+                    logging.info(f"Trading-day mode enabled (cutoff={cutoff_str} WAT) - stats unavailable in skip-download mode")
+                
+            else:
+                # NORMAL MODE: Download and split
+                # Deterministic range-mode raw CSV detection: snapshot repo-root CSVs before download
+                # This ensures we use exactly the file created by the download, not a stale CSV
+                before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+                
+                # Phase 1: Download EPOS CSV once for the entire range
+                run_step(
+                    "Phase 1: Download EPOS CSV (epos_playwright) - Range",
+                    "epos_playwright.py",
+                    ["--company", company_key, "--from-date", from_date, "--to-date", to_date]
                 )
-            
-            downloaded_csv = new_csvs[-1]
-            logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
-            
-            # Split CSV into per-day files
-            logging.info("\n=== Splitting CSV into per-day files ===")
-            date_to_file, future_spill_to_file, split_stats = split_csv_by_date(downloaded_csv, from_date, to_date, company_dir, repo_root, config)
-            
-            if not date_to_file:
-                raise SystemExit("No data found in date range after splitting")
-            
-            # Store trading day stats for later use in summaries
-            trading_day_stats = split_stats.get("trading_day_stats")
+                
+                # Snapshot repo-root CSVs after download and detect new files via set difference
+                after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+                new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
+                
+                # Defensive: exclude processed CSVs if any appeared (shouldn't happen, but safety check)
+                new_csvs = [
+                    p for p in new_csvs
+                    if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
+                ]
+                
+                if not new_csvs:
+                    error_msg = "[ERROR] Range mode: no new raw EPOS CSV appeared in repo root after download"
+                    logging.error(error_msg)
+                    raise SystemExit(error_msg)
+                
+                if len(new_csvs) > 1:
+                    logging.warning(
+                        "Range mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
+                        ", ".join(p.name for p in new_csvs),
+                    )
+                
+                downloaded_csv = new_csvs[-1]
+                logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
+                
+                # Split CSV into per-day files
+                logging.info("\n=== Splitting CSV into per-day files ===")
+                date_to_file, future_spill_to_file, split_stats = split_csv_by_date(downloaded_csv, from_date, to_date, company_dir, repo_root, config)
+                
+                if not date_to_file:
+                    raise SystemExit("No data found in date range after splitting")
+                
+                # Store trading day stats for later use in summaries
+                trading_day_stats = split_stats.get("trading_day_stats")
             
             # Add warnings for future raw spills (for Slack notification)
             if future_spill_to_file:
@@ -1653,6 +1774,11 @@ Examples:
         "--to-date",
         help="End date for range mode in YYYY-MM-DD format (must be used with --from-date)",
     )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip EPOS download and use existing split files in uploads/range_raw/ (range mode only)",
+    )
     args = parser.parse_args()
     
     if not args.company:
@@ -1662,5 +1788,9 @@ Examples:
     if (args.from_date is None) != (args.to_date is None):
         parser.error("--from-date and --to-date must be provided together")
     
-    raise SystemExit(main(args.company, args.target_date, args.from_date, args.to_date))
+    # Validation: --skip-download only works in range mode
+    if args.skip_download and (args.from_date is None or args.to_date is None):
+        parser.error("--skip-download can only be used with --from-date and --to-date (range mode)")
+    
+    raise SystemExit(main(args.company, args.target_date, args.from_date, args.to_date, args.skip_download))
 

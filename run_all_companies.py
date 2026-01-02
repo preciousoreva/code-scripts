@@ -31,12 +31,21 @@ def run(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Continue running remaining companies even if one fails. Default is to stop on first failure.",
     )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip EPOS download and use existing split files in uploads/range_raw/ (range mode only).",
+    )
 
     args = parser.parse_args(argv)
 
     # Validation: --from-date and --to-date must be provided together
     if (args.from_date is None) != (args.to_date is None):
         parser.error("--from-date and --to-date must be provided together")
+    
+    # Validation: --skip-download only works in range mode
+    if args.skip_download and (args.from_date is None or args.to_date is None):
+        parser.error("--skip-download can only be used with --from-date and --to-date (range mode)")
 
     all_companies = [c for c in get_available_companies() if not c.endswith("_example")]
     if not all_companies:
@@ -63,6 +72,10 @@ def run(argv: Optional[list[str]] = None) -> int:
         forwarded_date_args.extend(["--from-date", args.from_date, "--to-date", args.to_date])
     elif args.target_date:
         forwarded_date_args.extend(["--target-date", args.target_date])
+    
+    # Forward --skip-download if provided
+    if args.skip_download:
+        forwarded_date_args.append("--skip-download")
 
     failures: list = []
 

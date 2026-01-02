@@ -177,8 +177,9 @@ def run(playwright: Playwright, config, from_date: str = None, to_date: str = No
     page.wait_for_timeout(500)
     
     # Download CSV
-    with page.expect_download() as download_info:
-        page.get_by_role("button", name="Export to .csv").click()
+    # For large date ranges, downloads can take longer - increase timeout and don't wait for navigation
+    with page.expect_download(timeout=150000) as download_info:  # 2 minute timeout for large downloads
+        page.get_by_role("button", name="Export to .csv").click(timeout=30000, no_wait_after=True)
     download = download_info.value
 
     # Determine repo root by using the current script's directory
