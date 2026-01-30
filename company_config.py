@@ -256,7 +256,16 @@ class CompanyConfig:
         """
         env_key = f"{self.company_key.upper()}_AUTO_FIX_WRONG_TYPE_ITEMS"
         return self._get_env_or_config(env_key, "auto_fix_wrong_type_items", False)
-    
+
+    @property
+    def use_item_hierarchy(self) -> bool:
+        """Whether to use SubItem/ParentRef (category hierarchy) for inventory items (default: False).
+        When False, Sales Receipt Product/Service column shows only product name; when True, QBO shows Parent:Child.
+        ENV override: {COMPANY_KEY}_USE_ITEM_HIERARCHY
+        """
+        env_key = f"{self.company_key.upper()}_USE_ITEM_HIERARCHY"
+        return self._get_env_or_config(env_key, "use_item_hierarchy", False)
+
     @property
     def product_mapping_file(self) -> Path:
         """Path to product category mapping CSV file (default: mappings/Product.Mapping.csv)."""

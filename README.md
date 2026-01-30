@@ -126,6 +126,11 @@ This script is intentionally thin — all business logic remains in `run_pipelin
 
 ## Architecture Overview
 
+### Trading day mode vs calendar day
+
+- **Calendar day:** Each receipt is assigned the calendar date of the transaction. Deduplication checks DocNumber only.
+- **Trading day mode** (config: `trading_day.enabled: true`): The "day" is determined by a cutoff time (e.g. 05:00). Transactions after midnight but before the cutoff are grouped with the previous calendar day. Used when your business day spans midnight. Deduplication checks both DocNumber and TxnDate so receipts are matched to the correct trading day.
+
 ### RAW-First Processing
 
 The pipeline enforces **date correctness BEFORE transformation**:
@@ -256,6 +261,26 @@ Uploaded/YYYY-MM-DD/
   - Location/Department mapping
   - VAT-inclusive amount handling
 
+- `test/run_test_upload.py`  
+  Test upload flow for a single raw CSV (no EPOS download): runs transform, QBO upload, reconciliation, and optionally archive. Use for validating transform output and item resolution without running the full pipeline. Run from repo root.
+
+  **Usage:**
+
+  ```bash
+  python test/run_test_upload.py --company company_a --target-date 2026-01-28
+  # With a specific raw CSV file:
+  python test/run_test_upload.py --company company_a --csv path/to/BookKeeping_2026_01_29_1911.csv
+  ```
+
+- `transform.py`  
+  Transforms a single raw EPOS CSV file into QuickBooks-ready CSV. Typically invoked by `run_pipeline.py` with `--raw-file`; can be run standalone for testing.
+
+  **Usage:**
+
+  ```bash
+  python transform.py --company company_a --target-date 2026-01-28 --raw-file path/to/BookKeeping_2026-01-28.csv
+  ```
+
 ### Configuration
 
 - `company_config.py` — Loads company-specific settings from JSON files
@@ -265,9 +290,9 @@ Uploaded/YYYY-MM-DD/
 ### Supporting Files
 
 - `token_manager.py` — QuickBooks OAuth2 token management (SQLite storage, per-company tokens)
-- `query_qbo_for_company.py` — QuickBooks query/reconciliation tool
 - `slack_notify.py` — Slack notification helpers
 - `load_env.py` — Environment variable loader
+- `scripts/qbo_queries/` — QBO query and debug scripts (see [QBO query scripts](#qbo-query-scripts) below)
 
 ### Data Folders
 
@@ -509,7 +534,20 @@ python store_tokens.py --list
 
 **Adding a second company:** Simply run the OAuth flow again for the new company and store tokens using the same script with the new company's `--company` argument. The SQLite database stores tokens separately per company.
 
-### 3. Verify .gitignore
+### 3. QBO query scripts
+
+Ad-hoc query and debug scripts live in `scripts/qbo_queries/`. Run from repo root with `--company` (required). See `scripts/qbo_queries/README.md` for the full list.
+
+| Script | Purpose |
+|--------|---------|
+| `qbo_query.py` | Run arbitrary QBO SQL-like query |
+| `qbo_item_lookup_by_name.py` | Look up Item by exact Name |
+| `qbo_item_get_by_id.py` | Get Item by Id or search by Name |
+| `qbo_account_query.py` | Run Account queries (name-based) |
+| `qbo_check_inventory_start_dates.py` | List Inventory items with InvStartDate after cutoff |
+| `qbo_verify_mapping_accounts.py` | Verify Product.Mapping.csv accounts exist in QBO |
+
+### 4. Verify .gitignore
 
 Ensure these are ignored:
 
@@ -521,7 +559,7 @@ Ensure these are ignored:
 - `logs/` — Execution logs
 - `*.csv` — Processing files
 
-### 4. (Optional) Enable Pre-commit Secret Scanning
+### 5. (Optional) Enable Pre-commit Secret Scanning
 
 To catch hardcoded secrets before committing, you can enable pre-commit hooks:
 
@@ -734,11 +772,12 @@ If negative inventory is not enabled in QBO, SalesReceipts will be rejected with
 ### Behavior
 
 **When `enable_inventory_items` is `true`:**
+- Item resolution runs **once per run**: all unique item names are prefetched from QBO, then resolved (patch or create) in a single phase. Per line, only a lookup in `item_result_by_name` is used — no per-line QBO API calls.
 - Missing products are created as **Inventory items** (not Service items)
 - Items start with `QtyOnHand = default_qty_on_hand` (typically 0)
-- Accounts are mapped from category using `Product.Mapping.csv`
-- Unit prices are set from EPOS CSV `NET Sales` column (per-unit)
-- Purchase costs are set from EPOS CSV `Cost Price` column (per-unit)
+- Accounts are mapped from category using `mappings/Product.Mapping.csv` (categories → Inventory/Revenue/COGS accounts)
+- When items are created or patched, UnitPrice and PurchaseCost are set/updated from CSV (UnitPrice: when missing/0 or differs by >0.01; PurchaseCost: when missing/0)
+- Unit prices are set from EPOS CSV `NET Sales` column (per-unit); purchase costs from `Cost Price` column (per-unit)
 
 **When `enable_inventory_items` is `false` (default):**
 - Missing products are created as **Service items** (existing behavior)
@@ -770,9 +809,30 @@ After enabling inventory items, verify:
 - [ ] Companies without inventory enabled still create Service items (unchanged behavior)
 - [ ] Slack summary includes inventory stats (items created, warnings, rejections)
 
+**Inventory pricing (TOTAL Sales / Cost Price):**
+
+1. Run transform so output CSV includes pricing columns:
+   `python transform.py --company company_a --target-date 2026-01-28 --raw-file BookKeeping_2026_01_29_1911.csv`
+   - Confirm output CSV has columns: **TOTAL Sales**, **NET Sales**, **Cost Price** with row values (e.g. 500.00, 465.12, 329.46).
+2. Run test upload: `python test/run_test_upload.py --company company_a --target-date 2026-01-28`
+   - Logs should show `unit_sales_price_gross`, `unit_purchase_cost_gross` (e.g. 329.46) and, if patching, `PurchaseCost:0->329.46` (or similar).
+3. In QBO: Product/Service → open Inventory item → **Purchasing** tab: Purchase cost should match Cost Price / qty (e.g. 329.46). **Sales** tab: Price/rate should match TOTAL Sales / qty (e.g. 500.00) with "Price is inclusive of sales tax" reflected.
+
 ---
 
 ## Troubleshooting
+
+### QBO query and item gotchas
+
+- **SubItem cannot be selected in some QBO UI dropdowns:** When using item hierarchy (SubItem + ParentRef), sub-items may not appear as selectable in every QBO screen (e.g. when picking an item for a transaction). Use the **parent category** or search by name where supported. The API accepts sub-items for Sales Receipt lines; the limitation is UI-only.
+- **"Category:Product" display on Sales Receipts:** When `use_item_hierarchy` is true, QuickBooks displays the **FullyQualifiedName** (e.g. `Category Name:Product Name`) in the Product/Service column. This is expected and not a bug; we are not changing this behavior.
+
+### Logs to look for
+
+- **Mapping loaded:** `[INFO] Loaded N category mappings from mappings/Product.Mapping.csv`
+- **Item resolution summary:** `[INFO] Item resolution summary: total_lines=... unique_items=... items_created=... items_patched=... item_lookups_from_prefetch=...`
+- **Items created/patched:** `[INFO] Patched Inventory item fields: Id=... UnitPrice:...->... PurchaseCost:...->...` and `[INFO] Attached ParentRef/SubItem to Inventory item '...'`
+- **Pre-flight (inventory start date):** `[WARN] Found N inventory items with InvStartDate AFTER target_date=...` and report path if any
 
 ### RAW Spill Not Being Merged
 
@@ -791,7 +851,7 @@ The pipeline includes automatic deduplication:
 
 **QBO is the source of truth:** If a DocNumber exists in QBO (with matching TxnDate in trading-day mode), the upload is skipped. Stale ledger entries (in ledger but not in QBO) are detected, logged, and healed by attempting upload.
 
-If you need to re-upload, delete existing receipts first using `query_qbo_for_company.py`.
+If you need to re-upload, delete existing receipts first using the QBO query scripts in `scripts/qbo_queries/` (e.g. `qbo_query.py` to run a query, or QBO UI).
 
 ### Token Refresh Fails
 

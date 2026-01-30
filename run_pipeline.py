@@ -771,10 +771,10 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
 
         epos_count = df["*SalesReceiptNo"].nunique() if "*SalesReceiptNo" in df.columns else 0
 
-        # Get QBO total using query_qbo_for_company.py
-        query_script = repo_root / "query_qbo_for_company.py"
+        # Get QBO total using scripts/qbo_queries/qbo_query.py
+        query_script = repo_root / "scripts" / "qbo_queries" / "qbo_query.py"
         if not query_script.exists():
-            reconcile_result["reason"] = "query_qbo_for_company.py not found"
+            reconcile_result["reason"] = "scripts/qbo_queries/qbo_query.py not found"
             return reconcile_result
 
         # Query QBO for receipts on target_date (get Id and TotalAmt)

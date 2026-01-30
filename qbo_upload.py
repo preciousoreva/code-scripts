@@ -7,7 +7,7 @@ import argparse
 import sys
 import re
 import csv
-from typing import Optional, Dict, Callable, Any, Tuple, List
+from typing import Optional, Dict, Callable, Any, Tuple, List, Set
 from urllib.parse import quote
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -722,6 +722,83 @@ def write_inventory_start_date_issues_report(
     return filepath
 
 
+def _safe_numeric(value: Any, default: float = 0.0) -> float:
+    """Safely convert to float, handling commas, NaN, etc."""
+    if pd.isna(value) or value == "" or value is None:
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_desired_item_state(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    """
+    Build desired_item_state from full CSV: one entry per unique item name (first occurrence).
+    Used for O(U) item resolution; no network calls.
+    """
+    desired: Dict[str, Dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        item_name = str(row.get(ITEM_NAME_COL, "")).strip()
+        item_name = re.sub(r"\s+", " ", item_name) if item_name else ""
+        if not item_name:
+            continue
+        if item_name in desired:
+            continue
+        total_sales = _safe_numeric(row.get("TOTAL Sales", 0))
+        cost_total = _safe_numeric(row.get("Cost Price", 0))
+        qty = _safe_numeric(row.get(QTY_COL, 1))
+        if qty <= 0:
+            qty = 1.0
+        unit_sales_price_gross = (total_sales / qty) if qty else 0.0
+        unit_purchase_cost_gross = (cost_total / qty) if qty else 0.0
+        category = str(row.get(ITEM_DESC_COL, "")).strip()
+        if category:
+            category = re.sub(r"\s+", " ", category)
+        else:
+            category = None
+        desired[item_name] = {
+            "category_name": category,
+            "unit_sales_price_gross": unit_sales_price_gross,
+            "unit_purchase_cost_gross": unit_purchase_cost_gross,
+        }
+    return desired
+
+
+def prefetch_all_items(token_mgr: TokenManager, realm_id: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Load all QBO Items once per run via paginated query.
+    Returns existing_items_by_name: key = item Name (exact, case-sensitive), value = item dict.
+    Do NOT include SubItem in SELECT (QBO rejects it).
+    """
+    existing: Dict[str, Dict[str, Any]] = {}
+    startposition = 1
+    page_size = 1000
+    base_select = (
+        "select Id, Name, Type, Active, ParentRef, FullyQualifiedName, UnitPrice, PurchaseCost, TrackQtyOnHand from Item"
+    )
+    while True:
+        query = f"{base_select} maxresults {page_size} startposition {startposition}"
+        url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
+        resp = _make_qbo_request("GET", url, token_mgr)
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        items = data.get("QueryResponse", {}).get("Item", [])
+        if not isinstance(items, list):
+            items = [items] if items else []
+        for item in items:
+            name = item.get("Name")
+            if name is not None:
+                existing[name] = item
+        if len(items) < page_size:
+            break
+        startposition += page_size
+    return existing
+
+
 def get_or_create_item_category_id(
     token_mgr: TokenManager,
     realm_id: str,
@@ -887,10 +964,14 @@ def create_inventory_item(
         payload["SalesTaxCodeRef"] = {"value": tax_code_id}
         payload["PurchaseTaxCodeRef"] = {"value": tax_code_id}
 
-    if category_item_id:
+    use_hierarchy = getattr(config, "use_item_hierarchy", False)
+    if category_item_id and use_hierarchy:
         payload["SubItem"] = True
         payload["ParentRef"] = {"value": category_item_id}
         print(f"[INFO] Attached ParentRef/SubItem to Inventory item '{name}' (category item Id: {category_item_id})")
+    elif category_item_id and not use_hierarchy:
+        # Hierarchy off: do not set SubItem/ParentRef so receipt shows product name only
+        pass
     else:
         print(f"[WARN] No category item id; creating Inventory item '{name}' without ParentRef/SubItem")
     
@@ -1110,14 +1191,16 @@ def get_or_create_item_id(
                                 "sparse": True,
                                 "Type": "Inventory",
                             }
-                            # Category: add ParentRef/SubItem if missing
-                            parent_ref = current.get("ParentRef")
-                            if (category or "").strip() and category_item_cache is not None and (not parent_ref or not parent_ref.get("value")):
-                                cat_id = get_or_create_item_category_id(
-                                    token_mgr, realm_id, category, cache=category_item_cache
-                                )
-                                patch_payload["SubItem"] = True
-                                patch_payload["ParentRef"] = {"value": cat_id}
+                            # Category: add ParentRef/SubItem only when use_item_hierarchy is True
+                            use_hierarchy = getattr(config, "use_item_hierarchy", False)
+                            if use_hierarchy and (category or "").strip() and category_item_cache is not None:
+                                parent_ref = current.get("ParentRef")
+                                if not parent_ref or not parent_ref.get("value"):
+                                    cat_id = get_or_create_item_category_id(
+                                        token_mgr, realm_id, category, cache=category_item_cache
+                                    )
+                                    patch_payload["SubItem"] = True
+                                    patch_payload["ParentRef"] = {"value": cat_id}
                             # Pricing/tax: only set if current is 0/missing/false; do NOT overwrite non-zero prices
                             tax_code_id = config.tax_code_id or "2"
                             cur_unit_price = current.get("UnitPrice")
@@ -1128,12 +1211,14 @@ def get_or_create_item_id(
                             cur_sales_tax_ref = (current.get("SalesTaxCodeRef") or {}).get("value") if isinstance(current.get("SalesTaxCodeRef"), dict) else None
                             cur_purchase_tax_ref = (current.get("PurchaseTaxCodeRef") or {}).get("value") if isinstance(current.get("PurchaseTaxCodeRef"), dict) else None
                             pricing_tax_changes = []
-                            if (cur_unit_price is None or float(cur_unit_price or 0) == 0) and unit_sales_price is not None and unit_sales_price > 0:
+                            # Patch UnitPrice when missing, zero, or differs from desired (sync from source)
+                            cur_up = None if cur_unit_price is None else float(cur_unit_price or 0)
+                            if unit_sales_price is not None and unit_sales_price > 0 and (cur_up is None or cur_up == 0 or abs(cur_up - unit_sales_price) > 0.01):
                                 patch_payload["UnitPrice"] = unit_sales_price
-                                pricing_tax_changes.append(f"UnitPrice:0->{unit_sales_price}")
+                                pricing_tax_changes.append(f"UnitPrice:{cur_unit_price}->{unit_sales_price}")
                             if (cur_purchase_cost is None or float(cur_purchase_cost or 0) == 0) and unit_purchase_cost is not None and unit_purchase_cost > 0:
                                 patch_payload["PurchaseCost"] = unit_purchase_cost
-                                pricing_tax_changes.append(f"PurchaseCost:0->{unit_purchase_cost}")
+                                pricing_tax_changes.append(f"PurchaseCost:{cur_purchase_cost}->{unit_purchase_cost}")
                             if not cur_sales_tax_inc:
                                 patch_payload["SalesTaxIncluded"] = True
                                 pricing_tax_changes.append("SalesTaxIncluded:False->True")
@@ -1243,64 +1328,43 @@ def get_or_create_item_id(
                 )
 
             category_item_id_val: Optional[str] = None
-            if (category or "").strip():
+            if getattr(config, "use_item_hierarchy", False) and (category or "").strip():
                 try:
                     category_item_id_val = get_or_create_item_category_id(
                         token_mgr, realm_id, category, cache=category_item_cache
                     )
                 except Exception as e:
                     print(f"[WARN] Failed to resolve Category item for {category!r}: {e}. Creating Inventory item without ParentRef/SubItem.")
+            elif (category or "").strip() and not getattr(config, "use_item_hierarchy", False):
+                pass  # Hierarchy off: category still used for accounts; no ParentRef/SubItem
             else:
                 print(f"[WARN] Category missing/empty; creating Inventory item '{name}' without ParentRef/SubItem")
 
-            try:
-                item_id = create_inventory_item(
-                    name, category, unit_sales_price, unit_purchase_cost,
-                    config, token_mgr, realm_id, mapping_cache, account_cache,
-                    target_date=target_date,
-                    category_item_id=category_item_id_val,
-                )
-                was_created = True
-                # Check if this was created after auto-fix
-                if autofixed_old_item_id:
-                    created_type = "created_inventory_after_fix"
-                    # Append to autofix report (DocNumber/TxnDate will be filled by caller)
-                    if items_autofixed is not None:
-                        items_autofixed.append({
-                            "OriginalName": name,
-                            "OldItemId": str(autofixed_old_item_id),
-                            "OldType": autofixed_old_type or "",
-                            "OldActive": "True",
-                            "NewName": autofixed_effective_new_name or f"{name} (LEGACY {autofixed_old_type} {autofixed_old_item_id})",
-                            "NewInventoryItemId": str(item_id),
-                            "TxnDate": target_date or "",
-                            "DocNumber": "",  # Will be filled by caller
-                        })
-                else:
-                    created_type = "Inventory"
-            except Exception as e:
-                # Do NOT fall back to default "Services". Create Service item with product name.
-                print(f"[WARN] Failed to create Inventory item '{name}' (category={category!r}): {e}. "
-                      f"Falling back to Service item with product name (NOT default Services)")
-                create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
-                payload = {
-                    "Name": name,
-                    "Type": "Service",
-                    "IncomeAccountRef": {"value": default_income_account_id},
-                }
-                create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
-                if create_resp.status_code in (200, 201):
-                    created = create_resp.json().get("Item")
-                    if created:
-                        item_id = created.get("Id")
-                        was_created = True
-                        created_type = "Service"
-                        fallback_reason = "inventory_failed"
-                if not item_id:
-                    raise RuntimeError(
-                        f"Could not create Inventory item and Service item fallback also failed for '{name}'. "
-                        f"Inventory error: {e}. Do not use default Services for non-blank product names."
-                    )
+            # Attempt Inventory creation; do not fall back to Service (fail loudly when inventory_enabled)
+            item_id = create_inventory_item(
+                name, category, unit_sales_price, unit_purchase_cost,
+                config, token_mgr, realm_id, mapping_cache, account_cache,
+                target_date=target_date,
+                category_item_id=category_item_id_val,
+            )
+            was_created = True
+            # Check if this was created after auto-fix
+            if autofixed_old_item_id:
+                created_type = "created_inventory_after_fix"
+                # Append to autofix report (DocNumber/TxnDate will be filled by caller)
+                if items_autofixed is not None:
+                    items_autofixed.append({
+                        "OriginalName": name,
+                        "OldItemId": str(autofixed_old_item_id),
+                        "OldType": autofixed_old_type or "",
+                        "OldActive": "True",
+                        "NewName": autofixed_effective_new_name or f"{name} (LEGACY {autofixed_old_type} {autofixed_old_item_id})",
+                        "NewInventoryItemId": str(item_id),
+                        "TxnDate": target_date or "",
+                        "DocNumber": "",  # Will be filled by caller
+                    })
+            else:
+                created_type = "Inventory"
         else:
             # Inventory disabled: Create Service item (existing behavior)
             create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
@@ -1336,6 +1400,259 @@ def get_or_create_item_id(
     return (item_id, was_created, created_type, fallback_reason)
 
 
+def resolve_all_unique_items(
+    unique_names: List[str],
+    desired_item_state: Dict[str, Dict[str, Any]],
+    existing_items_by_name: Dict[str, Dict[str, Any]],
+    config,
+    token_mgr: TokenManager,
+    realm_id: str,
+    mapping_cache: Optional[Dict[str, Dict[str, str]]],
+    account_cache: Dict[str, Optional[str]],
+    category_item_cache: Dict[str, str],
+    target_date: Optional[str],
+    item_result_by_name: Dict[str, Dict[str, Any]],
+    patched_items: Set[str],
+    items_wrong_type: Optional[List[Dict[str, Any]]],
+    items_autofixed: Optional[List[Dict[str, Any]]],
+    items_patched_pricing_tax: Optional[List[Dict[str, Any]]],
+) -> Dict[str, int]:
+    """
+    Resolve each unique item name once: use prefetch, patch if needed, or create.
+    Fills item_result_by_name and patched_items. Returns counts for logging.
+    """
+    default_item_id = config.get_qbo_config().get("default_item_id", "1")
+    default_income_account_id = config.get_qbo_config().get("default_income_account_id", "1")
+    inventory_enabled = getattr(config, "inventory_enabled", False)
+    auto_fix = getattr(config, "auto_fix_wrong_type_items", False)
+    use_item_hierarchy = getattr(config, "use_item_hierarchy", False)
+    stats = {"items_created": 0, "items_patched": 0, "lookups_from_prefetch": 0}
+
+    for name in unique_names:
+        name = (name or "").strip()
+        name = re.sub(r"\s+", " ", name) if name else ""
+        state = desired_item_state.get(name, {})
+        category = state.get("category_name")
+        unit_sales_price = state.get("unit_sales_price_gross")
+        unit_purchase_cost = state.get("unit_purchase_cost_gross")
+
+        if not name:
+            continue
+
+        existing = existing_items_by_name.get(name)
+        if existing:
+            stats["lookups_from_prefetch"] += 1
+            item_id = existing.get("Id")
+            item_type = (existing.get("Type") or "").strip()
+            if item_type == "Inventory":
+                if item_id and item_id not in patched_items:
+                    try:
+                        get_url = f"{BASE_URL}/v3/company/{realm_id}/item/{item_id}?minorversion=70"
+                        get_resp = _make_qbo_request("GET", get_url, token_mgr)
+                        if get_resp.status_code == 200:
+                            current = get_resp.json().get("Item")
+                            if current and current.get("SyncToken") is not None:
+                                patch_payload = {
+                                    "Id": item_id,
+                                    "SyncToken": current["SyncToken"],
+                                    "sparse": True,
+                                    "Type": "Inventory",
+                                }
+                                if use_item_hierarchy and (category or "").strip():
+                                    parent_ref = current.get("ParentRef")
+                                    if not parent_ref or not parent_ref.get("value"):
+                                        cat_id = get_or_create_item_category_id(
+                                            token_mgr, realm_id, category, cache=category_item_cache
+                                        )
+                                        patch_payload["SubItem"] = True
+                                        patch_payload["ParentRef"] = {"value": cat_id}
+                                tax_code_id = config.tax_code_id or "2"
+                                cur_unit_price = current.get("UnitPrice")
+                                cur_purchase_cost = current.get("PurchaseCost")
+                                cur_sales_tax_inc = current.get("SalesTaxIncluded", True)
+                                cur_purchase_tax_inc = current.get("PurchaseTaxIncluded", True)
+                                cur_taxable = current.get("Taxable", True)
+                                cur_sales_tax_ref = (current.get("SalesTaxCodeRef") or {}).get("value") if isinstance(current.get("SalesTaxCodeRef"), dict) else None
+                                cur_purchase_tax_ref = (current.get("PurchaseTaxCodeRef") or {}).get("value") if isinstance(current.get("PurchaseTaxCodeRef"), dict) else None
+                                pricing_tax_changes = []
+                                # Patch UnitPrice when missing, zero, or differs from desired (sync from source)
+                                cur_up = None if cur_unit_price is None else float(cur_unit_price or 0)
+                                if unit_sales_price is not None and unit_sales_price > 0 and (cur_up is None or cur_up == 0 or abs(cur_up - unit_sales_price) > 0.01):
+                                    patch_payload["UnitPrice"] = unit_sales_price
+                                    pricing_tax_changes.append(f"UnitPrice:{cur_unit_price}->{unit_sales_price}")
+                                if (cur_purchase_cost is None or float(cur_purchase_cost or 0) == 0) and unit_purchase_cost is not None and unit_purchase_cost > 0:
+                                    patch_payload["PurchaseCost"] = unit_purchase_cost
+                                    pricing_tax_changes.append(f"PurchaseCost:{cur_purchase_cost}->{unit_purchase_cost}")
+                                if not cur_sales_tax_inc:
+                                    patch_payload["SalesTaxIncluded"] = True
+                                    pricing_tax_changes.append("SalesTaxIncluded:False->True")
+                                if not cur_purchase_tax_inc:
+                                    patch_payload["PurchaseTaxIncluded"] = True
+                                    pricing_tax_changes.append("PurchaseTaxIncluded:False->True")
+                                if not cur_taxable:
+                                    patch_payload["Taxable"] = True
+                                    pricing_tax_changes.append("Taxable:False->True")
+                                if tax_code_id and not cur_sales_tax_ref:
+                                    patch_payload["SalesTaxCodeRef"] = {"value": tax_code_id}
+                                    pricing_tax_changes.append("SalesTaxCodeRef:->" + tax_code_id)
+                                if tax_code_id and not cur_purchase_tax_ref:
+                                    patch_payload["PurchaseTaxCodeRef"] = {"value": tax_code_id}
+                                    pricing_tax_changes.append("PurchaseTaxCodeRef:->" + tax_code_id)
+                                if len(patch_payload) > 4:
+                                    patch_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
+                                    patch_resp = _make_qbo_request("POST", patch_url, token_mgr, json=patch_payload)
+                                    if patch_resp.status_code in (200, 201):
+                                        patched_items.add(item_id)
+                                        stats["items_patched"] += 1
+                                        if "ParentRef" in patch_payload:
+                                            print(f"[INFO] Categorized existing Inventory item: Id={item_id} ParentRef={patch_payload['ParentRef']['value']} category={category!r}")
+                                        if pricing_tax_changes:
+                                            print(f"[INFO] Patched Inventory item fields: Id={item_id} " + " ".join(pricing_tax_changes))
+                                            if items_patched_pricing_tax is not None:
+                                                items_patched_pricing_tax.append({
+                                                    "ItemId": item_id,
+                                                    "Name": name,
+                                                    "Category": category or "",
+                                                    "UnitPrice_old": cur_unit_price,
+                                                    "UnitPrice_new": patch_payload.get("UnitPrice", cur_unit_price),
+                                                    "PurchaseCost_old": cur_purchase_cost,
+                                                    "PurchaseCost_new": patch_payload.get("PurchaseCost", cur_purchase_cost),
+                                                    "SalesTaxIncluded_old/new": f"{cur_sales_tax_inc}->{patch_payload.get('SalesTaxIncluded', cur_sales_tax_inc)}",
+                                                    "PurchaseTaxIncluded_old/new": f"{cur_purchase_tax_inc}->{patch_payload.get('PurchaseTaxIncluded', cur_purchase_tax_inc)}",
+                                                    "Taxable_old/new": f"{cur_taxable}->{patch_payload.get('Taxable', cur_taxable)}",
+                                                    "TxnDate": target_date or "",
+                                                    "DocNumber": "",
+                                                })
+                                    else:
+                                        if "SalesTaxCodeRef" in patch_payload or "PurchaseTaxCodeRef" in patch_payload:
+                                            try:
+                                                err_body = patch_resp.json()
+                                                err_msg = str(err_body.get("fault", {}).get("error", [{}])[0].get("message", patch_resp.text[:200]))
+                                                if "400" in str(patch_resp.status_code):
+                                                    print(f"[WARN] QBO rejected tax refs on item {item_id}: {err_msg}. Taxable/included flags and pricing still applied if sent.")
+                                            except Exception:
+                                                pass
+                                        print(f"[WARN] Failed to PATCH item {item_id}: HTTP {patch_resp.status_code}")
+                    except Exception as e:
+                        print(f"[WARN] Failed to patch existing Inventory item {item_id}: {e}")
+                item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_inventory", "fallback_reason": None}
+                continue
+            if inventory_enabled and auto_fix and item_type:
+                old_item_id = item_id
+                try:
+                    new_name = f"{name} (LEGACY {item_type} {old_item_id})"
+                    updated_item = rename_and_inactivate_item(token_mgr, realm_id, old_item_id, new_name, make_inactive=True)
+                    autofixed_effective_new_name = (updated_item.get("Name") or "").strip() or new_name
+                except Exception as e:
+                    print(f"[WARN] Failed to auto-fix wrong-type item '{name}' (Id={old_item_id}): {e}. Will use existing item.")
+                    if items_wrong_type is not None:
+                        items_wrong_type.append({"Name": name, "Id": str(old_item_id), "Type": item_type, "ExpectedType": "Inventory"})
+                    item_result_by_name[name] = {"item_id": old_item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
+                    continue
+                if not category or unit_sales_price is None or unit_purchase_cost is None or mapping_cache is None or account_cache is None:
+                    print(f"[WARN] Missing category/price/mapping for '{name}' after auto-fix; cannot create Inventory.")
+                    item_result_by_name[name] = {"item_id": old_item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
+                    continue
+                category_item_id_val = None
+                if use_item_hierarchy and (category or "").strip():
+                    try:
+                        category_item_id_val = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_item_cache)
+                    except Exception:
+                        pass
+                try:
+                    new_id = create_inventory_item(
+                        name, category, unit_sales_price, unit_purchase_cost,
+                        config, token_mgr, realm_id, mapping_cache, account_cache,
+                        target_date=target_date,
+                        category_item_id=category_item_id_val,
+                    )
+                    stats["items_created"] += 1
+                    if items_autofixed is not None:
+                        items_autofixed.append({
+                            "OriginalName": name,
+                            "OldItemId": str(old_item_id),
+                            "OldType": item_type,
+                            "OldActive": "True",
+                            "NewName": autofixed_effective_new_name,
+                            "NewInventoryItemId": str(new_id),
+                            "TxnDate": target_date or "",
+                            "DocNumber": "",
+                        })
+                    item_result_by_name[name] = {"item_id": new_id, "created": True, "type_label": "created_inventory_after_fix", "fallback_reason": None}
+                except Exception as e:
+                    print(f"[WARN] Failed to create Inventory after auto-fix for '{name}': {e}. Using existing item.")
+                    item_result_by_name[name] = {"item_id": old_item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
+                continue
+            if inventory_enabled:
+                if items_wrong_type is not None:
+                    items_wrong_type.append({"Name": name, "Id": str(item_id), "Type": item_type, "ExpectedType": "Inventory"})
+                item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
+            else:
+                item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing", "fallback_reason": None}
+            continue
+
+        # Not in prefetch: create item
+        # Contract: when inventory_enabled, create Inventory only; never fall back to Service.
+        # If prerequisites missing or create_inventory_item fails, fail loudly (no silent Service).
+        if inventory_enabled:
+            # Require all prerequisites; fail loudly if any missing (do not create Service)
+            missing = []
+            if category is None or (isinstance(category, str) and not category.strip()):
+                missing.append("category")
+            if unit_sales_price is None:
+                missing.append("unit_sales_price")
+            if unit_purchase_cost is None:
+                missing.append("unit_purchase_cost")
+            if not mapping_cache:
+                missing.append("mapping_cache")
+            if account_cache is None:
+                missing.append("account_cache")
+            if category and mapping_cache:
+                cat_norm = (category or "").strip()
+                cat_norm = re.sub(r"\s+", " ", cat_norm)
+                if cat_norm and cat_norm not in mapping_cache:
+                    raise ValueError(
+                        f"Inventory enabled but category {category!r} (normalized: {cat_norm!r}) "
+                        f"is not in Product.Mapping.csv for item {name!r}. "
+                        "Add this category to mappings/Product.Mapping.csv or disable inventory for Service items."
+                    )
+            if missing:
+                raise ValueError(
+                    f"Inventory enabled but cannot create Inventory item for {name!r}: missing {', '.join(missing)}. "
+                    "Add category to CSV, ensure Product.Mapping.csv has this category, or disable inventory for Service items."
+                )
+            category_item_id_val = None
+            if use_item_hierarchy and (category or "").strip():
+                try:
+                    category_item_id_val = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_item_cache)
+                except Exception:
+                    pass
+            # Attempt Inventory creation; do not fall back to Service on failure
+            new_id = create_inventory_item(
+                name, category, unit_sales_price, unit_purchase_cost,
+                config, token_mgr, realm_id, mapping_cache, account_cache,
+                target_date=target_date,
+                category_item_id=category_item_id_val,
+            )
+            stats["items_created"] += 1
+            item_result_by_name[name] = {"item_id": new_id, "created": True, "type_label": "Inventory", "fallback_reason": None}
+        else:
+            # inventory_enabled is False: create Service (only path that creates Service for new items)
+            create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
+            payload = {"Name": name, "Type": "Service", "IncomeAccountRef": {"value": default_income_account_id}}
+            create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
+            if create_resp.status_code in (200, 201):
+                created = create_resp.json().get("Item")
+                if created and created.get("Id"):
+                    stats["items_created"] += 1
+                    item_result_by_name[name] = {"item_id": created.get("Id"), "created": True, "type_label": "Service", "fallback_reason": None}
+                else:
+                    item_result_by_name[name] = {"item_id": default_item_id, "created": False, "type_label": "Default", "fallback_reason": "service_creation_failed"}
+            else:
+                item_result_by_name[name] = {"item_id": default_item_id, "created": False, "type_label": "Default", "fallback_reason": "service_creation_failed"}
+    return stats
+
+
 def build_sales_receipt_payload(
     group: pd.DataFrame,
     token_mgr: TokenManager,
@@ -1351,6 +1668,7 @@ def build_sales_receipt_payload(
     items_autofixed: Optional[List[Dict[str, Any]]] = None,
     category_item_cache: Optional[Dict[str, str]] = None,
     items_patched_pricing_tax: Optional[List[Dict[str, Any]]] = None,
+    item_result_by_name: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> dict:
     """
     Build a SalesReceipt payload from a group of CSV rows (one SalesReceiptNo).
@@ -1424,8 +1742,9 @@ def build_sales_receipt_payload(
             except (TypeError, ValueError):
                 return default
         
-        net_sales_total = safe_numeric(row.get("NET Sales", 0))
-        cost_price_total = safe_numeric(row.get("Cost Price", 0))
+        total_sales = safe_numeric(row.get("TOTAL Sales", 0))
+        net_sales = safe_numeric(row.get("NET Sales", 0))
+        cost_total = safe_numeric(row.get("Cost Price", 0))
         amount_gross = safe_numeric(row.get(AMOUNT_COL, 0))
         
         # Quantity (default to 1 if missing/NaN or <=0)
@@ -1436,26 +1755,44 @@ def build_sales_receipt_payload(
         except (TypeError, ValueError):
             qty_val = 1.0
         
-        # Per-unit prices for item create/patch and receipt line
-        unit_sales_price = (net_sales_total / qty_val) if qty_val else 0.0
-        unit_purchase_cost = (cost_price_total / qty_val) if qty_val else 0.0
-        if unit_sales_price == 0 and qty_val and amount_gross > 0:
-            unit_sales_price = amount_gross / qty_val
-        
-        # Get or create item ID (with inventory support if enabled)
-        item_ref_id, item_was_created, created_type, fallback_reason = get_or_create_item_id(
-            item_name, token_mgr, realm_id, config, item_cache,
-            category=category if config.inventory_enabled else None,
-            unit_sales_price=unit_sales_price if config.inventory_enabled else None,
-            unit_purchase_cost=unit_purchase_cost if config.inventory_enabled else None,
-            mapping_cache=mapping_cache if config.inventory_enabled else None,
-            account_cache=account_cache if config.inventory_enabled else None,
-            target_date=target_date,
-            items_wrong_type=items_wrong_type,
-            items_autofixed=items_autofixed,
-            category_item_cache=category_item_cache if config.inventory_enabled else None,
-            items_patched_pricing_tax=items_patched_pricing_tax if config.inventory_enabled else None,
-        )
+        # Per-unit gross prices (for logging and receipt line logic)
+        unit_sales_price_gross = (total_sales / qty_val) if qty_val else 0.0
+        unit_purchase_cost_gross = (cost_total / qty_val) if qty_val else 0.0
+
+        # Lookup resolved item (O(1) per line; no network calls)
+        default_item_id = config.get_qbo_config().get("default_item_id", "1")
+        if not item_name:
+            item_ref_id = default_item_id
+            item_was_created = False
+            created_type = "Default"
+            fallback_reason = "blank_name"
+        elif item_result_by_name is not None:
+            r = item_result_by_name.get(item_name)
+            if r is None:
+                print(f"[WARN] Item name {item_name!r} not in item_result_by_name; using default item")
+                item_ref_id = default_item_id
+                item_was_created = False
+                created_type = "Default"
+                fallback_reason = None
+            else:
+                item_ref_id = r.get("item_id", default_item_id)
+                item_was_created = r.get("created", False)
+                created_type = r.get("type_label", "existing")
+                fallback_reason = r.get("fallback_reason")
+        else:
+            item_ref_id, item_was_created, created_type, fallback_reason = get_or_create_item_id(
+                item_name, token_mgr, realm_id, config, item_cache,
+                category=category if config.inventory_enabled else None,
+                unit_sales_price=unit_sales_price_gross if config.inventory_enabled else None,
+                unit_purchase_cost=unit_purchase_cost_gross if config.inventory_enabled else None,
+                mapping_cache=mapping_cache if config.inventory_enabled else None,
+                account_cache=account_cache if config.inventory_enabled else None,
+                target_date=target_date,
+                items_wrong_type=items_wrong_type,
+                items_autofixed=items_autofixed,
+                category_item_cache=category_item_cache if config.inventory_enabled else None,
+                items_patched_pricing_tax=items_patched_pricing_tax if config.inventory_enabled else None,
+            )
 
         # Fill in DocNumber and TxnDate for autofixed items
         if created_type == "created_inventory_after_fix" and items_autofixed:
@@ -1481,7 +1818,9 @@ def build_sales_receipt_payload(
             default_fallback_count += 1
 
         log_line = (f"[INFO] Line item: DocNumber={doc_number} TxnDate={txn_date} item_name={item_name!r} category={category!r} "
-                    f"qty={qty_val} unit_sales_price={unit_sales_price} unit_purchase_cost={unit_purchase_cost} item_id={item_ref_id} created={item_was_created} type={created_type}")
+                    f"qty={qty_val} TOTAL_Sales={total_sales} NET_Sales={net_sales} Cost_Price={cost_total} "
+                    f"unit_sales_price_gross={unit_sales_price_gross} unit_purchase_cost_gross={unit_purchase_cost_gross} "
+                    f"item_id={item_ref_id} created={item_was_created} type={created_type}")
         if fallback_reason:
             log_line += f" fallback_reason={fallback_reason}"
         print(log_line)
@@ -2169,6 +2508,7 @@ def main():
     inventory_start_date_report_path: Optional[str] = None
     if config.inventory_enabled:
         print(f"\n[INFO] Inventory mode ENABLED. QtyOnHand starts at {config.default_qty_on_hand}. QBO must allow negative inventory.")
+        print(f"[INFO] Item hierarchy enabled: {getattr(config, 'use_item_hierarchy', False)}")
         try:
             mapping_cache = load_category_account_mapping(config)
             print(f"[INFO] Loaded {len(mapping_cache)} category mappings from {config.product_mapping_file}")
@@ -2231,11 +2571,44 @@ def main():
         "inventory_rejections_count": 0,
         "inventory_start_date_issues_count": inventory_start_date_issues_count,
         "inventory_start_date_report_path": inventory_start_date_report_path,
+        "items_patched_count": 0,
     }
 
     items_wrong_type: List[Dict[str, Any]] = []
     items_autofixed: List[Dict[str, Any]] = []
     items_patched_pricing_tax: List[Dict[str, Any]] = []
+
+    # Phase 1: O(U) item resolution (desired_item_state + prefetch + resolve once per unique name)
+    desired_item_state = build_desired_item_state(df)
+    unique_names = list(desired_item_state.keys())
+    print(f"[INFO] Item resolution: {len(unique_names)} unique item names from {len(df)} rows")
+    existing_items_by_name = prefetch_all_items(token_mgr, config.realm_id)
+    print(f"[INFO] Prefetch: {len(existing_items_by_name)} existing Items loaded from QBO")
+    item_result_by_name: Dict[str, Dict[str, Any]] = {}
+    patched_items: Set[str] = set()
+    resolve_stats = resolve_all_unique_items(
+        unique_names,
+        desired_item_state,
+        existing_items_by_name,
+        config,
+        token_mgr,
+        config.realm_id,
+        mapping_cache,
+        account_cache,
+        category_item_cache,
+        args.target_date,
+        item_result_by_name,
+        patched_items,
+        items_wrong_type,
+        items_autofixed,
+        items_patched_pricing_tax,
+    )
+    print(
+        f"[INFO] Item resolution summary: total_lines={len(df)} unique_items={len(item_result_by_name)} "
+        f"items_created={resolve_stats['items_created']} items_patched={resolve_stats['items_patched']} "
+        f"item_lookups_from_prefetch={resolve_stats['lookups_from_prefetch']}"
+    )
+    stats["items_patched_count"] = resolve_stats["items_patched"]
 
     for group_key, group_df in grouped:
         stats["attempted"] += 1
@@ -2267,6 +2640,7 @@ def main():
                 items_autofixed=items_autofixed,
                 category_item_cache=category_item_cache,
                 items_patched_pricing_tax=items_patched_pricing_tax,
+                item_result_by_name=item_result_by_name,
             )
             stats["items_created_count"] += inv_created + svc_created
             stats["inventory_items_created_count"] += inv_created

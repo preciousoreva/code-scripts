@@ -230,12 +230,15 @@ def format_run_summary(
         
         # Inventory statistics
         items_created = upload_stats.get("items_created_count", 0)
+        items_patched = upload_stats.get("items_patched_count", 0)
         inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
         inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
         inventory_start_date_issues = upload_stats.get("inventory_start_date_issues_count", 0)
         target_date = summary.get("target_date", "")
-        if items_created > 0 or inventory_warnings > 0 or inventory_rejections > 0:
+        if items_created > 0 or items_patched > 0 or inventory_warnings > 0 or inventory_rejections > 0:
             message += f"• Inventory: {items_created} items created"
+            if items_patched > 0:
+                message += f", {items_patched} patched"
             if inventory_warnings > 0:
                 message += f", {inventory_warnings} warnings"
             if inventory_rejections > 0:

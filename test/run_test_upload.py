@@ -11,10 +11,10 @@ Use this to test inventory item creation, 6270/blockers logic, and reconciliatio
 without running Playwright/EPOS download. Product names from the CSV are used
 as QBO line items (or new inventory items are created when inventory mode is enabled).
 
-Usage:
-    python run_test_upload.py
-    python run_test_upload.py --csv BookKeeping_2026_01_29_1911.csv --company company_a --target-date 2026-01-28
-    python run_test_upload.py --archive   # move raw/processed/metadata to Uploaded/<date>/
+Usage (run from repo root):
+    python test/run_test_upload.py
+    python test/run_test_upload.py --csv BookKeeping_2026_01_29_1911.csv --company company_a --target-date 2026-01-28
+    python test/run_test_upload.py --archive   # move raw/processed/metadata to Uploaded/<date>/
 """
 
 import argparse
@@ -23,6 +23,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+# Ensure repo root is on path when run as test/run_test_upload.py
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from load_env import load_env_file
 from company_config import load_company_config, get_available_companies
@@ -100,7 +105,7 @@ def main():
                     break
     except Exception:
         pass  # Leave default; NGN instead of Naira symbol avoids main crash
-    repo_root = Path(__file__).resolve().parent
+    repo_root = _REPO_ROOT
 
     # Resolve CSV path
     csv_path = Path(args.csv)

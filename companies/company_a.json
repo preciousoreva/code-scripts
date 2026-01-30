@@ -40,6 +40,7 @@
     "allow_negative_inventory": true,
     "inventory_start_date": "today",
     "default_qty_on_hand": 0,
-    "auto_fix_wrong_type_items": true
+    "auto_fix_wrong_type_items": true,
+    "use_item_hierarchy": true
   }
 }

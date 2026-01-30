@@ -361,6 +361,7 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
             return 0.0
     
     out["*ItemAmount"] = df.get("TOTAL Sales").apply(to_number)
+    out["TOTAL Sales"] = df.get("TOTAL Sales").apply(to_number)
 
     # Carry through EPOS totals needed for per-unit calculations downstream (uploader needs NET Sales, Cost Price)
     if "NET Sales" in df.columns:
@@ -443,7 +444,7 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
     # Drop temporary columns
     out = out.drop(columns=["_parsed_date", "_date_str"])
     
-    # Column order as required
+    # Column order as required (include TOTAL Sales, NET Sales, Cost Price for upload item create/patch)
     columns = [
         "*SalesReceiptNo",
         "Customer",
@@ -456,6 +457,9 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
         "ItemQuantity",
         "ItemRate",
         "*ItemAmount",
+        "TOTAL Sales",
+        "NET Sales",
+        "Cost Price",
         "*ItemTaxCode",
         "ItemTaxAmount",
         "Service Date",

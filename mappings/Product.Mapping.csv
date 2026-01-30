@@ -1,0 +1,10 @@
+,Categories,Inventory Account,Revenue Account,Cost of Sale Account
+,DRINKS & BEVERAGES,120000 - Inventory:120200 - Drinks:120202 - Non-Alcoholic Drinks,400000 - Revenue:400200 - Revenue - Drinks:400202 - Non-Alcoholic Drinks,200000 - Cost of sales:200200 - Purchases - Drinks:200202 - Non-Alcoholic Drinks
+,PROVISIONS AND CEREALS,120000 - Inventory:120100 - Grocery,400000 - Revenue:400100 - Revenue - Grocery,200000 - Cost of sales:200100 - Purchases - Groceries
+,COSMETICS AND TOILETRIES,120000 - Inventory:120300 - Non - Food Items,400000 - Revenue:400300 - Revenue - Non Food items,200000 - Cost of sales:200300 - Purchases - Non - food items
+,HOUSEHOLD GOODS & PACKAGING MATERIALS,120000 - Inventory:120300 - Non - Food Items,400000 - Revenue:400300 - Revenue - Non Food items,200000 - Cost of sales:200300 - Purchases - Non - food items
+,STATIONARY AND BOOKSHOP SUPPLIES,120000 - Inventory:120300 - Non - Food Items,400000 - Revenue:400300 - Revenue - Non Food items,200000 - Cost of sales:200300 - Purchases - Non - food items
+,ALCOHOLS & SPIRITS,120000 - Inventory:120200 - Drinks:120201 - Alcoholic Drinks,400000 - Revenue:400200 - Revenue - Drinks:400201 - Alcoholic Drinks,200000 - Cost of sales:200200 - Purchases - Drinks:200201 - Alcoholic Drinks
+,"CANNED GOOD, COOK OIL, SWALLOW & BAKING",120000 - Inventory:120100 - Grocery,400000 - Revenue:400100 - Revenue - Grocery,200000 - Cost of sales:200100 - Purchases - Groceries
+,FROZEN FOODS,120000 - Inventory:120100 - Grocery,400000 - Revenue:400100 - Revenue - Grocery,200000 - Cost of sales:200100 - Purchases - Groceries
+,COOKING SPICES & SEASONINGS,120000 - Inventory:120100 - Grocery,400000 - Revenue:400100 - Revenue - Grocery,200000 - Cost of sales:200100 - Purchases - Groceries
