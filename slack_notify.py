@@ -1,5 +1,7 @@
 import os
+import re
 import json
+import csv
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -105,6 +107,49 @@ def notify_pipeline_success(
     send_slack_success(message, webhook_url)
 
 
+def _summarize_blockers_csv(repo_root: Path, company_key: str, target_date: str) -> Optional[str]:
+    """
+    If the inventory_start_date_blockers CSV exists for this run, read it and return
+    a short summary (row count + sample items). Used for Slack when 6270 rejections occurred.
+    """
+    if not company_key or not target_date:
+        return None
+    safe_key = re.sub(r"[^\w-]", "_", company_key)
+    filename = f"inventory_start_date_blockers_{safe_key}_{target_date}.csv"
+    filepath = repo_root / "reports" / filename
+    if not filepath.exists():
+        return None
+    try:
+        with open(filepath, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        if not rows:
+            return None
+        # Unique (DocNumber, ItemName, InvStartDate) for a concise summary
+        seen = set()
+        sample_items: List[str] = []
+        for r in rows:
+            name = (r.get("ItemName") or "").strip()
+            inv_date = (r.get("InvStartDate") or "").strip()
+            key = (name, inv_date)
+            if key not in seen and inv_date and inv_date != "(missing)":
+                seen.add(key)
+                sample_items.append(f"{name} ({inv_date})")
+                if len(sample_items) >= 5:
+                    break
+        count = len(rows)
+        if count == 0:
+            return None
+        summary = f"{count} blocker row(s)"
+        if sample_items:
+            summary += f" — e.g. {', '.join(sample_items)}"
+        summary += f"\n  Report: `reports/{filename}`"
+        return summary
+    except Exception as e:
+        logging.warning(f"Could not read blockers CSV for summary: {e}")
+        return None
+
+
 def format_run_summary(
     pipeline_name: str,
     log_file: Path,
@@ -182,6 +227,29 @@ def format_run_summary(
         message += f"• Upload: {uploaded} uploaded, {skipped} skipped, {failed} failed (attempted: {attempted})\n"
         if stale_ledger > 0:
             message += f"• Stale ledger entries detected: {stale_ledger} (healed by uploading)\n"
+        
+        # Inventory statistics
+        items_created = upload_stats.get("items_created_count", 0)
+        inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
+        inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
+        inventory_start_date_issues = upload_stats.get("inventory_start_date_issues_count", 0)
+        target_date = summary.get("target_date", "")
+        if items_created > 0 or inventory_warnings > 0 or inventory_rejections > 0:
+            message += f"• Inventory: {items_created} items created"
+            if inventory_warnings > 0:
+                message += f", {inventory_warnings} warnings"
+            if inventory_rejections > 0:
+                message += f", {inventory_rejections} rejections"
+            message += "\n"
+        if inventory_start_date_issues > 0 and target_date:
+            message += f"• Inventory StartDate: {inventory_start_date_issues} items have InvStartDate after {target_date}\n"
+        # If we had rejections or failures (e.g. 6270 InvStartDate), include blockers CSV summary when present
+        if (inventory_rejections > 0 or failed > 0) and target_date:
+            repo_root = Path(__file__).resolve().parent
+            company_key = summary.get("company_key", "")
+            blockers_summary = _summarize_blockers_csv(repo_root, company_key, target_date)
+            if blockers_summary:
+                message += f"• InvStartDate blockers (6270): {blockers_summary}\n"
     
     # Reconciliation
     reconcile = summary.get("reconcile")

@@ -361,6 +361,18 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
             return 0.0
     
     out["*ItemAmount"] = df.get("TOTAL Sales").apply(to_number)
+
+    # Carry through EPOS totals needed for per-unit calculations downstream (uploader needs NET Sales, Cost Price)
+    if "NET Sales" in df.columns:
+        out["NET Sales"] = df.get("NET Sales").apply(to_number)
+    else:
+        out["NET Sales"] = 0.0
+
+    cost_col = "Cost Price" if "Cost Price" in df.columns else ("Cost" if "Cost" in df.columns else None)
+    if cost_col:
+        out["Cost Price"] = df.get(cost_col).apply(to_number)
+    else:
+        out["Cost Price"] = 0.0
     
     # Tax code handling based on company config
     if config.tax_mode == "vat_inclusive_7_5":

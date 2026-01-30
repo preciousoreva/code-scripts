@@ -34,5 +34,12 @@
     "enabled": true,
     "start_hour": 5,
     "start_minute": 0
+  },
+  "inventory": {
+    "enable_inventory_items": true,
+    "allow_negative_inventory": true,
+    "inventory_start_date": "today",
+    "default_qty_on_hand": 0,
+    "auto_fix_wrong_type_items": true
   }
 }

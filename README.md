@@ -651,6 +651,127 @@ The pipeline supports multiple companies, each with its own configuration file. 
 
 ---
 
+## Inventory Items Configuration
+
+The pipeline supports creating QBO Inventory items (instead of Service items) when products don't exist in QuickBooks. This feature is configurable per company and uses category-based account mapping.
+
+### Configuration
+
+Add an optional `inventory` section to your company JSON config:
+
+```json
+{
+  "inventory": {
+    "enable_inventory_items": false,
+    "allow_negative_inventory": false,
+    "inventory_start_date": "today",
+    "default_qty_on_hand": 0,
+    "product_mapping_file": "mappings/Product.Mapping.csv"
+  }
+}
+```
+
+**Fields:**
+- `enable_inventory_items`: Enable inventory item creation (default: `false`)
+- `allow_negative_inventory`: Allow negative inventory when posting SalesReceipts (default: `false`)
+- `inventory_start_date`: Start date for inventory tracking - use `"today"` or ISO date like `"2026-01-26"` (default: `"today"`)
+- `default_qty_on_hand`: Starting quantity for new inventory items (default: `0`)
+- `product_mapping_file`: Path to category mapping CSV (default: `"mappings/Product.Mapping.csv"`)
+
+### Environment Variable Overrides
+
+Precedence: **ENV → company JSON → defaults**
+
+You can override inventory settings via environment variables:
+
+```bash
+COMPANY_A_ENABLE_INVENTORY_ITEMS=true
+COMPANY_A_ALLOW_NEGATIVE_INVENTORY=true
+COMPANY_A_INVENTORY_START_DATE=2026-01-26  # or "today"
+COMPANY_A_DEFAULT_QTY_ON_HAND=0
+```
+
+### Product Category Mapping
+
+The pipeline uses `mappings/Product.Mapping.csv` to map EPOS product categories to QBO accounts. The CSV must have these exact headers:
+
+- `Category` — EPOS product category (matches EPOS CSV "Category" column)
+- `Inventory Account` — Asset account (e.g., `"120000 - Inventory:120100 - Grocery"`)
+- `Revenue Account` — Income account (e.g., `"400000 - Revenue:400100 - Revenue - Grocery"`)
+- `Cost of Sale account` — COGS account (e.g., `"200000 - Cost of sales:200100 - Purchases - Groceries"`)
+
+**Account Resolution:**
+- Accounts are resolved by `FullyQualifiedName` first
+- Falls back to `AccountNumber` if FullyQualifiedName not found
+- Account strings format: `"<AccountNumber> - <FullyQualifiedName>"`
+
+**Important:** If any EPOS category is missing in the mapping CSV, the pipeline will fail with a clear error message.
+
+### QuickBooks Settings
+
+When `allow_negative_inventory` is enabled, you must also enable negative inventory in QuickBooks:
+
+1. Go to **Settings** → **Company Settings** → **Sales**
+2. Enable **"Allow negative inventory"**
+3. Save changes
+
+If negative inventory is not enabled in QBO, SalesReceipts will be rejected with an error message.
+
+### Example: Company A Configuration
+
+```json
+{
+  "company_key": "company_a",
+  "inventory": {
+    "enable_inventory_items": true,
+    "allow_negative_inventory": true,
+    "inventory_start_date": "today",
+    "default_qty_on_hand": 0
+  }
+}
+```
+
+### Behavior
+
+**When `enable_inventory_items` is `true`:**
+- Missing products are created as **Inventory items** (not Service items)
+- Items start with `QtyOnHand = default_qty_on_hand` (typically 0)
+- Accounts are mapped from category using `Product.Mapping.csv`
+- Unit prices are set from EPOS CSV `NET Sales` column (per-unit)
+- Purchase costs are set from EPOS CSV `Cost Price` column (per-unit)
+
+**When `enable_inventory_items` is `false` (default):**
+- Missing products are created as **Service items** (existing behavior)
+- No account mapping required
+- No inventory tracking
+
+**Negative Inventory Handling:**
+- If `allow_negative_inventory` is `true` and QBO accepts the SalesReceipt (with warnings), the pipeline continues and logs a warning
+- If QBO rejects due to inventory, the pipeline fails with instructions to enable negative inventory in QBO settings
+- If `allow_negative_inventory` is `false`, inventory errors are treated as fatal (existing behavior)
+
+### Pre-flight: Inventory Start Date Check (QBO 6270)
+
+When inventory is enabled and a run has a target date, the upload step runs a **non-blocking** pre-flight check before sending SalesReceipts:
+
+- It queries QBO for Inventory items whose **InvStartDate** is **after** the run’s target date.
+- Such items can cause QBO error **6270** (“Transaction date is prior to start date for inventory item”) when posting backdated receipts.
+- If any are found:
+  - A **warning** is logged with the count.
+  - A CSV report is written to `reports/inventory_start_date_issues_{company_key}_{target_date}.csv` (columns: Id, Name, InvStartDate, Active).
+- The run **does not fail**; this is reporting-only. Fix items in QBO (edit InvStartDate or delete/re-upload) and re-run as needed.
+
+### Verification Checklist
+
+After enabling inventory items, verify:
+- [ ] No "Uncategorised items or services" in Profit & Loss
+- [ ] Products appear as Inventory items (not Service) in QBO
+- [ ] Inventory items show correct accounts (Asset, Income, COGS)
+- [ ] Companies without inventory enabled still create Service items (unchanged behavior)
+- [ ] Slack summary includes inventory stats (items created, warnings, rejections)
+
+---
+
 ## Troubleshooting
 
 ### RAW Spill Not Being Merged
