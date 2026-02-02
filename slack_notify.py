@@ -318,6 +318,8 @@ def format_run_summary(
             failed = upload_stats.get("failed", 0)
             stale_ledger = upload_stats.get("stale_ledger_entries_detected", 0)
             items_created = upload_stats.get("items_created_count", 0)
+            inventory_items_created = upload_stats.get("inventory_items_created_count", 0)
+            service_items_created = upload_stats.get("service_items_created_count", 0)
             items_patched = upload_stats.get("items_patched_count", 0)
             inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
             inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
@@ -331,16 +333,18 @@ def format_run_summary(
             if stale_ledger > 0:
                 message += f"– Stale ledger: {stale_ledger} entry/entries healed by uploading\n"
             
-            # Inventory items (always show so we explicitly report when new items are created)
+            # Items created/patched (always show so we explicitly report when new items are created)
             if items_created > 0 or items_patched > 0:
                 parts = []
-                if items_created > 0:
-                    parts.append(f"{items_created} created")
+                if inventory_items_created > 0:
+                    parts.append(f"{inventory_items_created} Inventory created")
+                if service_items_created > 0:
+                    parts.append(f"{service_items_created} Service created")
                 if items_patched > 0:
                     parts.append(f"{items_patched} patched")
-                message += f"– Inventory items: {', '.join(parts)}\n"
+                message += f"– Items: {', '.join(parts)}\n"
             else:
-                message += "– Inventory items: no new items created or patched\n"
+                message += "– Items: no new items created or patched\n"
             if inventory_warnings > 0:
                 message += f"– Inventory warnings: {inventory_warnings}\n"
             if inventory_rejections > 0:
@@ -406,18 +410,24 @@ def format_run_summary(
         if stale_ledger > 0:
             message += f"• Stale ledger entries detected: {stale_ledger} (healed by uploading)\n"
         items_created = upload_stats.get("items_created_count", 0)
+        inventory_items_created = upload_stats.get("inventory_items_created_count", 0)
+        service_items_created = upload_stats.get("service_items_created_count", 0)
         items_patched = upload_stats.get("items_patched_count", 0)
         inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
         inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
         if items_created > 0 or items_patched > 0 or inventory_warnings > 0 or inventory_rejections > 0:
-            message += f"• Inventory: {items_created} items created"
+            parts = []
+            if inventory_items_created > 0:
+                parts.append(f"{inventory_items_created} Inventory created")
+            if service_items_created > 0:
+                parts.append(f"{service_items_created} Service created")
             if items_patched > 0:
-                message += f", {items_patched} patched"
+                parts.append(f"{items_patched} patched")
             if inventory_warnings > 0:
-                message += f", {inventory_warnings} warnings"
+                parts.append(f"{inventory_warnings} warnings")
             if inventory_rejections > 0:
-                message += f", {inventory_rejections} rejections"
-            message += "\n"
+                parts.append(f"{inventory_rejections} rejections")
+            message += f"• Items: {', '.join(parts)}\n"
     
     # Trading day boundary stats (if available)
     trading_day_stats = summary.get("trading_day_stats")

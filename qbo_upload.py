@@ -1398,52 +1398,65 @@ def get_or_create_item_id(
                 return (item_id, False, created_type, None)
 
     if not item_id and auto_create_items:
-        # Create Inventory item (only path for new items)
-        if not category or unit_sales_price is None or unit_purchase_cost is None:
-            raise ValueError(
-                f"Missing required parameters for item '{name}'. "
-                f"Need: category, unit_sales_price, unit_purchase_cost"
+        # Create item: Inventory if mapping_cache provided, Service if inventory disabled
+        if mapping_cache is None:
+            # Inventory disabled: create Service item
+            default_income_account_id = config.get_qbo_config().get("default_income_account_id", "1")
+            tax_code_id = config.tax_code_id or None
+            from qbo_items import get_or_create_service_item
+            item_id, _ = get_or_create_service_item(
+                token_mgr, realm_id, name, default_income_account_id, tax_code_id,
+                BASE_URL, _make_qbo_request
             )
-        if mapping_cache is None or account_cache is None:
-            raise ValueError(
-                f"Missing mapping_cache or account_cache for item '{name}'"
-            )
-
-        category_item_id_val: Optional[str] = None
-        if (category or "").strip():
-            try:
-                category_item_id_val = get_or_create_item_category_id(
-                    token_mgr, realm_id, category, cache=category_item_cache
+            was_created = True
+            created_type = "Service"
+        else:
+            # Inventory enabled: create Inventory item
+            if not category or unit_sales_price is None or unit_purchase_cost is None:
+                raise ValueError(
+                    f"Missing required parameters for item '{name}'. "
+                    f"Need: category, unit_sales_price, unit_purchase_cost"
                 )
-            except Exception as e:
-                print(f"[WARN] Failed to resolve Category item for {category!r}: {e}. Creating Inventory item without ParentRef/SubItem.")
-        else:
-            print(f"[WARN] Category missing/empty; creating Inventory item '{name}' without ParentRef/SubItem")
+            if account_cache is None:
+                raise ValueError(
+                    f"Missing account_cache for item '{name}'"
+                )
 
-        item_id = create_inventory_item(
-            name, category, unit_sales_price, unit_purchase_cost,
-            config, token_mgr, realm_id, mapping_cache, account_cache,
-            target_date=target_date,
-            category_item_id=category_item_id_val,
-        )
-        was_created = True
-        # Check if this was created after auto-fix
-        if autofixed_old_item_id:
-            created_type = "created_inventory_after_fix"
-            # Append to autofix report (DocNumber/TxnDate will be filled by caller)
-            if items_autofixed is not None:
-                items_autofixed.append({
-                    "OriginalName": name,
-                    "OldItemId": str(autofixed_old_item_id),
-                    "OldType": autofixed_old_type or "",
-                    "OldActive": "True",
-                    "NewName": autofixed_effective_new_name or f"{name} (LEGACY {autofixed_old_type} {autofixed_old_item_id})",
-                    "NewInventoryItemId": str(item_id),
-                    "TxnDate": target_date or "",
-                    "DocNumber": "",  # Will be filled by caller
-                })
-        else:
-            created_type = "Inventory"
+            category_item_id_val: Optional[str] = None
+            if (category or "").strip():
+                try:
+                    category_item_id_val = get_or_create_item_category_id(
+                        token_mgr, realm_id, category, cache=category_item_cache
+                    )
+                except Exception as e:
+                    print(f"[WARN] Failed to resolve Category item for {category!r}: {e}. Creating Inventory item without ParentRef/SubItem.")
+            else:
+                print(f"[WARN] Category missing/empty; creating Inventory item '{name}' without ParentRef/SubItem")
+
+            item_id = create_inventory_item(
+                name, category, unit_sales_price, unit_purchase_cost,
+                config, token_mgr, realm_id, mapping_cache, account_cache,
+                target_date=target_date,
+                category_item_id=category_item_id_val,
+            )
+            was_created = True
+            # Check if this was created after auto-fix
+            if autofixed_old_item_id:
+                created_type = "created_inventory_after_fix"
+                # Append to autofix report (DocNumber/TxnDate will be filled by caller)
+                if items_autofixed is not None:
+                    items_autofixed.append({
+                        "OriginalName": name,
+                        "OldItemId": str(autofixed_old_item_id),
+                        "OldType": autofixed_old_type or "",
+                        "OldActive": "True",
+                        "NewName": autofixed_effective_new_name or f"{name} (LEGACY {autofixed_old_type} {autofixed_old_item_id})",
+                        "NewInventoryItemId": str(item_id),
+                        "TxnDate": target_date or "",
+                        "DocNumber": "",  # Will be filled by caller
+                    })
+            else:
+                created_type = "Inventory"
 
     if not item_id:
         item_id = default_item_id
@@ -1641,7 +1654,14 @@ def resolve_all_unique_items(
             item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
             continue
 
-        # Not in prefetch: create item (always Inventory)
+        # Not in prefetch: create item (Inventory if mapping_cache provided, else skip creation)
+        # If inventory is disabled (mapping_cache is None), skip item creation - let build_sales_receipt_payload
+        # fall back to get_or_create_item_id which will create Service items when inventory is disabled
+        if not mapping_cache:
+            # Inventory disabled: don't add to item_result_by_name, let per-line resolution handle it
+            continue
+        
+        # Inventory enabled: validate and create Inventory item
         missing = []
         if category is None or (isinstance(category, str) and not category.strip()):
             missing.append("category")
@@ -1649,8 +1669,6 @@ def resolve_all_unique_items(
             missing.append("unit_sales_price")
         if unit_purchase_cost is None:
             missing.append("unit_purchase_cost")
-        if not mapping_cache:
-            missing.append("mapping_cache")
         if account_cache is None:
             missing.append("account_cache")
         if category and mapping_cache:
@@ -1843,6 +1861,8 @@ def build_sales_receipt_payload(
 
         if created_type == "Inventory" or created_type == "created_inventory_after_fix":
             inventory_created_count += 1
+        elif created_type == "Service":
+            service_created_count += 1
         elif created_type == "Default":
             default_fallback_count += 1
 
@@ -2776,20 +2796,27 @@ def main():
     payment_method_cache: Dict[str, Optional[str]] = {}
     category_item_cache: Dict[str, str] = {}
     
-    # Load category mapping and account cache (items are always created as Inventory)
+    # Load category mapping and account cache (only if inventory items are enabled)
     mapping_cache: Optional[Dict[str, Dict[str, str]]] = None
     account_cache: Dict[str, Optional[str]] = {}
     inventory_start_date_issues_count = 0
     inventory_start_date_report_path: Optional[str] = None
-    print(f"\n[INFO] Items created as Inventory. QtyOnHand starts at {config.default_qty_on_hand}. QBO must allow negative inventory.")
-    print("[INFO] Item hierarchy enabled: True")
-    print("[INFO] For InvStartDate issues (QBO 6270), use: python scripts/qbo_inv_manager.py --company <key> list-invstart / set-invstart-bulk")
-    try:
-        mapping_cache = load_category_account_mapping(config)
-        print(f"[INFO] Loaded {len(mapping_cache)} category mappings from {config.product_mapping_file}")
-    except Exception as e:
-        print(f"[ERROR] Failed to load category mapping: {e}")
-        raise
+    
+    if config.inventory_enabled:
+        print(f"\n[INFO] Items created as Inventory. QtyOnHand starts at {config.default_qty_on_hand}. QBO must allow negative inventory.")
+        print("[INFO] Item hierarchy enabled: True")
+        print("[INFO] For InvStartDate issues (QBO 6270), use: python scripts/qbo_inv_manager.py --company <key> list-invstart / set-invstart-bulk")
+        try:
+            mapping_cache = load_category_account_mapping(config)
+            print(f"[INFO] Loaded {len(mapping_cache)} category mappings from {config.product_mapping_file}")
+        except FileNotFoundError as e:
+            print(f"[ERROR] Product.Mapping.csv not found but inventory_enabled=True. {e}")
+            raise
+        except Exception as e:
+            print(f"[ERROR] Failed to load category mapping: {e}")
+            raise
+    else:
+        print(f"\n[INFO] Inventory items disabled (enable_inventory_items=false). Items will be created as Service items.")
 
     # Pre-fetch tax code for Company B (tax_inclusive_composite mode) to validate it exists
     if config.tax_mode == "tax_inclusive_composite" and config.tax_code_name:
