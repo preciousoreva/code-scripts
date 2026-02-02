@@ -7,7 +7,7 @@ import argparse
 import sys
 import re
 import csv
-from typing import Optional, Dict, Callable, Any, Tuple, List, Set
+from typing import Optional, Dict, Callable, Any, Tuple, List, Set, Union
 from urllib.parse import quote
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -656,70 +656,124 @@ def get_department_id(name: str, token_mgr: TokenManager, realm_id: str, cache: 
     return department_id
 
 
-def find_inventory_items_with_future_start_date(
+def build_blockers_from_batch(
+    df: pd.DataFrame,
+    grouped: Any,
+    config: Any,
+    existing_items_by_name: Dict[str, Dict[str, Any]],
     token_mgr: TokenManager,
     realm_id: str,
-    target_date: str,
-) -> List[Dict[str, Any]]:
+    resolved_target_date: str,
+    target_date: Optional[str],
+    repo_root: str,
+    is_rerun: bool = False,
+) -> Tuple[Optional[str], int]:
     """
-    Find QBO Inventory items whose InvStartDate is after the run target_date.
-    Such items can cause QBO error 6270 (Transaction date prior to start date).
-
-    Read-only: does not mutate QBO data.
+    Build inventory start-date blockers list from batch: (item_name, txn_date) from df/grouped,
+    map to item_id via existing_items_by_name, query QBO for InvStartDate, filter to blockers.
+    Write reports/inventory_start_date_blockers_{company}_{date}.csv. Return (filepath, num_rows); (None, 0) if none.
     """
-    # TrackQtyOnHand = true: items that enforce InvStartDate; include all Active states
-    query = "select Id, Name, InvStartDate, Active from Item where Type = 'Inventory' and TrackQtyOnHand = true maxresults 1000"
-    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
-    resp = _make_qbo_request("GET", url, token_mgr)
-    issues: List[Dict[str, Any]] = []
-    if resp.status_code != 200:
-        return issues
-    data = resp.json()
-    items = data.get("QueryResponse", {}).get("Item", [])
-    if not isinstance(items, list):
-        items = [items] if items else []
-    for item in items:
-        inv_start = item.get("InvStartDate")
-        if not inv_start:
+    # #region agent log
+    try:
+        import time as _t
+        _log_path = os.path.join(get_repo_root(), ".cursor", "debug.log")
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "debug-session", "hypothesisId": "H4", "location": "build_blockers_from_batch:entry", "message": "recompute_from_batch", "data": {"is_rerun": is_rerun}, "timestamp": int(_t.time() * 1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    item_to_earliest: Dict[str, str] = {}
+    for group_key, group_df in grouped:
+        first_row = group_df.iloc[0]
+        if getattr(config, "trading_day_enabled", False) and target_date:
+            txn_date = resolved_target_date
+        else:
+            txn_date_str = str(first_row[DATE_COL])
+            try:
+                date_obj = datetime.strptime(txn_date_str, config.date_format)
+                txn_date = date_obj.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                try:
+                    date_obj = pd.to_datetime(txn_date_str).to_pydatetime()
+                    txn_date = date_obj.strftime("%Y-%m-%d")
+                except Exception:
+                    txn_date = txn_date_str[:10] if len(txn_date_str) >= 10 else txn_date_str
+        for _, row in group_df.iterrows():
+            item_name = str(row.get(ITEM_NAME_COL, "")).strip()
+            item_name = re.sub(r"\s+", " ", item_name) if item_name else ""
+            if not item_name or item_name not in existing_items_by_name:
+                continue
+            item = existing_items_by_name[item_name]
+            item_id = str(item.get("Id", ""))
+            if not item_id:
+                continue
+            current = item_to_earliest.get(item_id, "9999-99-99")
+            if txn_date < current:
+                item_to_earliest[item_id] = txn_date
+    if not item_to_earliest:
+        return (None, 0)
+    item_ids = list(item_to_earliest.keys())
+    qbo_items = _query_items_by_ids(token_mgr, realm_id, item_ids)
+    id_to_item: Dict[str, Dict[str, Any]] = {str(it.get("Id", "")): it for it in qbo_items if it.get("Id")}
+    # #region agent log
+    try:
+        import time as _t
+        _log_path = os.path.join(get_repo_root(), ".cursor", "debug.log")
+        _sample_ids = item_ids[:3]
+        _key_types = [type(k).__name__ for k in list(id_to_item.keys())[:3]]
+        _hits = [item_id in id_to_item for item_id in _sample_ids]
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "debug-session", "hypothesisId": "H2", "location": "build_blockers_from_batch:after_query", "message": "id_lookup", "data": {"sample_item_ids": _sample_ids, "id_to_item_key_types": _key_types, "sample_hits": _hits, "len_id_to_item": len(id_to_item)}, "timestamp": int(_t.time() * 1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    blockers_rows: List[Dict[str, Any]] = []
+    for item_id, earliest_txn in item_to_earliest.items():
+        it = id_to_item.get(item_id, {})
+        if it.get("Type") != "Inventory" or not it.get("TrackQtyOnHand"):
             continue
-        # Parse as YYYY-MM-DD (QBO may return full ISO or date-only)
-        inv_date_str = inv_start[:10] if len(inv_start) >= 10 else inv_start
-        try:
-            if inv_date_str > target_date:
-                issues.append({
-                    "Id": item.get("Id", ""),
-                    "Name": item.get("Name", ""),
-                    "InvStartDate": inv_date_str,
-                    "Active": item.get("Active", ""),
-                })
-        except (TypeError, ValueError):
+        inv_start = it.get("InvStartDate", "")
+        inv_str = inv_start[:10] if inv_start and len(str(inv_start)) >= 10 else (str(inv_start).strip() if inv_start else "")
+        if not inv_str:
             continue
-    issues.sort(key=lambda x: x.get("InvStartDate", ""))
-    return issues
-
-
-def write_inventory_start_date_issues_report(
-    issues: List[Dict[str, Any]],
-    company_key: str,
-    target_date: str,
-    out_dir: str = "reports",
-) -> Optional[str]:
-    """
-    Write a CSV report of inventory items with InvStartDate after target_date.
-    Returns the file path if written, else None.
-    """
-    if not issues:
-        return None
+        if _parse_yyyy_mm_dd(inv_str) is None:
+            continue
+        if inv_str <= earliest_txn:
+            continue
+        blockers_rows.append({
+            "DocNumber": "(preflight)",
+            "TxnDate": earliest_txn,
+            "ItemId": item_id,
+            "ItemName": it.get("Name", ""),
+            "InvStartDate": inv_str,
+            "TrackQtyOnHand": it.get("TrackQtyOnHand", ""),
+            "Active": it.get("Active", ""),
+            "QuantityOnReceipt": 1,
+        })
+    if not blockers_rows:
+        return (None, 0)
+    # #region agent log
+    try:
+        import time as _t
+        _log_path = os.path.join(get_repo_root(), ".cursor", "debug.log")
+        _sample = [{"ItemId": r["ItemId"], "InvStartDate_from_QBO": r["InvStartDate"], "TxnDate_earliest": r["TxnDate"]} for r in blockers_rows[:5]]
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "debug-session", "hypothesisId": "H1,H3", "location": "build_blockers_from_batch:blockers_sample", "message": "qbo_returned_inv_start_dates", "data": {"is_rerun": is_rerun, "blockers_count": len(blockers_rows), "sample": _sample}, "timestamp": int(_t.time() * 1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    out_dir = os.path.join(repo_root, "reports")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    safe_date = target_date.replace("-", "")
-    safe_key = re.sub(r"[^\w-]", "_", company_key)
-    filename = f"inventory_start_date_issues_{safe_key}_{target_date}.csv"
+    safe_key = re.sub(r"[^\w-]", "_", config.company_key)
+    filename = f"inventory_start_date_blockers_{safe_key}_{resolved_target_date}.csv"
     filepath = os.path.join(out_dir, filename)
+    fieldnames = ["DocNumber", "TxnDate", "ItemId", "ItemName", "InvStartDate", "TrackQtyOnHand", "Active", "QuantityOnReceipt"]
     with open(filepath, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["Id", "Name", "InvStartDate", "Active"])
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        w.writerows(issues)
-    return filepath
+        w.writerows(blockers_rows)
+    print(f"[INFO] Pre-flight blockers: wrote {len(blockers_rows)} row(s) to {filepath}")
+    return (filepath, len(blockers_rows))
 
 
 def _safe_numeric(value: Any, default: float = 0.0) -> float:
@@ -964,14 +1018,10 @@ def create_inventory_item(
         payload["SalesTaxCodeRef"] = {"value": tax_code_id}
         payload["PurchaseTaxCodeRef"] = {"value": tax_code_id}
 
-    use_hierarchy = getattr(config, "use_item_hierarchy", False)
-    if category_item_id and use_hierarchy:
+    if category_item_id:
         payload["SubItem"] = True
         payload["ParentRef"] = {"value": category_item_id}
         print(f"[INFO] Attached ParentRef/SubItem to Inventory item '{name}' (category item Id: {category_item_id})")
-    elif category_item_id and not use_hierarchy:
-        # Hierarchy off: do not set SubItem/ParentRef so receipt shows product name only
-        pass
     else:
         print(f"[WARN] No category item id; creating Inventory item '{name}' without ParentRef/SubItem")
     
@@ -1114,6 +1164,42 @@ def rename_and_inactivate_item(
     return updated_item
 
 
+def create_inventory_item_from_existing(
+    token_mgr: TokenManager,
+    realm_id: str,
+    existing_item: dict,
+    new_inv_start_date: str,
+) -> str:
+    """
+    Create a new QBO Inventory item from an existing Item (e.g. after inactivating the old one).
+    Copies Name, Type, accounts, pricing, ParentRef/SubItem; sets InvStartDate to new_inv_start_date.
+    Returns the new item Id.
+    """
+    # Fields to omit when building create payload (read-only or create-specific)
+    omit = {"Id", "SyncToken", "MetaData", "FullyQualifiedName", "Active"}
+    payload = {k: v for k, v in existing_item.items() if k not in omit and v is not None}
+    payload["InvStartDate"] = new_inv_start_date[:10]
+    payload["QtyOnHand"] = 0  # New item starts with zero; adjust in QBO if needed
+    payload["TrackQtyOnHand"] = True
+    # Ensure required refs are present
+    for key in ("IncomeAccountRef", "AssetAccountRef", "ExpenseAccountRef"):
+        if not payload.get(key):
+            raise RuntimeError(f"Cannot create item from existing: missing {key}")
+    create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
+    create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
+    if create_resp.status_code not in (200, 201):
+        try:
+            body = create_resp.json()
+            detail = json.dumps(body)[:500]
+        except Exception:
+            detail = create_resp.text[:500] if create_resp.text else ""
+        raise RuntimeError(f"Failed to create Inventory item from existing: HTTP {create_resp.status_code} {detail}")
+    created = create_resp.json().get("Item")
+    if not created or not created.get("Id"):
+        raise RuntimeError("No Item or Id in create response")
+    return str(created["Id"])
+
+
 def get_or_create_item_id(
     name: str,
     token_mgr: TokenManager,
@@ -1134,9 +1220,9 @@ def get_or_create_item_id(
     """
     Resolve an Item name to an Item Id with simple caching.
     Returns (item_id, was_created, created_type, fallback_reason).
-    created_type: "Inventory" | "Service" | "Default" | "existing" | "existing_inventory" | "existing_non_inventory" | "created_inventory_after_fix"
-    fallback_reason: optional, e.g. "blank_name", "inventory_failed", "service_creation_failed"
-    When inventory mode is enabled and an existing item has Type != Inventory, appends to items_wrong_type if provided.
+    created_type: "Inventory" | "Default" | "existing" | "existing_inventory" | "existing_non_inventory" | "created_inventory_after_fix"
+    fallback_reason: optional, e.g. "blank_name", "item_creation_failed"
+    When an existing item has Type != Inventory, appends to items_wrong_type if provided.
     When auto_fix_wrong_type_items is enabled, renames/inactivates wrong-type items and creates inventory items.
     """
     default_item_id = config.get_qbo_config().get("default_item_id", "1")
@@ -1191,9 +1277,8 @@ def get_or_create_item_id(
                                 "sparse": True,
                                 "Type": "Inventory",
                             }
-                            # Category: add ParentRef/SubItem only when use_item_hierarchy is True
-                            use_hierarchy = getattr(config, "use_item_hierarchy", False)
-                            if use_hierarchy and (category or "").strip() and category_item_cache is not None:
+                            # Category: add ParentRef/SubItem (item hierarchy always on)
+                            if (category or "").strip() and category_item_cache is not None:
                                 parent_ref = current.get("ParentRef")
                                 if not parent_ref or not parent_ref.get("value"):
                                     cat_id = get_or_create_item_category_id(
@@ -1271,130 +1356,100 @@ def get_or_create_item_id(
                     print(f"[WARN] Failed to patch existing Inventory item {item_id}: {e}")
                 cache[name] = item_id
                 return (item_id, False, created_type, None)
-            if config.inventory_enabled:
-                # Check if auto-fix is enabled
-                if config.auto_fix_wrong_type_items:
-                    # Try to rename and inactivate the wrong-type item
-                    old_item_id = item_id
-                    try:
-                        new_name = f"{name} (LEGACY {item_type} {old_item_id})"
-                        updated_item = rename_and_inactivate_item(token_mgr, realm_id, old_item_id, new_name, make_inactive=True)
-                        autofixed_old_item_id = old_item_id
-                        autofixed_old_type = item_type
-                        autofixed_effective_new_name = (updated_item.get("Name") or "").strip() or new_name
-                        item_id = None
-                        # Continue to create path below
-                    except Exception as e:
-                        # Rename failed: fall back to current behavior
-                        print(f"[WARN] Failed to auto-fix wrong-type item '{name}' (Id={old_item_id}): {e}. "
-                              f"Will use existing item for receipt lines.")
-                        if items_wrong_type is not None:
-                            items_wrong_type.append({
-                                "Name": name,
-                                "Id": str(old_item_id) if old_item_id else "",
-                                "Type": item_type,
-                                "ExpectedType": "Inventory",
-                            })
-                        created_type = "existing_non_inventory"
-                        cache[name] = old_item_id
-                        return (old_item_id, False, created_type, None)
-                else:
-                    # Auto-fix disabled: use current behavior
-                    print(f"[WARN] Inventory mode enabled but item exists as Type={item_type!r}. Cannot auto-convert. "
-                          f"Will use existing item for receipt lines. name={name!r} Id={item_id}")
+            # Always expect Inventory; handle wrong-type (auto-fix or use existing)
+            if config.auto_fix_wrong_type_items:
+                # Try to rename and inactivate the wrong-type item
+                old_item_id = item_id
+                try:
+                    new_name = f"{name} (LEGACY {item_type} {old_item_id})"
+                    updated_item = rename_and_inactivate_item(token_mgr, realm_id, old_item_id, new_name, make_inactive=True)
+                    autofixed_old_item_id = old_item_id
+                    autofixed_old_type = item_type
+                    autofixed_effective_new_name = (updated_item.get("Name") or "").strip() or new_name
+                    item_id = None
+                    # Continue to create path below
+                except Exception as e:
+                    # Rename failed: fall back to current behavior
+                    print(f"[WARN] Failed to auto-fix wrong-type item '{name}' (Id={old_item_id}): {e}. "
+                          f"Will use existing item for receipt lines.")
                     if items_wrong_type is not None:
                         items_wrong_type.append({
                             "Name": name,
-                            "Id": str(item_id) if item_id else "",
+                            "Id": str(old_item_id) if old_item_id else "",
                             "Type": item_type,
                             "ExpectedType": "Inventory",
                         })
                     created_type = "existing_non_inventory"
-                    cache[name] = item_id
-                    return (item_id, False, created_type, None)
-            created_type = "existing"
+                    cache[name] = old_item_id
+                    return (old_item_id, False, created_type, None)
+            else:
+                # Auto-fix disabled: use existing item and warn
+                print(f"[WARN] Item exists as Type={item_type!r} but Inventory expected. "
+                      f"Will use existing item for receipt lines. name={name!r} Id={item_id}")
+                if items_wrong_type is not None:
+                    items_wrong_type.append({
+                        "Name": name,
+                        "Id": str(item_id) if item_id else "",
+                        "Type": item_type,
+                        "ExpectedType": "Inventory",
+                    })
+                created_type = "existing_non_inventory"
+                cache[name] = item_id
+                return (item_id, False, created_type, None)
 
     if not item_id and auto_create_items:
-        if config.inventory_enabled:
-            # Create Inventory item
-            if not category or unit_sales_price is None or unit_purchase_cost is None:
-                raise ValueError(
-                    f"Inventory mode enabled but missing required parameters for item '{name}'. "
-                    f"Need: category, unit_sales_price, unit_purchase_cost"
-                )
-            if mapping_cache is None or account_cache is None:
-                raise ValueError(
-                    f"Inventory mode enabled but missing mapping_cache or account_cache for item '{name}'"
-                )
-
-            category_item_id_val: Optional[str] = None
-            if getattr(config, "use_item_hierarchy", False) and (category or "").strip():
-                try:
-                    category_item_id_val = get_or_create_item_category_id(
-                        token_mgr, realm_id, category, cache=category_item_cache
-                    )
-                except Exception as e:
-                    print(f"[WARN] Failed to resolve Category item for {category!r}: {e}. Creating Inventory item without ParentRef/SubItem.")
-            elif (category or "").strip() and not getattr(config, "use_item_hierarchy", False):
-                pass  # Hierarchy off: category still used for accounts; no ParentRef/SubItem
-            else:
-                print(f"[WARN] Category missing/empty; creating Inventory item '{name}' without ParentRef/SubItem")
-
-            # Attempt Inventory creation; do not fall back to Service (fail loudly when inventory_enabled)
-            item_id = create_inventory_item(
-                name, category, unit_sales_price, unit_purchase_cost,
-                config, token_mgr, realm_id, mapping_cache, account_cache,
-                target_date=target_date,
-                category_item_id=category_item_id_val,
+        # Create Inventory item (only path for new items)
+        if not category or unit_sales_price is None or unit_purchase_cost is None:
+            raise ValueError(
+                f"Missing required parameters for item '{name}'. "
+                f"Need: category, unit_sales_price, unit_purchase_cost"
             )
-            was_created = True
-            # Check if this was created after auto-fix
-            if autofixed_old_item_id:
-                created_type = "created_inventory_after_fix"
-                # Append to autofix report (DocNumber/TxnDate will be filled by caller)
-                if items_autofixed is not None:
-                    items_autofixed.append({
-                        "OriginalName": name,
-                        "OldItemId": str(autofixed_old_item_id),
-                        "OldType": autofixed_old_type or "",
-                        "OldActive": "True",
-                        "NewName": autofixed_effective_new_name or f"{name} (LEGACY {autofixed_old_type} {autofixed_old_item_id})",
-                        "NewInventoryItemId": str(item_id),
-                        "TxnDate": target_date or "",
-                        "DocNumber": "",  # Will be filled by caller
-                    })
-            else:
-                created_type = "Inventory"
+        if mapping_cache is None or account_cache is None:
+            raise ValueError(
+                f"Missing mapping_cache or account_cache for item '{name}'"
+            )
+
+        category_item_id_val: Optional[str] = None
+        if (category or "").strip():
+            try:
+                category_item_id_val = get_or_create_item_category_id(
+                    token_mgr, realm_id, category, cache=category_item_cache
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to resolve Category item for {category!r}: {e}. Creating Inventory item without ParentRef/SubItem.")
         else:
-            # Inventory disabled: Create Service item (existing behavior)
-            create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
-            payload = {
-                "Name": name,
-                "Type": "Service",
-                "IncomeAccountRef": {"value": default_income_account_id},
-            }
-            create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
-            if create_resp.status_code in (200, 201):
-                created = create_resp.json().get("Item")
-                if created:
-                    item_id = created.get("Id")
-                    was_created = True
-                    created_type = "Service"
-            else:
-                print(f"[WARN] Failed to create Item '{name}': {create_resp.status_code}")
-                try:
-                    print(create_resp.text)
-                except Exception:
-                    pass
-                print(f"[WARN] Using DEFAULT_ITEM_ID for '{name}' (inventory disabled, service creation failed)")
-                created_type = "Default"
-                fallback_reason = "service_creation_failed"
+            print(f"[WARN] Category missing/empty; creating Inventory item '{name}' without ParentRef/SubItem")
+
+        item_id = create_inventory_item(
+            name, category, unit_sales_price, unit_purchase_cost,
+            config, token_mgr, realm_id, mapping_cache, account_cache,
+            target_date=target_date,
+            category_item_id=category_item_id_val,
+        )
+        was_created = True
+        # Check if this was created after auto-fix
+        if autofixed_old_item_id:
+            created_type = "created_inventory_after_fix"
+            # Append to autofix report (DocNumber/TxnDate will be filled by caller)
+            if items_autofixed is not None:
+                items_autofixed.append({
+                    "OriginalName": name,
+                    "OldItemId": str(autofixed_old_item_id),
+                    "OldType": autofixed_old_type or "",
+                    "OldActive": "True",
+                    "NewName": autofixed_effective_new_name or f"{name} (LEGACY {autofixed_old_type} {autofixed_old_item_id})",
+                    "NewInventoryItemId": str(item_id),
+                    "TxnDate": target_date or "",
+                    "DocNumber": "",  # Will be filled by caller
+                })
+        else:
+            created_type = "Inventory"
 
     if not item_id:
         item_id = default_item_id
         created_type = "Default"
         if fallback_reason is None:
-            fallback_reason = "service_creation_failed"
+            fallback_reason = "item_creation_failed"
 
     cache[name] = item_id
     return (item_id, was_created, created_type, fallback_reason)
@@ -1422,10 +1477,7 @@ def resolve_all_unique_items(
     Fills item_result_by_name and patched_items. Returns counts for logging.
     """
     default_item_id = config.get_qbo_config().get("default_item_id", "1")
-    default_income_account_id = config.get_qbo_config().get("default_income_account_id", "1")
-    inventory_enabled = getattr(config, "inventory_enabled", False)
     auto_fix = getattr(config, "auto_fix_wrong_type_items", False)
-    use_item_hierarchy = getattr(config, "use_item_hierarchy", False)
     stats = {"items_created": 0, "items_patched": 0, "lookups_from_prefetch": 0}
 
     for name in unique_names:
@@ -1458,7 +1510,7 @@ def resolve_all_unique_items(
                                     "sparse": True,
                                     "Type": "Inventory",
                                 }
-                                if use_item_hierarchy and (category or "").strip():
+                                if (category or "").strip():
                                     parent_ref = current.get("ParentRef")
                                     if not parent_ref or not parent_ref.get("value"):
                                         cat_id = get_or_create_item_category_id(
@@ -1537,7 +1589,7 @@ def resolve_all_unique_items(
                         print(f"[WARN] Failed to patch existing Inventory item {item_id}: {e}")
                 item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_inventory", "fallback_reason": None}
                 continue
-            if inventory_enabled and auto_fix and item_type:
+            if auto_fix and item_type:
                 old_item_id = item_id
                 try:
                     new_name = f"{name} (LEGACY {item_type} {old_item_id})"
@@ -1554,7 +1606,7 @@ def resolve_all_unique_items(
                     item_result_by_name[name] = {"item_id": old_item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
                     continue
                 category_item_id_val = None
-                if use_item_hierarchy and (category or "").strip():
+                if (category or "").strip():
                     try:
                         category_item_id_val = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_item_cache)
                     except Exception:
@@ -1583,73 +1635,52 @@ def resolve_all_unique_items(
                     print(f"[WARN] Failed to create Inventory after auto-fix for '{name}': {e}. Using existing item.")
                     item_result_by_name[name] = {"item_id": old_item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
                 continue
-            if inventory_enabled:
-                if items_wrong_type is not None:
-                    items_wrong_type.append({"Name": name, "Id": str(item_id), "Type": item_type, "ExpectedType": "Inventory"})
-                item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
-            else:
-                item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing", "fallback_reason": None}
+            # Always expect Inventory; treat wrong-type as existing_non_inventory
+            if items_wrong_type is not None:
+                items_wrong_type.append({"Name": name, "Id": str(item_id), "Type": item_type, "ExpectedType": "Inventory"})
+            item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_non_inventory", "fallback_reason": None}
             continue
 
-        # Not in prefetch: create item
-        # Contract: when inventory_enabled, create Inventory only; never fall back to Service.
-        # If prerequisites missing or create_inventory_item fails, fail loudly (no silent Service).
-        if inventory_enabled:
-            # Require all prerequisites; fail loudly if any missing (do not create Service)
-            missing = []
-            if category is None or (isinstance(category, str) and not category.strip()):
-                missing.append("category")
-            if unit_sales_price is None:
-                missing.append("unit_sales_price")
-            if unit_purchase_cost is None:
-                missing.append("unit_purchase_cost")
-            if not mapping_cache:
-                missing.append("mapping_cache")
-            if account_cache is None:
-                missing.append("account_cache")
-            if category and mapping_cache:
-                cat_norm = (category or "").strip()
-                cat_norm = re.sub(r"\s+", " ", cat_norm)
-                if cat_norm and cat_norm not in mapping_cache:
-                    raise ValueError(
-                        f"Inventory enabled but category {category!r} (normalized: {cat_norm!r}) "
-                        f"is not in Product.Mapping.csv for item {name!r}. "
-                        "Add this category to mappings/Product.Mapping.csv or disable inventory for Service items."
-                    )
-            if missing:
+        # Not in prefetch: create item (always Inventory)
+        missing = []
+        if category is None or (isinstance(category, str) and not category.strip()):
+            missing.append("category")
+        if unit_sales_price is None:
+            missing.append("unit_sales_price")
+        if unit_purchase_cost is None:
+            missing.append("unit_purchase_cost")
+        if not mapping_cache:
+            missing.append("mapping_cache")
+        if account_cache is None:
+            missing.append("account_cache")
+        if category and mapping_cache:
+            cat_norm = (category or "").strip()
+            cat_norm = re.sub(r"\s+", " ", cat_norm)
+            if cat_norm and cat_norm not in mapping_cache:
                 raise ValueError(
-                    f"Inventory enabled but cannot create Inventory item for {name!r}: missing {', '.join(missing)}. "
-                    "Add category to CSV, ensure Product.Mapping.csv has this category, or disable inventory for Service items."
+                    f"Category {category!r} (normalized: {cat_norm!r}) "
+                    f"is not in Product.Mapping.csv for item {name!r}. "
+                    "Add this category to mappings/Product.Mapping.csv."
                 )
-            category_item_id_val = None
-            if use_item_hierarchy and (category or "").strip():
-                try:
-                    category_item_id_val = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_item_cache)
-                except Exception:
-                    pass
-            # Attempt Inventory creation; do not fall back to Service on failure
-            new_id = create_inventory_item(
-                name, category, unit_sales_price, unit_purchase_cost,
-                config, token_mgr, realm_id, mapping_cache, account_cache,
-                target_date=target_date,
-                category_item_id=category_item_id_val,
+        if missing:
+            raise ValueError(
+                f"Cannot create Inventory item for {name!r}: missing {', '.join(missing)}. "
+                "Add category to CSV and ensure Product.Mapping.csv has this category."
             )
-            stats["items_created"] += 1
-            item_result_by_name[name] = {"item_id": new_id, "created": True, "type_label": "Inventory", "fallback_reason": None}
-        else:
-            # inventory_enabled is False: create Service (only path that creates Service for new items)
-            create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
-            payload = {"Name": name, "Type": "Service", "IncomeAccountRef": {"value": default_income_account_id}}
-            create_resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
-            if create_resp.status_code in (200, 201):
-                created = create_resp.json().get("Item")
-                if created and created.get("Id"):
-                    stats["items_created"] += 1
-                    item_result_by_name[name] = {"item_id": created.get("Id"), "created": True, "type_label": "Service", "fallback_reason": None}
-                else:
-                    item_result_by_name[name] = {"item_id": default_item_id, "created": False, "type_label": "Default", "fallback_reason": "service_creation_failed"}
-            else:
-                item_result_by_name[name] = {"item_id": default_item_id, "created": False, "type_label": "Default", "fallback_reason": "service_creation_failed"}
+        category_item_id_val = None
+        if (category or "").strip():
+            try:
+                category_item_id_val = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_item_cache)
+            except Exception:
+                pass
+        new_id = create_inventory_item(
+            name, category, unit_sales_price, unit_purchase_cost,
+            config, token_mgr, realm_id, mapping_cache, account_cache,
+            target_date=target_date,
+            category_item_id=category_item_id_val,
+        )
+        stats["items_created"] += 1
+        item_result_by_name[name] = {"item_id": new_id, "created": True, "type_label": "Inventory", "fallback_reason": None}
     return stats
 
 
@@ -1782,16 +1813,16 @@ def build_sales_receipt_payload(
         else:
             item_ref_id, item_was_created, created_type, fallback_reason = get_or_create_item_id(
                 item_name, token_mgr, realm_id, config, item_cache,
-                category=category if config.inventory_enabled else None,
-                unit_sales_price=unit_sales_price_gross if config.inventory_enabled else None,
-                unit_purchase_cost=unit_purchase_cost_gross if config.inventory_enabled else None,
-                mapping_cache=mapping_cache if config.inventory_enabled else None,
-                account_cache=account_cache if config.inventory_enabled else None,
+                category=category,
+                unit_sales_price=unit_sales_price_gross,
+                unit_purchase_cost=unit_purchase_cost_gross,
+                mapping_cache=mapping_cache,
+                account_cache=account_cache,
                 target_date=target_date,
                 items_wrong_type=items_wrong_type,
                 items_autofixed=items_autofixed,
-                category_item_cache=category_item_cache if config.inventory_enabled else None,
-                items_patched_pricing_tax=items_patched_pricing_tax if config.inventory_enabled else None,
+                category_item_cache=category_item_cache,
+                items_patched_pricing_tax=items_patched_pricing_tax,
             )
 
         # Fill in DocNumber and TxnDate for autofixed items
@@ -1812,8 +1843,6 @@ def build_sales_receipt_payload(
 
         if created_type == "Inventory" or created_type == "created_inventory_after_fix":
             inventory_created_count += 1
-        elif created_type == "Service":
-            service_created_count += 1
         elif created_type == "Default":
             default_fallback_count += 1
 
@@ -2142,18 +2171,178 @@ def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def group_blockers_by_item(
+    blockers_csv_or_df: Union[str, Path, pd.DataFrame],
+) -> Dict[str, str]:
+    """
+    Group blockers by item: item_id -> earliest TxnDate (YYYY-MM-DD).
+    Input: path to blockers CSV (str/Path) or DataFrame with ItemId, TxnDate columns.
+    """
+    if isinstance(blockers_csv_or_df, pd.DataFrame):
+        df_block = blockers_csv_or_df
+    else:
+        df_block = pd.read_csv(blockers_csv_or_df)
+    if df_block.empty or "ItemId" not in df_block.columns or "TxnDate" not in df_block.columns:
+        return {}
+    earliest = df_block.groupby("ItemId")["TxnDate"].min()
+    return {str(k): str(v).strip()[:10] for k, v in earliest.items()}
+
+
+def patch_item_inv_start_date(
+    token_mgr: TokenManager,
+    realm_id: str,
+    item_id: str,
+    new_date: str,
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Update Item InvStartDate to new_date (YYYY-MM-DD). Uses full Item update (sparse=False) so
+    QBO stores the date as the inventory adjust date and reflects it in the UI (As of date).
+    GET item first, then POST full entity with InvStartDate set.
+    Never patches Service/NonInventory; never sets InvStartDate forward.
+    Returns (success, old_date_str, error_detail). old_date_str for logging; error_detail if failed.
+    """
+    get_url = f"{BASE_URL}/v3/company/{realm_id}/item/{item_id}?minorversion=70"
+    get_resp = _make_qbo_request("GET", get_url, token_mgr)
+    if get_resp.status_code != 200:
+        try:
+            body = get_resp.json()
+            detail = json.dumps(body)[:500]
+        except Exception:
+            detail = get_resp.text[:500] if get_resp.text else ""
+        print(f"[WARN] patch_item_inv_start_date: GET item {item_id} failed HTTP {get_resp.status_code}: {detail}")
+        return (False, None, f"GET failed: {get_resp.status_code}")
+    data = get_resp.json()
+    item = data.get("Item")
+    if not item:
+        return (False, None, "No Item in GET response")
+    item_type = (item.get("Type") or "").strip()
+    if item_type not in ("Inventory",):
+        print(f"[WARN] patch_item_inv_start_date: skipping item {item_id} (Type={item_type}, not Inventory)")
+        return (False, None, f"Not Inventory (Type={item_type})")
+    if not item.get("SyncToken"):
+        return (False, None, "Item missing SyncToken")
+    old_inv = item.get("InvStartDate")
+    old_date_str = (old_inv[:10] if old_inv and len(str(old_inv)) >= 10 else str(old_inv or "")) or None
+    # Never set InvStartDate forward
+    if old_date_str and new_date:
+        old_dt = _parse_yyyy_mm_dd(old_date_str)
+        new_dt = _parse_yyyy_mm_dd(new_date)
+        if old_dt is not None and new_dt is not None and new_dt >= old_dt:
+            print(f"[INFO] patch_item_inv_start_date: item {item_id} already has InvStartDate={old_date_str} <= new_date={new_date}, skip")
+            return (True, old_date_str, None)
+    # Full update: send entire Item with InvStartDate set (so QBO stores inventory adjust date and reflects in UI)
+    item_payload = dict(item)
+    item_payload["InvStartDate"] = new_date
+    # Remove read-only fields that can cause 400 if sent back
+    for key in ("MetaData",):
+        item_payload.pop(key, None)
+    payload = {"sparse": False, **item_payload}
+    post_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion=70"
+    post_resp = _make_qbo_request("POST", post_url, token_mgr, json=payload)
+    try:
+        post_body = post_resp.json()
+    except Exception:
+        post_body = {}
+    if post_resp.status_code not in (200, 201):
+        detail = json.dumps(post_body)[:500] if post_body else (post_resp.text[:500] if post_resp.text else "")
+        print(f"[WARN] patch_item_inv_start_date: POST item {item_id} failed HTTP {post_resp.status_code}: {detail}")
+        return (False, old_date_str, f"POST failed: {post_resp.status_code} {detail}")
+    # Log success and response InvStartDate for verification (API read still returns original; UI shows adjust date)
+    try:
+        import time as _t
+        _log_path = os.path.join(get_repo_root(), ".cursor", "debug.log")
+        post_item = post_body.get("Item") or {}
+        resp_inv = post_item.get("InvStartDate", "")
+        with open(_log_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({
+                "sessionId": "debug-session",
+                "hypothesisId": "H5",
+                "location": "patch_item_inv_start_date:success",
+                "message": "patch_post_ok_full_update",
+                "data": {
+                    "item_id": item_id,
+                    "new_date": new_date,
+                    "post_status": post_resp.status_code,
+                    "response_InvStartDate": resp_inv,
+                },
+                "timestamp": int(_t.time() * 1000),
+            }) + "\n")
+    except Exception:
+        pass
+    return (True, old_date_str, None)
+
+
+def apply_bypass_swaps_to_payload(
+    payload: dict,
+    blocker_ids: Set[str],
+    bypass_item_id: str,
+    bypass_item_name: str,
+    swap_report_rows: List[Dict[str, Any]],
+    company_key: str,
+    doc_number: str,
+    txn_date: str,
+    reason: str = "InvStartDate",
+) -> int:
+    """
+    Replace SalesReceipt line items whose ItemRef is in blocker_ids with the bypass Service item.
+    Preserves line Amount, tax (TaxCodeRef), and adds audit text to Description.
+    Mutates payload and appends one row per swap to swap_report_rows.
+
+    Returns:
+        Number of lines swapped.
+    """
+    lines = payload.get("Line") or []
+    swapped = 0
+    for line in lines:
+        if line.get("DetailType") != "SalesItemLineDetail":
+            continue
+        detail = line.get("SalesItemLineDetail") or {}
+        item_ref = detail.get("ItemRef") or {}
+        item_id = (item_ref.get("value") or "").strip()
+        if not item_id or item_id not in blocker_ids:
+            continue
+        original_name = (item_ref.get("name") or "").strip() or "(unknown)"
+        amount = line.get("Amount")
+        tax_code_ref = detail.get("TaxCodeRef") or {}
+        tax_code = (tax_code_ref.get("value") or "").strip() or ""
+        # Preserve Amount; set Qty=1 and UnitPrice=Amount so QBO validation holds
+        detail["ItemRef"] = {"value": bypass_item_id, "name": bypass_item_name}
+        detail["Qty"] = 1
+        detail["UnitPrice"] = amount
+        # TaxCodeRef and TaxInclusiveAmt unchanged
+        desc = (line.get("Description") or "").strip()
+        audit = f" [BYPASS_INVSTARTDATE] originalItemId={item_id} originalName={original_name}"
+        line["Description"] = (desc + audit) if desc else audit.strip()
+        swap_report_rows.append({
+            "company": company_key,
+            "receiptDocNo": doc_number,
+            "receiptTxnDate": txn_date,
+            "originalItemId": item_id,
+            "originalItemName": original_name,
+            "bypassItemId": bypass_item_id,
+            "lineAmount": amount,
+            "taxCode": tax_code,
+            "reason": reason,
+        })
+        swapped += 1
+    return swapped
+
+
 def _diagnose_6270_and_report(
     payload: dict,
     token_mgr: TokenManager,
     realm_id: str,
     config: Any,
-) -> None:
+) -> List[str]:
     """
     On QBO 6270: parse payload Line[] (ItemRef.value + Qty), query QBO for those
     items by Id (chunked), log receipt-level summary (DocNumber, TxnDate, then
     each item: Name, Id, InvStartDate, Qty), and append rows to
     reports/inventory_start_date_blockers_{company_key}_{TxnDate}.csv.
     Read-only (no QBO writes). Does not fail the run on diagnostic errors.
+
+    Returns:
+        List of Item IDs that are blocking (InvStartDate > TxnDate).
     """
     doc_number = payload.get("DocNumber", "")
     txn_date = payload.get("TxnDate", "")
@@ -2171,7 +2360,7 @@ def _diagnose_6270_and_report(
         line_items.append((str(item_id), qty))
 
     if not line_items:
-        return
+        return []
 
     # Collect (item_name, category/description) from payload for observability
     payload_line_names: List[Tuple[str, str]] = []
@@ -2228,46 +2417,45 @@ def _diagnose_6270_and_report(
         print(f"[INFO] QBO 6270: {doc_number} (TxnDate={txn_date}) — no items with InvStartDate > TxnDate (list may be incomplete if QBO did not return all item details)")
 
     # Append to blockers CSV: blocking items, or (when none) shortlist of items with missing InvStartDate
-    if not config:
-        return
-    company_key = getattr(config, "company_key", "")
-    if not company_key or not txn_date:
-        return
-    rows_to_write = blocking_items if blocking_items else items_missing_inv_start
-    if not rows_to_write:
-        return
-    out_dir = os.path.join(get_repo_root(), "reports")
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    safe_key = re.sub(r"[^\w-]", "_", company_key)
-    filename = f"inventory_start_date_blockers_{safe_key}_{txn_date}.csv"
-    filepath = os.path.join(out_dir, filename)
-    fieldnames = ["DocNumber", "TxnDate", "ItemId", "ItemName", "InvStartDate", "TrackQtyOnHand", "Active", "QuantityOnReceipt"]
-    file_exists = os.path.exists(filepath)
-    use_missing_shortlist = not blocking_items and items_missing_inv_start
-    with open(filepath, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        if not file_exists:
-            w.writeheader()
-        for item_id, qty in rows_to_write:
-            it = id_to_item.get(item_id, {})
-            inv_start = it.get("InvStartDate", "")
-            inv_date_str = inv_start[:10] if inv_start and len(str(inv_start)) >= 10 else str(inv_start or "")
-            if use_missing_shortlist:
-                inv_date_str = "(missing)"
-            w.writerow({
-                "DocNumber": doc_number,
-                "TxnDate": txn_date,
-                "ItemId": item_id,
-                "ItemName": it.get("Name", ""),
-                "InvStartDate": inv_date_str,
-                "TrackQtyOnHand": it.get("TrackQtyOnHand", ""),
-                "Active": it.get("Active", ""),
-                "QuantityOnReceipt": qty,
-            })
-    if blocking_items:
-        print(f"[INFO] QBO 6270: Appended blockers to {filepath}")
-    else:
-        print(f"[INFO] QBO 6270: Appended missing-InvStartDate shortlist to {filepath}")
+    if config:
+        company_key = getattr(config, "company_key", "")
+        if company_key and txn_date:
+            rows_to_write = blocking_items if blocking_items else items_missing_inv_start
+            if rows_to_write:
+                out_dir = os.path.join(get_repo_root(), "reports")
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                safe_key = re.sub(r"[^\w-]", "_", company_key)
+                filename = f"inventory_start_date_blockers_{safe_key}_{txn_date}.csv"
+                filepath = os.path.join(out_dir, filename)
+                fieldnames = ["DocNumber", "TxnDate", "ItemId", "ItemName", "InvStartDate", "TrackQtyOnHand", "Active", "QuantityOnReceipt"]
+                file_exists = os.path.exists(filepath)
+                use_missing_shortlist = not blocking_items and items_missing_inv_start
+                with open(filepath, "a", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=fieldnames)
+                    if not file_exists:
+                        w.writeheader()
+                    for item_id, qty in rows_to_write:
+                        it = id_to_item.get(item_id, {})
+                        inv_start = it.get("InvStartDate", "")
+                        inv_date_str = inv_start[:10] if inv_start and len(str(inv_start)) >= 10 else str(inv_start or "")
+                        if use_missing_shortlist:
+                            inv_date_str = "(missing)"
+                        w.writerow({
+                            "DocNumber": doc_number,
+                            "TxnDate": txn_date,
+                            "ItemId": item_id,
+                            "ItemName": it.get("Name", ""),
+                            "InvStartDate": inv_date_str,
+                            "TrackQtyOnHand": it.get("TrackQtyOnHand", ""),
+                            "Active": it.get("Active", ""),
+                            "QuantityOnReceipt": qty,
+                        })
+                if blocking_items:
+                    print(f"[INFO] QBO 6270: Appended blockers to {filepath}")
+                else:
+                    print(f"[INFO] QBO 6270: Appended missing-InvStartDate shortlist to {filepath}")
+
+    return [item_id for item_id, _ in blocking_items]
 
 
 def send_sales_receipt(payload: dict, token_mgr: TokenManager, realm_id: str, config=None):
@@ -2416,6 +2604,43 @@ def main():
         "--target-date",
         help="Target date in YYYY-MM-DD format (used when trading_day_enabled is True)",
     )
+    parser.add_argument(
+        "--bypass-inventory-startdate",
+        action="store_true",
+        dest="bypass_inventory_startdate",
+        help="Replace InvStartDate-blocked lines with a Service item (bypass mode); never default",
+    )
+    parser.add_argument(
+        "--bypass-item-name",
+        dest="bypass_item_name",
+        default="EPOS Sales (Bypass)",
+        metavar="NAME",
+        help="Name of the bypass Service item (default: EPOS Sales (Bypass))",
+    )
+    parser.add_argument(
+        "--bypass-income-account",
+        dest="bypass_income_account",
+        metavar="ID",
+        help="Income account ID for bypass Service item (overrides config/env)",
+    )
+    parser.add_argument(
+        "--bypass-report-csv",
+        dest="bypass_report_csv",
+        metavar="PATH",
+        help="Path for bypass swaps report CSV (default: reports/bypass_swaps_<company>_<date>.csv)",
+    )
+    parser.add_argument(
+        "--bypass-blockers-csv",
+        dest="bypass_blockers_csv",
+        metavar="PATH",
+        help="Path to blockers CSV (default: reports/inventory_start_date_blockers_<company>_<date>.csv)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Build payloads and report swaps only; do not upload to QBO",
+    )
     args = parser.parse_args()
     
     # Load company configuration
@@ -2459,6 +2684,40 @@ def main():
     grouped = df.groupby(GROUP_COL)
     print(f"Found {len(grouped)} distinct SalesReceiptNo groups")
 
+    # Bypass inventory start-date mode: load blockers, get-or-create Service item
+    bypass_item_id: Optional[str] = None
+    bypass_item_name: Optional[str] = None
+    blocker_ids: Set[str] = set()
+    swap_report_rows: List[Dict[str, Any]] = []
+    if args.bypass_inventory_startdate:
+        income_account_id = (args.bypass_income_account or "").strip() or (getattr(config, "bypass_income_account_id", None) or "").strip()
+        if not income_account_id:
+            print(
+                "Error: Bypass mode requires bypass income account. "
+                "Set --bypass-income-account ID or config qbo.bypass_income_account_id or "
+                f"{config.company_key.upper().replace('-', '_')}_BYPASS_INCOME_ACCOUNT_ID in env."
+            )
+            sys.exit(1)
+        # Load blocker item IDs from CSV
+        if args.bypass_blockers_csv and os.path.exists(args.bypass_blockers_csv):
+            blockers_path = args.bypass_blockers_csv
+        else:
+            date_for_file = resolved_target_date or "unknown"
+            safe_key = re.sub(r"[^\w-]", "_", config.company_key)
+            blockers_path = os.path.join(repo_root, "reports", f"inventory_start_date_blockers_{safe_key}_{date_for_file}.csv")
+        from qbo_items import get_or_create_service_item, load_blocker_item_ids_from_csv
+        blocker_ids = load_blocker_item_ids_from_csv(blockers_path)
+        print(f"[INFO] Bypass mode: loaded {len(blocker_ids)} blocker item ID(s) from {blockers_path}")
+        bypass_item_name = (args.bypass_item_name or "EPOS Sales (Bypass)").strip()
+        tax_code_id = getattr(config, "tax_code_id", None) or None
+        bypass_item_id, _meta = get_or_create_service_item(
+            token_mgr, config.realm_id, bypass_item_name, income_account_id,
+            tax_code_id=tax_code_id, base_url=BASE_URL, make_request=_make_qbo_request,
+        )
+        print(f"[INFO] Bypass mode: using Service item Id={bypass_item_id} Name={bypass_item_name!r}")
+    if args.dry_run:
+        print("[INFO] Dry run: will not upload to QBO")
+
     # Layer A: Load local ledger of uploaded DocNumbers (for reference/stats only)
     ledger_docnumbers = load_uploaded_docnumbers(repo_root, config)
     print(f"Loaded {len(ledger_docnumbers)} DocNumbers from local ledger")
@@ -2496,46 +2755,30 @@ def main():
     if skip_docnumbers:
         print(f"Skipping {len(skip_docnumbers)} DocNumbers (confirmed existing in QBO with matching TxnDate)")
 
+    # Prefetch QBO items once (used for blocker-from-batch when inventory enabled, and for resolve_all_unique_items)
+    existing_items_by_name: Dict[str, Dict[str, Any]] = prefetch_all_items(token_mgr, config.realm_id)
+    print(f"[INFO] Prefetch: {len(existing_items_by_name)} existing Items loaded from QBO")
+
     item_cache: Dict[str, str] = {}
     department_cache: Dict[str, Optional[str]] = {}
     payment_method_cache: Dict[str, Optional[str]] = {}
     category_item_cache: Dict[str, str] = {}
     
-    # Load category mapping and account cache if inventory enabled
+    # Load category mapping and account cache (items are always created as Inventory)
     mapping_cache: Optional[Dict[str, Dict[str, str]]] = None
     account_cache: Dict[str, Optional[str]] = {}
     inventory_start_date_issues_count = 0
     inventory_start_date_report_path: Optional[str] = None
-    if config.inventory_enabled:
-        print(f"\n[INFO] Inventory mode ENABLED. QtyOnHand starts at {config.default_qty_on_hand}. QBO must allow negative inventory.")
-        print(f"[INFO] Item hierarchy enabled: {getattr(config, 'use_item_hierarchy', False)}")
-        try:
-            mapping_cache = load_category_account_mapping(config)
-            print(f"[INFO] Loaded {len(mapping_cache)} category mappings from {config.product_mapping_file}")
-        except Exception as e:
-            print(f"[ERROR] Failed to load category mapping: {e}")
-            raise
-        # Pre-flight: find inventory items with InvStartDate > target_date (may cause QBO 6270)
-        # Use resolved target_date so pre-flight runs for scheduled runs (e.g. default yesterday) even when CLI --target-date not set
-        if resolved_target_date:
-            print(f"\n[INFO] Running pre-flight inventory start-date check (target_date={resolved_target_date})")
-            try:
-                issues = find_inventory_items_with_future_start_date(token_mgr, config.realm_id, resolved_target_date)
-                inventory_start_date_issues_count = len(issues)
-                if issues:
-                    print(f"[WARN] Found {inventory_start_date_issues_count} inventory items with InvStartDate AFTER target_date={resolved_target_date}. "
-                          "These may fail with QBO error 6270.")
-                    report_path = write_inventory_start_date_issues_report(
-                        issues, config.company_key, resolved_target_date, out_dir=os.path.join(repo_root, "reports")
-                    )
-                    if report_path:
-                        inventory_start_date_report_path = report_path
-                        print(f"[INFO] Report written: {report_path}")
-                else:
-                    print(f"[INFO] Pre-flight: 0 issues found.")
-            except Exception as e:
-                print(f"[WARN] Pre-flight inventory start date check failed (non-blocking): {e}")
-    
+    print(f"\n[INFO] Items created as Inventory. QtyOnHand starts at {config.default_qty_on_hand}. QBO must allow negative inventory.")
+    print("[INFO] Item hierarchy enabled: True")
+    print("[INFO] For InvStartDate issues (QBO 6270), use: python scripts/qbo_inv_manager.py --company <key> list-invstart / set-invstart-bulk")
+    try:
+        mapping_cache = load_category_account_mapping(config)
+        print(f"[INFO] Loaded {len(mapping_cache)} category mappings from {config.product_mapping_file}")
+    except Exception as e:
+        print(f"[ERROR] Failed to load category mapping: {e}")
+        raise
+
     # Pre-fetch tax code for Company B (tax_inclusive_composite mode) to validate it exists
     if config.tax_mode == "tax_inclusive_composite" and config.tax_code_name:
         tax_code_cache: Dict[str, Optional[str]] = {}
@@ -2582,8 +2825,6 @@ def main():
     desired_item_state = build_desired_item_state(df)
     unique_names = list(desired_item_state.keys())
     print(f"[INFO] Item resolution: {len(unique_names)} unique item names from {len(df)} rows")
-    existing_items_by_name = prefetch_all_items(token_mgr, config.realm_id)
-    print(f"[INFO] Prefetch: {len(existing_items_by_name)} existing Items loaded from QBO")
     item_result_by_name: Dict[str, Dict[str, Any]] = {}
     patched_items: Set[str] = set()
     resolve_stats = resolve_all_unique_items(
@@ -2646,6 +2887,22 @@ def main():
             stats["inventory_items_created_count"] += inv_created
             stats["service_items_created_count"] += svc_created
             stats["default_item_fallback_count"] += default_fallback
+
+            doc_number = payload.get("DocNumber", "")
+            txn_date = payload.get("TxnDate", "")
+            # Apply bypass swaps before upload when bypass mode is on
+            if args.bypass_inventory_startdate and bypass_item_id and bypass_item_name:
+                n_swapped = apply_bypass_swaps_to_payload(
+                    payload, blocker_ids, bypass_item_id, bypass_item_name,
+                    swap_report_rows, config.company_key, doc_number, txn_date, reason="InvStartDate",
+                )
+                if n_swapped:
+                    print(f"[INFO] Bypass: swapped {n_swapped} line(s) on {group_key}")
+
+            if args.dry_run:
+                print(f"\n[DRY-RUN] Would send SalesReceiptNo: {group_key} (not uploading)")
+                continue
+
             print(f"\nSending SalesReceiptNo: {group_key}")
             success, inventory_warning, inventory_rejection = send_sales_receipt(payload, token_mgr, config.realm_id, config)
             # Track inventory stats (will be added to stats dict in main)
@@ -2655,10 +2912,31 @@ def main():
             if inventory_rejection:
                 stats.setdefault("inventory_rejections_count", 0)
                 stats["inventory_rejections_count"] += 1
-            
+
             # Success - add to local ledger
             save_uploaded_docnumber(repo_root, group_key, config)
             stats["uploaded"] += 1
+        except RuntimeError as e:
+            err_str = str(e)
+            # Retry once with bypass swaps if QBO 6270 and bypass mode enabled
+            if args.bypass_inventory_startdate and bypass_item_id and bypass_item_name and "6270" in err_str:
+                try:
+                    blocking_ids = _diagnose_6270_and_report(payload, token_mgr, config.realm_id, config)
+                    if blocking_ids:
+                        retry_blockers = set(blocking_ids)
+                        n_swapped = apply_bypass_swaps_to_payload(
+                            payload, retry_blockers, bypass_item_id, bypass_item_name,
+                            swap_report_rows, config.company_key, doc_number, txn_date, reason="InvStartDate_retry",
+                        )
+                        print(f"[INFO] Bypass retry: swapped {n_swapped} line(s) on {group_key}, retrying upload")
+                        success, inventory_warning, inventory_rejection = send_sales_receipt(payload, token_mgr, config.realm_id, config)
+                        save_uploaded_docnumber(repo_root, group_key, config)
+                        stats["uploaded"] += 1
+                        continue
+                except Exception as retry_err:
+                    print(f"\n[ERROR] Bypass retry failed for SalesReceiptNo {group_key}: {retry_err}")
+            print(f"\n[ERROR] Failed to upload SalesReceiptNo {group_key}: {e}")
+            stats["failed"] += 1
         except Exception as e:
             print(f"\n[ERROR] Failed to upload SalesReceiptNo {group_key}: {e}")
             stats["failed"] += 1
@@ -2706,6 +2984,22 @@ def main():
             w.writeheader()
             w.writerows(items_patched_pricing_tax)
         print(f"[INFO] Wrote {len(items_patched_pricing_tax)} item(s) patched (pricing/tax) to {report_path}")
+
+    if args.bypass_inventory_startdate and swap_report_rows:
+        reports_dir = Path(repo_root) / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        target_date_str = resolved_target_date or args.target_date or "unknown"
+        if args.bypass_report_csv and args.bypass_report_csv.strip():
+            bypass_report_path = Path(args.bypass_report_csv.strip())
+        else:
+            safe_key = re.sub(r"[^\w-]", "_", config.company_key)
+            bypass_report_path = reports_dir / f"bypass_swaps_{safe_key}_{target_date_str}.csv"
+        fieldnames = ["company", "receiptDocNo", "receiptTxnDate", "originalItemId", "originalItemName", "bypassItemId", "lineAmount", "taxCode", "reason"]
+        with open(bypass_report_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(swap_report_rows)
+        print(f"[INFO] Bypass: wrote {len(swap_report_rows)} swap(s) to {bypass_report_path}")
 
     # Print summary
     print(f"\n=== Upload Summary ===")

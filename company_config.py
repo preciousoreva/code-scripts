@@ -259,12 +259,27 @@ class CompanyConfig:
 
     @property
     def use_item_hierarchy(self) -> bool:
-        """Whether to use SubItem/ParentRef (category hierarchy) for inventory items (default: False).
-        When False, Sales Receipt Product/Service column shows only product name; when True, QBO shows Parent:Child.
-        ENV override: {COMPANY_KEY}_USE_ITEM_HIERARCHY
+        """Always True. SubItem/ParentRef (category hierarchy) is always used for inventory items.
+        Config/ENV value is ignored; kept for backward compatibility only.
         """
-        env_key = f"{self.company_key.upper()}_USE_ITEM_HIERARCHY"
-        return self._get_env_or_config(env_key, "use_item_hierarchy", False)
+        return True
+
+    @property
+    def auto_fix_inv_start_date_blockers(self) -> bool:
+        """Whether to automatically PATCH Item.InvStartDate for inventory start-date blockers before upload (default: False).
+        ENV override: {COMPANY_KEY}_AUTO_FIX_INV_START_DATE_BLOCKERS
+        """
+        env_key = f"{self.company_key.upper()}_AUTO_FIX_INV_START_DATE_BLOCKERS"
+        return self._get_env_or_config(env_key, "auto_fix_inv_start_date_blockers", False)
+
+    @property
+    def inv_start_date_floor(self) -> str:
+        """Floor date (YYYY-MM-DD) for InvStartDate patches; do not set InvStartDate earlier than this.
+        If not set in config, uses inventory_start_date (resolved)."""
+        explicit = self._data.get("inventory", {}).get("inv_start_date_floor")
+        if explicit is not None and str(explicit).strip():
+            return str(explicit).strip()[:10]
+        return self.inventory_start_date
 
     @property
     def product_mapping_file(self) -> Path:
@@ -272,6 +287,20 @@ class CompanyConfig:
         mapping_file = self._data.get("inventory", {}).get("product_mapping_file", "mappings/Product.Mapping.csv")
         repo_root = Path(__file__).resolve().parent
         return repo_root / mapping_file
+
+    @property
+    def bypass_income_account_id(self) -> Optional[str]:
+        """
+        Income account ID for the bypass Service item (InvStartDate bypass mode).
+        ENV override: {COMPANY_KEY}_BYPASS_INCOME_ACCOUNT_ID
+        Config: qbo.bypass_income_account_id
+        Required when --bypass-inventory-startdate is used.
+        """
+        env_key = f"{self.company_key.upper().replace('-', '_')}_BYPASS_INCOME_ACCOUNT_ID"
+        value = os.environ.get(env_key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        return self._data.get("qbo", {}).get("bypass_income_account_id")
     
     def get_qbo_config(self) -> Dict[str, Any]:
         """Get QBO-specific configuration."""

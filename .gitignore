@@ -86,3 +86,6 @@ CombinedRaw_*.csv
 
 # Repomix / codebase snapshot (generated; not needed in repo)
 repomix-output.xml
+
+# Local debug / env trees (e.g. debugpy, ad-hoc venvs)
+dataPandasLib/
