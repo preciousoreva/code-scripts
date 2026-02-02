@@ -345,7 +345,8 @@ def cmd_get(args: argparse.Namespace, token_mgr: TokenManager, realm_id: str) ->
         items = [item]
     else:
         safe_name = (args.name or "").strip().replace("'", "''")
-        query = f"select Id, Name, Type, Active, ParentRef, FullyQualifiedName, TrackQtyOnHand, InvStartDate, UnitPrice, PurchaseCost, IncomeAccountRef, ExpenseAccountRef, AssetAccountRef from Item where Name = '{safe_name}' maxresults 10"
+        # QBO Query API does not support IncomeAccountRef/ExpenseAccountRef/AssetAccountRef on Item; use GET by Id for those
+        query = f"select Id, Name, Type, Active, ParentRef, FullyQualifiedName, TrackQtyOnHand, InvStartDate, UnitPrice, PurchaseCost from Item where Name = '{safe_name}' maxresults 10"
         url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion={MINORVERSION}"
         resp = _make_qbo_request("GET", url, token_mgr)
         if resp.status_code != 200:

@@ -38,14 +38,22 @@ if str(_REPO_ROOT) not in sys.path:
 from load_env import load_env_file
 from company_config import load_company_config, get_available_companies
 from token_manager import verify_realm_match
-from qbo_upload import BASE_URL, _make_qbo_request, TokenManager
+from qbo_upload import (
+    BASE_URL,
+    _make_qbo_request,
+    TokenManager,
+    prefetch_all_items,
+)
 from slack_notify import notify_import_start, notify_import_success, notify_import_failure
 
 load_env_file()
 
 MINORVERSION = "70"
 
-TOTAL_TOLERANCE = 0.01
+# Accept header vs line sum within this (covers exact match and float rounding for tax-inclusive).
+TOTAL_TOLERANCE = 0.02
+# Header TotalAmt may be tax-inclusive (line sum + 7.5%). Accept either exact or tax-inclusive match.
+TAX_INCLUSIVE_RATE = 1.075
 
 DOCNUMBER_MAX_LEN = 21
 
@@ -313,12 +321,15 @@ def build_bill_payload(
     global_tax_calc: Optional[str] = None,
     department_ref_id: Optional[str] = None,
     sales_term_ref_id: Optional[str] = None,
+    active_items_by_name: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Build QBO Bill JSON payload from one header row and its line rows.
     When exempt_taxcode_id is set, forces TaxCodeRef on all expense lines (Exempt).
     When global_tax_calc is set (e.g. TaxInclusive), sets GlobalTaxCalculation.
     department_ref_id sets Location (DepartmentRef); sales_term_ref_id sets Terms (SalesTermRef).
     DocNumber: uses header if non-empty, else generated BILL-<VENDOR_CODE>-<YYYYMMDD>-<HASH>.
+    ItemBasedExpenseLineDetail lines are resolved by ItemName only (CSV ItemId is ignored;
+    we always use the current active QBO item with that name).
     """
     bill_id_display = header_row.get("BillId", "?")
     vendor_id = _as_int_str(header_row.get("VendorId"))
@@ -386,14 +397,27 @@ def build_bill_payload(
             line_obj["Description"] = desc
 
         if detail_type == "ItemBasedExpenseLineDetail":
-            item_id = _as_int_str(r.get("ItemId"))
-            if not item_id:
-                raise ValueError(f"ItemBased line missing ItemId for BillId={bill_id_display}")
+            item_name = _as_str(r.get("ItemName"))
+            if not item_name:
+                raise ValueError(
+                    f"ItemBased line missing ItemName for BillId={bill_id_display} "
+                    "(bills resolve by ItemName only; CSV ItemId is ignored)"
+                )
             qty = _as_float(r.get("Qty"))
             unit_price = _as_float(r.get("UnitPrice"))
 
+            effective_item_id: Optional[str] = None
+            if active_items_by_name:
+                active_item = active_items_by_name.get(item_name)
+                if isinstance(active_item, dict) and active_item.get("Id"):
+                    effective_item_id = str(active_item["Id"])
+            if not effective_item_id:
+                raise ValueError(
+                    f"No active item in QBO for name {item_name!r} (BillId {bill_id_display})"
+                )
+
             detail: Dict[str, Any] = {
-                "ItemRef": {"value": item_id},
+                "ItemRef": {"value": effective_item_id},
             }
             if qty is not None:
                 detail["Qty"] = qty
@@ -452,13 +476,19 @@ def build_bill_payload(
 
 
 def validate_totals(payload: Dict[str, Any], header_total: Optional[float]) -> None:
-    """Raise ValueError if header TotalAmt exists and does not match sum of line Amount within tolerance."""
+    """Raise ValueError if header TotalAmt exists and does not match sum of line Amount within tolerance.
+    Accepts either: header equals line sum (exact), or header equals line sum * TAX_INCLUSIVE_RATE (7.5% tax-inclusive).
+    """
     line_sum = sum(float(l["Amount"]) for l in payload.get("Line", []))
     if header_total is None:
         return
-    if abs(line_sum - float(header_total)) > TOTAL_TOLERANCE:
+    header_total_f = float(header_total)
+    exact_ok = abs(line_sum - header_total_f) <= TOTAL_TOLERANCE
+    tax_inclusive_ok = abs(header_total_f - line_sum * TAX_INCLUSIVE_RATE) <= TOTAL_TOLERANCE
+    if not (exact_ok or tax_inclusive_ok):
         raise ValueError(
-            f"Total mismatch: header TotalAmt={header_total} vs line sum={line_sum} (tolerance={TOTAL_TOLERANCE})"
+            f"Total mismatch: header TotalAmt={header_total} vs line sum={line_sum} "
+            f"(tolerance={TOTAL_TOLERANCE}; tax-inclusive rate={TAX_INCLUSIVE_RATE})"
         )
 
 
@@ -622,6 +652,26 @@ def main() -> None:
             args.terms_name.strip(), token_mgr, realm_id, entity_cache
         )
 
+    # Resolve item-based lines by ItemName only (ignore CSV ItemIds; they refer to deleted/inactive products)
+    active_items_by_name: Dict[str, Dict[str, Any]] = {}
+    if "DetailType" in lines_df.columns:
+        item_based = lines_df[
+            lines_df["DetailType"].astype(str).str.strip() == "ItemBasedExpenseLineDetail"
+        ]
+        if not item_based.empty:
+            prefetch = prefetch_all_items(token_mgr, realm_id)
+            active_items_by_name = {
+                name: item
+                for name, item in prefetch.items()
+                if item.get("Active", True)
+            }
+            # Bill export ItemName is often FullyQualifiedName (e.g. "DRINKS & BEVERAGES:JUST NATURE KUNU");
+            # QBO Item.Name is the short name (e.g. "JUST NATURE KUNU"). Key by both so lookups find the item.
+            for name, item in list(active_items_by_name.items()):
+                fqn = (item.get("FullyQualifiedName") or "").strip()
+                if fqn and fqn != name and fqn not in active_items_by_name:
+                    active_items_by_name[fqn] = item
+
     created_ids: List[str] = []
     url = f"{BASE_URL}/v3/company/{realm_id}/bill?minorversion={MINORVERSION}"
 
@@ -664,6 +714,7 @@ def main() -> None:
                     global_tax_calc=args.global_tax_calc or None,
                     department_ref_id=department_ref_id,
                     sales_term_ref_id=sales_term_ref_id,
+                    active_items_by_name=active_items_by_name,
                 )
             except ValueError as e:
                 print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)

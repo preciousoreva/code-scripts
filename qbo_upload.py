@@ -2158,6 +2158,18 @@ def _query_items_by_ids(
     return result
 
 
+def query_items_by_ids(
+    token_mgr: TokenManager,
+    realm_id: str,
+    id_list: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    Public wrapper for _query_items_by_ids. Query QBO for Item by Id list.
+    Returns list of dicts with Id, Name, Type, TrackQtyOnHand, InvStartDate, Active.
+    """
+    return _query_items_by_ids(token_mgr, realm_id, id_list)
+
+
 def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[datetime]:
     """Parse YYYY-MM-DD from string (uses first 10 chars if longer). Returns None if invalid."""
     if not s:
