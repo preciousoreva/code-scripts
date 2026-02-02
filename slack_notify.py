@@ -57,6 +57,95 @@ def send_slack_success(message: str, webhook_url: str = None) -> None:
         logging.error(f"Failed to send Slack message: {e}")
 
 
+def notify_import_start(
+    import_type: str,
+    company_key: str,
+    summary: Dict[str, Any],
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when an import operation starts.
+
+    Args:
+        import_type: Label for the operation (e.g. "bills", "products").
+        company_key: Company identifier (e.g. company_a).
+        summary: Dict with at least "total" (number of items to import).
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping import start notification.")
+        return
+    total = summary.get("total", 0)
+    label = "bill(s) to import" if import_type == "bills" else "row(s) to process"
+    message = (
+        f"*{import_type.title()} import started* — {company_key}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Total: {total} {label}"
+    )
+    send_slack_success(message, webhook_url)
+
+
+def notify_import_success(
+    import_type: str,
+    company_key: str,
+    summary: Dict[str, Any],
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when an import operation completes successfully.
+
+    Args:
+        import_type: Label for the operation (e.g. "bills", "products").
+        company_key: Company identifier.
+        summary: Dict with created (required), optional: failed, skipped, total.
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping import success notification.")
+        return
+    created = summary.get("created", 0)
+    failed = summary.get("failed", 0)
+    skipped = summary.get("skipped")
+    total = summary.get("total")
+    parts = [f"Created: {created}", f"Failed: {failed}"]
+    if skipped is not None:
+        parts.append(f"Skipped: {skipped}")
+    if total is not None:
+        parts.append(f"Total: {total}")
+    message = (
+        f"*{import_type.title()} import completed* — {company_key}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• {', '.join(parts)}"
+    )
+    send_slack_success(message, webhook_url)
+
+
+def notify_import_failure(
+    import_type: str,
+    company_key: str,
+    error: str,
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when an import operation fails.
+
+    Args:
+        import_type: Label for the operation (e.g. "bills", "products").
+        company_key: Company identifier.
+        error: Error message string.
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping import failure notification.")
+        return
+    message = (
+        f"*{import_type.title()} import failed* — {company_key}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Error: {error}"
+    )
+    send_slack_success(message, webhook_url)
+
+
 def notify_pipeline_update(
     pipeline_name: str,
     log_file: Path,

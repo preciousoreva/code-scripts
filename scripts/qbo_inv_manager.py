@@ -61,6 +61,7 @@ from qbo_upload import (
     get_or_create_item_category_id,
 )
 from qbo_items import load_blocker_item_ids_from_csv
+from slack_notify import notify_import_start, notify_import_success, notify_import_failure
 
 load_env_file()
 
@@ -766,139 +767,153 @@ def cmd_import_products(args: argparse.Namespace, token_mgr: TokenManager, realm
         print("[INFO] CSV is empty.")
         return 0
 
+    if not dry_run and config.slack_webhook_url:
+        notify_import_start("products", config.company_key, {"total": len(rows)}, config.slack_webhook_url)
+
     created = 0
     skipped = 0
     failed = 0
     report: List[Dict[str, Any]] = []
     create_url = f"{BASE_URL}/v3/company/{realm_id}/item?minorversion={MINORVERSION}"
 
-    for i, row in enumerate(rows):
-        name = _import_row_val(row, "Name")
-        if not name:
-            report.append({"Name": "", "Type": _import_row_val(row, "Type"), "Status": "skipped", "NewId": "", "Error": "Missing Name"})
-            skipped += 1
-            continue
-
-        itype = ( _import_row_val(row, "Type") or "" ).strip()
-        if itype == "Category":
-            report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "Category rows are not created on import"})
-            skipped += 1
-            continue
-
-        # When not --inventory-only, treat every non-Category row as Inventory
-        if force_inventory:
-            itype = "Inventory"
-
-        # Only create Inventory items (skip Service/NonInventory when --inventory-only)
-        if itype != "Inventory":
-            report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "Only Inventory rows in CSV processed (omit --inventory-only to create all as Inventory)"})
-            skipped += 1
-            continue
-
-        category = _import_row_val(row, "ParentRef_Name")
-        if not category or not str(category).strip():
-            report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "No category (ParentRef_Name empty); skipped"})
-            skipped += 1
-            continue
-        if category not in mapping_cache:
-            report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": f"Category {category!r} not in Product.Mapping.csv; skipped"})
-            skipped += 1
-            continue
-
-        try:
-            account_refs = build_account_refs_for_category(
-                category, mapping_cache, account_cache, token_mgr, realm_id, config
-            )
-        except ValueError as e:
-            report.append({"Name": name, "Type": itype, "Status": "failed", "NewId": "", "Error": str(e)})
-            failed += 1
-            continue
-
-        # InvStartDate: --as-of-date overrides CSV then config
-        inv_start = as_of_date or _import_row_val(row, "InvStartDate") or config.inventory_start_date
-        if len(inv_start) > 10:
-            inv_start = inv_start[:10]
-        unit_price = _import_row_float(row, "UnitPrice")
-        purchase_cost = _import_row_float(row, "PurchaseCost")
-        qty = _import_row_int(row, "QtyOnHand")
-        if qty is None:
-            qty = default_qty
-        qty = max(10, qty)  # never 0 or less than 10 for import-products
-        try:
-            category_id = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_cache)
-        except (ValueError, RuntimeError) as e:
-            report.append({"Name": name, "Type": itype, "Status": "failed", "NewId": "", "Error": str(e)})
-            failed += 1
-            continue
-        payload: Dict[str, Any] = {
-            "Name": name,
-            "Type": "Inventory",
-            "TrackQtyOnHand": True,
-            "QtyOnHand": qty,
-            "InvStartDate": inv_start,
-            "UnitPrice": unit_price if unit_price is not None else 0,
-            "PurchaseCost": purchase_cost if purchase_cost is not None else 0,
-            "IncomeAccountRef": account_refs["IncomeAccountRef"],
-            "ExpenseAccountRef": account_refs["ExpenseAccountRef"],
-            "AssetAccountRef": account_refs["AssetAccountRef"],
-            "Description": _import_row_val(row, "Description") or f"Sale(s) of {name}",
-            "PurchaseDesc": _import_row_val(row, "PurchaseDesc") or f"Purchase of {name}",
-            "SubItem": True,
-            "ParentRef": {"value": category_id},
-        }
-        if tax_code_id:
-            payload["SalesTaxCodeRef"] = {"value": tax_code_id}
-            payload["PurchaseTaxCodeRef"] = {"value": tax_code_id}
-            payload["SalesTaxIncluded"] = True
-            payload["PurchaseTaxIncluded"] = True
-            payload["Taxable"] = True
-        if dry_run:
-            print(f"[DRY-RUN] Would create Inventory: {name!r} category={category!r} InvStartDate={inv_start}")
-            report.append({"Name": name, "Type": itype, "Status": "dry-run", "NewId": "", "Error": ""})
-            created += 1
-            continue
-        resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
-        if resp.status_code in (200, 201):
-            created_item = resp.json().get("Item", {})
-            new_id = created_item.get("Id", "")
-            created += 1
-            report.append({"Name": name, "Type": itype, "Status": "created", "NewId": str(new_id), "Error": ""})
-            print(f"[INFO] Created Inventory {name!r} Id={new_id}")
-        else:
-            err = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
-            try:
-                body = resp.json()
-                errs = body.get("Fault", {}).get("Error", []) or body.get("fault", {}).get("error", [])
-                if errs:
-                    err = "; ".join(e.get("Message", e.get("Detail", str(e))) for e in errs)
-            except Exception:
-                pass
-            # Treat duplicate name / already exists as skip so pipeline continues
-            err_lower = (err or "").lower()
-            if "duplicate" in err_lower or "already exists" in err_lower or "name already" in err_lower:
-                report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "Item already exists (duplicate name); skipped"})
+    try:
+        for i, row in enumerate(rows):
+            name = _import_row_val(row, "Name")
+            if not name:
+                report.append({"Name": "", "Type": _import_row_val(row, "Type"), "Status": "skipped", "NewId": "", "Error": "Missing Name"})
                 skipped += 1
-                print(f"[INFO] Skipped {name!r}: item already exists in QBO")
-            else:
-                report.append({"Name": name, "Type": itype, "Status": "failed", "NewId": "", "Error": err})
+                continue
+
+            itype = ( _import_row_val(row, "Type") or "" ).strip()
+            if itype == "Category":
+                report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "Category rows are not created on import"})
+                skipped += 1
+                continue
+
+            # When not --inventory-only, treat every non-Category row as Inventory
+            if force_inventory:
+                itype = "Inventory"
+
+            # Only create Inventory items (skip Service/NonInventory when --inventory-only)
+            if itype != "Inventory":
+                report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "Only Inventory rows in CSV processed (omit --inventory-only to create all as Inventory)"})
+                skipped += 1
+                continue
+
+            category = _import_row_val(row, "ParentRef_Name")
+            if not category or not str(category).strip():
+                report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "No category (ParentRef_Name empty); skipped"})
+                skipped += 1
+                continue
+            if category not in mapping_cache:
+                report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": f"Category {category!r} not in Product.Mapping.csv; skipped"})
+                skipped += 1
+                continue
+
+            try:
+                account_refs = build_account_refs_for_category(
+                    category, mapping_cache, account_cache, token_mgr, realm_id, config
+                )
+            except ValueError as e:
+                report.append({"Name": name, "Type": itype, "Status": "failed", "NewId": "", "Error": str(e)})
                 failed += 1
-                print(f"[FAIL] {name!r}: {err}", file=sys.stderr)
+                continue
 
-    print(f"[INFO] Import: created={created}, skipped={skipped}, failed={failed}")
+            # InvStartDate: --as-of-date overrides CSV then config
+            inv_start = as_of_date or _import_row_val(row, "InvStartDate") or config.inventory_start_date
+            if len(inv_start) > 10:
+                inv_start = inv_start[:10]
+            unit_price = _import_row_float(row, "UnitPrice")
+            purchase_cost = _import_row_float(row, "PurchaseCost")
+            qty = _import_row_int(row, "QtyOnHand")
+            if qty is None:
+                qty = default_qty
+            qty = max(10, qty)  # never 0 or less than 10 for import-products
+            try:
+                category_id = get_or_create_item_category_id(token_mgr, realm_id, category, cache=category_cache)
+            except (ValueError, RuntimeError) as e:
+                report.append({"Name": name, "Type": itype, "Status": "failed", "NewId": "", "Error": str(e)})
+                failed += 1
+                continue
+            payload: Dict[str, Any] = {
+                "Name": name,
+                "Type": "Inventory",
+                "TrackQtyOnHand": True,
+                "QtyOnHand": qty,
+                "InvStartDate": inv_start,
+                "UnitPrice": unit_price if unit_price is not None else 0,
+                "PurchaseCost": purchase_cost if purchase_cost is not None else 0,
+                "IncomeAccountRef": account_refs["IncomeAccountRef"],
+                "ExpenseAccountRef": account_refs["ExpenseAccountRef"],
+                "AssetAccountRef": account_refs["AssetAccountRef"],
+                "Description": _import_row_val(row, "Description") or f"Sale(s) of {name}",
+                "PurchaseDesc": _import_row_val(row, "PurchaseDesc") or f"Purchase of {name}",
+                "SubItem": True,
+                "ParentRef": {"value": category_id},
+            }
+            if tax_code_id:
+                payload["SalesTaxCodeRef"] = {"value": tax_code_id}
+                payload["PurchaseTaxCodeRef"] = {"value": tax_code_id}
+                payload["SalesTaxIncluded"] = True
+                payload["PurchaseTaxIncluded"] = True
+                payload["Taxable"] = True
+            if dry_run:
+                print(f"[DRY-RUN] Would create Inventory: {name!r} category={category!r} InvStartDate={inv_start}")
+                report.append({"Name": name, "Type": itype, "Status": "dry-run", "NewId": "", "Error": ""})
+                created += 1
+                continue
+            resp = _make_qbo_request("POST", create_url, token_mgr, json=payload)
+            if resp.status_code in (200, 201):
+                created_item = resp.json().get("Item", {})
+                new_id = created_item.get("Id", "")
+                created += 1
+                report.append({"Name": name, "Type": itype, "Status": "created", "NewId": str(new_id), "Error": ""})
+                print(f"[INFO] Created Inventory {name!r} Id={new_id}")
+            else:
+                err = resp.text[:500] if resp.text else f"HTTP {resp.status_code}"
+                try:
+                    body = resp.json()
+                    errs = body.get("Fault", {}).get("Error", []) or body.get("fault", {}).get("error", [])
+                    if errs:
+                        err = "; ".join(e.get("Message", e.get("Detail", str(e))) for e in errs)
+                except Exception:
+                    pass
+                # Treat duplicate name / already exists as skip so pipeline continues
+                err_lower = (err or "").lower()
+                if "duplicate" in err_lower or "already exists" in err_lower or "name already" in err_lower:
+                    report.append({"Name": name, "Type": itype, "Status": "skipped", "NewId": "", "Error": "Item already exists (duplicate name); skipped"})
+                    skipped += 1
+                    print(f"[INFO] Skipped {name!r}: item already exists in QBO")
+                else:
+                    report.append({"Name": name, "Type": itype, "Status": "failed", "NewId": "", "Error": err})
+                    failed += 1
+                    print(f"[FAIL] {name!r}: {err}", file=sys.stderr)
 
-    if report_csv_path:
-        out = Path(report_csv_path)
-        if not out.is_absolute():
-            out = _REPO_ROOT / out
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with open(out, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["Name", "Type", "Status", "NewId", "Error"])
-            w.writeheader()
-            w.writerows(report)
-        print(f"[INFO] Report written to {out}")
+        print(f"[INFO] Import: created={created}, skipped={skipped}, failed={failed}")
+        if not dry_run and config.slack_webhook_url:
+            notify_import_success(
+                "products",
+                config.company_key,
+                {"created": created, "skipped": skipped, "failed": failed},
+                config.slack_webhook_url,
+            )
 
-    # Return 0 so pipeline does not fail when some rows fail or are skipped (e.g. duplicate)
-    return 0
+        if report_csv_path:
+            out = Path(report_csv_path)
+            if not out.is_absolute():
+                out = _REPO_ROOT / out
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with open(out, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=["Name", "Type", "Status", "NewId", "Error"])
+                w.writeheader()
+                w.writerows(report)
+            print(f"[INFO] Report written to {out}")
+
+        return 0
+    except Exception as e:
+        if config.slack_webhook_url:
+            notify_import_failure("products", config.company_key, str(e), config.slack_webhook_url)
+        raise
 
 
 def cmd_inactivate_all(args: argparse.Namespace, token_mgr: TokenManager, realm_id: str) -> int:

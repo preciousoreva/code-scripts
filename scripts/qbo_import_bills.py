@@ -39,6 +39,7 @@ from load_env import load_env_file
 from company_config import load_company_config, get_available_companies
 from token_manager import verify_realm_match
 from qbo_upload import BASE_URL, _make_qbo_request, TokenManager
+from slack_notify import notify_import_start, notify_import_success, notify_import_failure
 
 load_env_file()
 
@@ -640,91 +641,111 @@ def main() -> None:
         print(f"  terms-name: {args.terms_name!r}")
         print(f"  resolved SalesTermRef Id: {sales_term_ref_id or '(none)'}")
 
-    for bill_id in bill_ids:
-        header_match = _normalize_bill_id_for_filter(headers_df, bill_id)
-        if header_match.empty:
-            logger.warning("BillId %s not found in headers CSV; skipping.", bill_id)
-            continue
-        bill_lines = _normalize_bill_id_for_filter(lines_df, bill_id)
-        if bill_lines.empty:
-            logger.warning("BillId %s has no lines in lines CSV; skipping.", bill_id)
-            continue
+    if not args.dry_run and bill_ids and config.slack_webhook_url:
+        notify_import_start("bills", args.company, {"total": len(bill_ids)}, config.slack_webhook_url)
 
-        header_row = header_match.iloc[0]
-        try:
-            payload = build_bill_payload(
-                header_row,
-                bill_lines,
-                exempt_taxcode_id=exempt_taxcode_id,
-                global_tax_calc=args.global_tax_calc or None,
-                department_ref_id=department_ref_id,
-                sales_term_ref_id=sales_term_ref_id,
-            )
-        except ValueError as e:
-            print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        for bill_id in bill_ids:
+            header_match = _normalize_bill_id_for_filter(headers_df, bill_id)
+            if header_match.empty:
+                logger.warning("BillId %s not found in headers CSV; skipping.", bill_id)
+                continue
+            bill_lines = _normalize_bill_id_for_filter(lines_df, bill_id)
+            if bill_lines.empty:
+                logger.warning("BillId %s has no lines in lines CSV; skipping.", bill_id)
+                continue
 
-        header_total = _as_float(header_row.get("TotalAmt"))
-        try:
-            validate_totals(payload, header_total)
-        except ValueError as e:
-            print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)
-            sys.exit(1)
+            header_row = header_match.iloc[0]
+            try:
+                payload = build_bill_payload(
+                    header_row,
+                    bill_lines,
+                    exempt_taxcode_id=exempt_taxcode_id,
+                    global_tax_calc=args.global_tax_calc or None,
+                    department_ref_id=department_ref_id,
+                    sales_term_ref_id=sales_term_ref_id,
+                )
+            except ValueError as e:
+                print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)
+                if not args.dry_run and config.slack_webhook_url:
+                    notify_import_failure("bills", args.company, str(e), config.slack_webhook_url)
+                sys.exit(1)
 
-        line_count = len(payload.get("Line", []))
-        line_sum = sum(float(l["Amount"]) for l in payload["Line"])
-        vendor_id = payload.get("VendorRef", {}).get("value", "?")
-        txn_date = payload.get("TxnDate", "?")
-        doc_number = payload.get("DocNumber", "(none)")
+            header_total = _as_float(header_row.get("TotalAmt"))
+            try:
+                validate_totals(payload, header_total)
+            except ValueError as e:
+                print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)
+                if not args.dry_run and config.slack_webhook_url:
+                    notify_import_failure("bills", args.company, str(e), config.slack_webhook_url)
+                sys.exit(1)
 
-        if args.dry_run:
-            print(f"\n--- BillId {bill_id} ---")
-            print(f"  VendorId: {vendor_id}")
-            print(f"  TxnDate: {txn_date}")
-            print(f"  DocNumber: {doc_number}")
-            print(f"  Line count: {line_count}")
-            print(f"  Line total: {line_sum}")
-            if header_total is not None:
-                print(f"  Header TotalAmt: {header_total}")
+            line_count = len(payload.get("Line", []))
+            line_sum = sum(float(l["Amount"]) for l in payload["Line"])
+            vendor_id = payload.get("VendorRef", {}).get("value", "?")
+            txn_date = payload.get("TxnDate", "?")
+            doc_number = payload.get("DocNumber", "(none)")
+
+            if args.dry_run:
+                print(f"\n--- BillId {bill_id} ---")
+                print(f"  VendorId: {vendor_id}")
+                print(f"  TxnDate: {txn_date}")
+                print(f"  DocNumber: {doc_number}")
+                print(f"  Line count: {line_count}")
+                print(f"  Line total: {line_sum}")
+                if header_total is not None:
+                    print(f"  Header TotalAmt: {header_total}")
+                if len(bill_ids) == 1:
+                    print("\n=== Tax settings ===")
+                    print(f"  taxcode-name: {args.taxcode_name!r}")
+                    print(f"  resolved TaxCode Id: {exempt_taxcode_id or '(not resolved)'}")
+                    print(f"  GlobalTaxCalculation: {payload.get('GlobalTaxCalculation', '(none)')}")
+                    print("\n=== Line TaxCodeRef applied ===")
+                    for i, line in enumerate(payload.get("Line", [])):
+                        detail = line.get("ItemBasedExpenseLineDetail") or line.get("AccountBasedExpenseLineDetail") or {}
+                        tax_ref = detail.get("TaxCodeRef", {}).get("value", "(none)")
+                        print(f"  Line {i + 1}: TaxCodeRef.value = {tax_ref}")
+                    print("\n=== Bill payload (for QBO POST /bill) ===")
+                    print(json.dumps(payload, indent=2))
+                continue
+
             if len(bill_ids) == 1:
-                print("\n=== Tax settings ===")
-                print(f"  taxcode-name: {args.taxcode_name!r}")
-                print(f"  resolved TaxCode Id: {exempt_taxcode_id or '(not resolved)'}")
-                print(f"  GlobalTaxCalculation: {payload.get('GlobalTaxCalculation', '(none)')}")
-                print("\n=== Line TaxCodeRef applied ===")
-                for i, line in enumerate(payload.get("Line", [])):
-                    detail = line.get("ItemBasedExpenseLineDetail") or line.get("AccountBasedExpenseLineDetail") or {}
-                    tax_ref = detail.get("TaxCodeRef", {}).get("value", "(none)")
-                    print(f"  Line {i + 1}: TaxCodeRef.value = {tax_ref}")
-                print("\n=== Bill payload (for QBO POST /bill) ===")
-                print(json.dumps(payload, indent=2))
-            continue
+                print(f"DocNumber: {doc_number}")
 
-        if len(bill_ids) == 1:
-            print(f"DocNumber: {doc_number}")
+            resp = _make_qbo_request("POST", url, token_mgr, json=payload, timeout=60)
+            if resp.status_code >= 400:
+                err_msg = f"QBO POST failed for BillId {bill_id} ({resp.status_code}): {resp.text[:500]}"
+                print(f"Error: {err_msg}", file=sys.stderr)
+                if not args.dry_run and config.slack_webhook_url:
+                    notify_import_failure("bills", args.company, err_msg, config.slack_webhook_url)
+                sys.exit(1)
 
-        resp = _make_qbo_request("POST", url, token_mgr, json=payload, timeout=60)
-        if resp.status_code >= 400:
-            print(
-                f"Error: QBO POST failed for BillId {bill_id} ({resp.status_code}): {resp.text[:1000]}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        result = resp.json()
-        bill = result.get("Bill") or {}
-        created_id = bill.get("Id")
-        if created_id:
-            created_ids.append(created_id)
-        print(f"Created Bill Id: {created_id} (from CSV BillId {bill_id})")
-        if len(bill_ids) == 1:
-            print("\n=== Created Bill (QBO response) ===")
-            print(json.dumps(bill, indent=2))
+            result = resp.json()
+            bill = result.get("Bill") or {}
+            created_id = bill.get("Id")
+            if created_id:
+                created_ids.append(created_id)
+            print(f"Created Bill Id: {created_id} (from CSV BillId {bill_id})")
+            if len(bill_ids) == 1:
+                print("\n=== Created Bill (QBO response) ===")
+                print(json.dumps(bill, indent=2))
+    except Exception as e:
+        if not args.dry_run and config.slack_webhook_url:
+            notify_import_failure("bills", args.company, str(e), config.slack_webhook_url)
+        raise
 
     if args.dry_run:
         print(f"\nDry-run complete: {len(bill_ids)} bill(s) would be imported.")
-    elif created_ids:
-        print(f"\nImported {len(created_ids)} bill(s): {', '.join(created_ids)}")
+    else:
+        if config.slack_webhook_url:
+            notify_import_success(
+                "bills",
+                args.company,
+                {"created": len(created_ids), "total": len(bill_ids)},
+                config.slack_webhook_url,
+            )
+        if created_ids:
+            print(f"\nImported {len(created_ids)} bill(s): {', '.join(created_ids)}")
 
 
 if __name__ == "__main__":
