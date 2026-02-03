@@ -102,10 +102,36 @@ def _match_item(
     csv_name: str,
     indexed_items: List[Tuple[str, Dict[str, Any]]],
     min_similarity: float,
-) -> Tuple[Optional[Dict[str, Any]], float, Optional[str]]:
+    aliases: Dict[str, str],
+) -> Tuple[Optional[Dict[str, Any]], float, Optional[str], bool]:
     target = _normalize_name(csv_name)
     if not target:
-        return None, 0.0, None
+        return None, 0.0, None, False
+
+    alias_used = False
+    alias_target = aliases.get(target)
+    if alias_target:
+        alias_used = True
+        # Try exact alias name match first
+        for candidate_name, item in indexed_items:
+            if candidate_name == alias_target:
+                return item, 1.0, candidate_name, True
+        # Fallback: fuzzy against alias target
+        alias_norm = _normalize_name(alias_target)
+        best_item = None
+        best_score = 0.0
+        best_name = None
+        for candidate_name, item in indexed_items:
+            cand = _normalize_name(candidate_name)
+            if not cand:
+                continue
+            score = _similarity(alias_norm, cand)
+            if score > best_score:
+                best_score = score
+                best_item = item
+                best_name = candidate_name
+        if best_item:
+            return best_item, best_score, best_name, True
     best_item = None
     best_score = 0.0
     best_name = None
@@ -119,8 +145,8 @@ def _match_item(
             best_item = item
             best_name = candidate_name
     if best_score >= min_similarity:
-        return best_item, best_score, best_name
-    return None, best_score, best_name
+        return best_item, best_score, best_name, False
+    return None, best_score, best_name, False
 
 
 def _write_report(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -131,12 +157,32 @@ def _write_report(path: Path, rows: List[Dict[str, Any]]) -> None:
     df.to_csv(path, index=False)
 
 
+def _load_aliases(path: Optional[str]) -> Dict[str, str]:
+    if not path:
+        return {}
+    alias_path = Path(path)
+    if not alias_path.exists():
+        return {}
+    df = pd.read_csv(alias_path)
+    if "CsvItemName" not in df.columns or "QboItemName" not in df.columns:
+        return {}
+    aliases = {}
+    for _, row in df.iterrows():
+        key = _normalize_name(str(row.get("CsvItemName", "")))
+        val = str(row.get("QboItemName", "")).strip()
+        if key and val:
+            aliases[key] = val
+    return aliases
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Import Invoices from CSV into QBO (company_a only).")
     parser.add_argument("--company", required=True, help="Company key (company_a)")
     parser.add_argument("--csv", required=True, help="Path to invoice CSV")
     parser.add_argument("--dry-run", action="store_true", help="Do not upload invoices, just log actions")
+    parser.add_argument("--validate-only", action="store_true", help="Only validate/match and report; no uploads")
     parser.add_argument("--min-similarity", type=float, default=0.90, help="Min fuzzy match score (0-1)")
+    parser.add_argument("--aliases", help="Optional CSV of item aliases (CsvItemName,QboItemName)")
     args = parser.parse_args()
 
     config = load_company_config(args.company)
@@ -162,6 +208,7 @@ def main() -> int:
     items_by_name = prefetch_all_items(token_mgr, config.realm_id)
     items_by_name = {name: item for name, item in items_by_name.items() if item.get("Active", True)}
     indexed_items = _build_item_index(items_by_name)
+    aliases = _load_aliases(args.aliases)
 
     # Resolve No VAT tax code once
     tax_code_cache: Dict[str, Optional[str]] = {}
@@ -201,6 +248,16 @@ def main() -> int:
     invoices_created = 0
     lines_uploaded = 0
     lines_skipped = 0
+    missing_customers: List[Dict[str, Any]] = []
+
+    # Pre-validate customers
+    unique_customers = sorted({str(c).strip() for c in df["Customer"].dropna().tolist() if str(c).strip()})
+    customer_id_cache: Dict[str, Optional[str]] = {}
+    for cust in unique_customers:
+        cust_id = _get_customer_id_by_name(cust, token_mgr, config.realm_id)
+        customer_id_cache[cust] = cust_id
+        if not cust_id:
+            missing_customers.append({"Customer": cust, "Reason": "not_found"})
 
     for (customer_name, invoice_date), group in grouped:
         customer_name = str(customer_name).strip()
@@ -208,7 +265,7 @@ def main() -> int:
             print("[WARN] Skipping group with empty Customer name.")
             continue
 
-        customer_id = _get_customer_id_by_name(customer_name, token_mgr, config.realm_id)
+        customer_id = customer_id_cache.get(customer_name)
         if not customer_id:
             print(f"[ERROR] Customer not found in QBO: {customer_name}")
             continue
@@ -228,7 +285,12 @@ def main() -> int:
         lines = []
         for _, row in group.iterrows():
             csv_item_name = str(row.get("ItemName", "")).strip()
-            item, score, matched_name = _match_item(csv_item_name, indexed_items, args.min_similarity)
+            item, score, matched_name, alias_used = _match_item(
+                csv_item_name,
+                indexed_items,
+                args.min_similarity,
+                aliases,
+            )
             if not item:
                 lines_skipped += 1
                 skip_rows.append({
@@ -276,6 +338,7 @@ def main() -> int:
                 "MatchedItemName": item_name,
                 "MatchedItemId": item_id,
                 "Similarity": round(score, 4),
+                "AliasUsed": alias_used,
                 "Qty": qty,
                 "Rate": rate,
                 "Amount": amount,
@@ -301,7 +364,7 @@ def main() -> int:
                 if department_id:
                     payload["DepartmentRef"] = {"value": department_id}
 
-        if args.dry_run:
+        if args.validate_only or args.dry_run:
             print(f"[DRY-RUN] Would create Invoice {doc_number} for {customer_name} ({len(lines)} lines)")
         else:
             url = f"{BASE_URL}/v3/company/{config.realm_id}/invoice?minorversion=70"
@@ -315,6 +378,7 @@ def main() -> int:
     # Reports
     _write_report(reports_dir / f"invoice_item_matches_{timestamp}.csv", match_rows)
     _write_report(reports_dir / f"invoice_unmatched_items_{timestamp}.csv", skip_rows)
+    _write_report(reports_dir / f"invoice_missing_customers_{timestamp}.csv", missing_customers)
 
     print("\n=== Invoice Import Summary ===")
     print(f"Invoices created: {invoices_created}")
@@ -324,6 +388,8 @@ def main() -> int:
         print(f"Unmatched items report: reports/invoice_unmatched_items_{timestamp}.csv")
     if match_rows:
         print(f"Match report: reports/invoice_item_matches_{timestamp}.csv")
+    if missing_customers:
+        print(f"Missing customers report: reports/invoice_missing_customers_{timestamp}.csv")
     return 0
 
 

@@ -615,6 +615,7 @@ Use `scripts/qbo_import_invoices.py` to create QBO invoices from a CSV. This is 
 
 - Company scope: **company_a only**
 - Item matching: fuzzy match to existing QBO items only (no new items created)
+- Optional alias mapping: `templates/item_aliases.csv` (CsvItemName → QboItemName)
 - Unmatched items are skipped and reported in `reports/`
 - Tax: all lines set to **No VAT**
 
@@ -628,6 +629,12 @@ python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoic
 
 ```bash
 python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoices.csv --dry-run
+```
+
+**Validate only + aliases**
+
+```bash
+python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoices.csv --validate-only --aliases templates/item_aliases.csv
 ```
 
 | Subcommand | Purpose | Example |

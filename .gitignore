@@ -35,6 +35,7 @@ __pycache__/
 !mappings/Product.Mapping.csv
 # Allow invoice CSV template
 !templates/invoice_template.csv
+!templates/item_aliases.csv
 last_epos_transform.json
 transform_metadata.json
 
