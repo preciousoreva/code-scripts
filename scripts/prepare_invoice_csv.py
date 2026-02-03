@@ -250,8 +250,10 @@ def main() -> int:
     # Ensure column order
     out_df = out_df[REQUIRED_OUT_COLS]
 
-    prepared_path = src_path.with_name(f"{src_path.stem}_prepared.csv")
-    unmatched_path = src_path.with_name(f"{src_path.stem}_unmatched.csv")
+    exports_dir = src_path.parent / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    prepared_path = exports_dir / f"{src_path.stem}_prepared.csv"
+    unmatched_path = exports_dir / f"{src_path.stem}_unmatched.csv"
     out_df.to_csv(prepared_path, index=False)
 
     if unmatched_rows:
