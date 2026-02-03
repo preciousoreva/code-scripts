@@ -589,6 +589,47 @@ Ad-hoc query and debug scripts live in `scripts/qbo_queries/`. Run from repo roo
 
 The inventory manager lives in `scripts/qbo_inv_manager.py` and consolidates item lookup, InvStartDate listing, and InvStartDate patching. Run from repo root with `--company` (required).
 
+### Invoice import (company_a only)
+
+Use `scripts/qbo_import_invoices.py` to create QBO invoices from a CSV. This is **separate** from the sales receipt pipeline.
+
+**Template:** `templates/invoice_template.csv`
+
+**Required columns**
+
+- `Customer`
+- `InvoiceDate` (YYYY-MM-DD)
+- `ItemName`
+- `Qty`
+- `Rate`
+- `Amount`
+
+**Optional columns**
+
+- `ServiceDate` (defaults to `InvoiceDate`)
+- `Description` (used only if matched item has no description)
+- `Location` (maps to QBO Department/Location)
+- `DueDate` (defaults to `InvoiceDate + 30 days`)
+
+**Notes**
+
+- Company scope: **company_a only**
+- Item matching: fuzzy match to existing QBO items only (no new items created)
+- Unmatched items are skipped and reported in `reports/`
+- Tax: all lines set to **No VAT**
+
+**Run**
+
+```bash
+python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoices.csv
+```
+
+**Dry run**
+
+```bash
+python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoices.csv --dry-run
+```
+
 | Subcommand | Purpose | Example |
 |------------|---------|---------|
 | `get` | Get item by ID or search by name | `python scripts/qbo_inv_manager.py --company company_a get --item-id 7220` or `get --name "NAN-OPTIPRO"` |
