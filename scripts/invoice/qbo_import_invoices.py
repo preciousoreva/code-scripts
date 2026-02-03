@@ -10,6 +10,10 @@ from typing import Dict, Any, Optional, List, Tuple
 
 import pandas as pd
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from load_env import load_env_file
 from company_config import load_company_config
 from token_manager import verify_realm_match
@@ -21,6 +25,7 @@ from qbo_upload import (
     get_tax_code_id_by_name,
     get_department_id,
 )
+from slack_notify import notify_invoice_import_start, notify_invoice_import_success
 
 load_env_file()
 
@@ -41,8 +46,43 @@ def _normalize_name(value: str) -> str:
     return value
 
 
+def _load_spelling_corrections(path: Optional[str]) -> Dict[str, str]:
+    """Load Wrong,Correct pairs from CSV; keys are normalized (lowercase) for matching."""
+    if not path or not str(path).strip():
+        return {}
+    p = Path(path)
+    if not p.is_absolute():
+        p = _REPO_ROOT / p
+    if not p.exists():
+        return {}
+    df = pd.read_csv(p)
+    if "Wrong" not in df.columns or "Correct" not in df.columns:
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        wrong = str(row.get("Wrong", "")).strip().lower()
+        correct = str(row.get("Correct", "")).strip()
+        if wrong and correct:
+            out[wrong] = correct
+    return out
+
+
+def _correct_spelling(normalized: str, spelling_corrections: Dict[str, str]) -> str:
+    """Replace known misspellings (whole words) with correct spelling for matching."""
+    if not normalized or not spelling_corrections:
+        return normalized
+    words = normalized.split()
+    corrected = [spelling_corrections.get(w, w) for w in words]
+    return " ".join(corrected)
+
+
 def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
+
+
+# Never choose these as fuzzy match for product/invoice lines (generic QBO items).
+BLOCKLIST_NORMALIZED = frozenset({"services", "hours", "service", "hour"})
+CONTAINMENT_MIN_SCORE = 0.95  # min score when candidate name contains the query in full
 
 
 def _parse_date(value: str) -> str:
@@ -103,8 +143,9 @@ def _match_item(
     indexed_items: List[Tuple[str, Dict[str, Any]]],
     min_similarity: float,
     aliases: Dict[str, str],
+    spelling_corrections: Dict[str, str],
 ) -> Tuple[Optional[Dict[str, Any]], float, Optional[str], bool]:
-    target = _normalize_name(csv_name)
+    target = _correct_spelling(_normalize_name(csv_name), spelling_corrections)
     if not target:
         return None, 0.0, None, False
 
@@ -117,7 +158,7 @@ def _match_item(
             if candidate_name == alias_target:
                 return item, 1.0, candidate_name, True
         # Fallback: fuzzy against alias target
-        alias_norm = _normalize_name(alias_target)
+        alias_norm = _correct_spelling(_normalize_name(alias_target), spelling_corrections)
         best_item = None
         best_score = 0.0
         best_name = None
@@ -125,7 +166,17 @@ def _match_item(
             cand = _normalize_name(candidate_name)
             if not cand:
                 continue
+            if cand in BLOCKLIST_NORMALIZED:
+                continue
             score = _similarity(alias_norm, cand)
+            if alias_norm and alias_norm in cand:
+                score = max(score, CONTAINMENT_MIN_SCORE)
+            if alias_norm and " " in alias_norm:
+                cand_padded = f" {cand} "
+                for word in alias_norm.split():
+                    if len(word) >= 2 and f" {word} " in cand_padded:
+                        score = max(score, CONTAINMENT_MIN_SCORE)
+                        break
             if score > best_score:
                 best_score = score
                 best_item = item
@@ -139,7 +190,17 @@ def _match_item(
         cand = _normalize_name(candidate_name)
         if not cand:
             continue
+        if cand in BLOCKLIST_NORMALIZED:
+            continue
         score = _similarity(target, cand)
+        if target and target in cand:
+            score = max(score, CONTAINMENT_MIN_SCORE)
+        if target and " " in target:
+            cand_padded = f" {cand} "
+            for word in target.split():
+                if len(word) >= 2 and f" {word} " in cand_padded:
+                    score = max(score, CONTAINMENT_MIN_SCORE)
+                    break
         if score > best_score:
             best_score = score
             best_item = item
@@ -183,6 +244,7 @@ def main() -> int:
     parser.add_argument("--validate-only", action="store_true", help="Only validate/match and report; no uploads")
     parser.add_argument("--min-similarity", type=float, default=0.90, help="Min fuzzy match score (0-1)")
     parser.add_argument("--aliases", help="Optional CSV of item aliases (CsvItemName,QboItemName)")
+    parser.add_argument("--spelling-corrections", default="templates/spelling_corrections.csv", help="Spelling corrections CSV (Wrong,Correct)")
     args = parser.parse_args()
 
     config = load_company_config(args.company)
@@ -201,14 +263,15 @@ def main() -> int:
         print(f"[ERROR] Missing required columns: {', '.join(missing)}")
         return 1
 
+    verify_realm_match(config.company_key, config.realm_id)
     token_mgr = TokenManager(config.company_key, config.realm_id)
-    verify_realm_match(token_mgr, config.realm_id)
 
     # Prefetch items for matching
     items_by_name = prefetch_all_items(token_mgr, config.realm_id)
     items_by_name = {name: item for name, item in items_by_name.items() if item.get("Active", True)}
     indexed_items = _build_item_index(items_by_name)
     aliases = _load_aliases(args.aliases)
+    spelling_corrections = _load_spelling_corrections(args.spelling_corrections)
 
     # Resolve No VAT tax code once
     tax_code_cache: Dict[str, Optional[str]] = {}
@@ -259,6 +322,16 @@ def main() -> int:
         if not cust_id:
             missing_customers.append({"Customer": cust, "Reason": "not_found"})
 
+    created_invoice_totals: List[Tuple[str, str, float]] = []
+    if not args.dry_run and not args.validate_only and config.slack_webhook_url:
+        notify_invoice_import_start(
+            config.display_name,
+            csv_path.name,
+            len(grouped),
+            len(df),
+            config.slack_webhook_url,
+        )
+
     for (customer_name, invoice_date), group in grouped:
         customer_name = str(customer_name).strip()
         if not customer_name:
@@ -290,6 +363,7 @@ def main() -> int:
                 indexed_items,
                 args.min_similarity,
                 aliases,
+                spelling_corrections,
             )
             if not item:
                 lines_skipped += 1
@@ -373,7 +447,21 @@ def main() -> int:
                 print(f"[ERROR] Failed to create invoice {doc_number}: {resp.status_code} {resp.text}")
                 continue
             invoices_created += 1
+            inv_total = sum(line["Amount"] for line in lines)
+            created_invoice_totals.append((doc_number, customer_name, inv_total))
             print(f"[OK] Created invoice {doc_number} ({len(lines)} lines)")
+
+    if not args.dry_run and not args.validate_only and config.slack_webhook_url:
+        grand_total = sum(t[2] for t in created_invoice_totals)
+        notify_invoice_import_success(
+            config.display_name,
+            invoices_created,
+            lines_uploaded,
+            lines_skipped,
+            created_invoice_totals,
+            grand_total,
+            config.slack_webhook_url,
+        )
 
     # Reports
     _write_report(reports_dir / f"invoice_item_matches_{timestamp}.csv", match_rows)
