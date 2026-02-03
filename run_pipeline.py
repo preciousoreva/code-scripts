@@ -390,13 +390,15 @@ def compute_trading_date(dt_wat: datetime, start_hour: int, start_minute: int) -
     return trading_date
 
 
-def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir: str, repo_root: Path, config=None) -> tuple:
+
+
+def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir: str, repo_root: Path, config=None, chunk_size: int = 100000) -> tuple:
     """
     Split a downloaded EPOS CSV into per-day raw files.
     Also writes future out-of-range rows as raw spill files.
-    
+
     Works for both range mode (from_date != to_date) and single-day mode (from_date == to_date).
-    
+
     If trading_day_enabled is True in config:
         - Computes trading_date for each row based on datetime in WAT and trading day cutoff
         - Writes rows to uploads/range_raw/<company_dir>/<from>_to_<to>/BookKeeping_<trading_date>.csv
@@ -404,7 +406,7 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
     If trading_day_enabled is False (default):
         - Uses calendar date (existing behavior)
         - Creates spill files for future dates
-    
+
     Args:
         csv_path: Path to the downloaded CSV file
         from_date: Start date in YYYY-MM-DD format
@@ -412,7 +414,8 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         company_dir: Human-readable company folder name (Title_Case_With_Underscores)
         repo_root: Repository root path
         config: Optional CompanyConfig object (required if trading_day_enabled is True)
-    
+        chunk_size: Read CSV in chunks of this size to reduce memory use
+
     Returns:
         Tuple of three items:
         - date_to_file: Dict mapping in-range date strings (YYYY-MM-DD) to file paths
@@ -426,10 +429,10 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
             - future_spill_details: Dict {date_str: row_count} for Slack notifications (empty if trading_day_enabled)
     """
     from datetime import timezone, timedelta
-    
+
     # WAT timezone (UTC+1)
     WAT_TZ = timezone(timedelta(hours=1))
-    
+
     # Check if trading day mode is enabled
     trading_day_enabled = False
     trading_day_start_hour = 5
@@ -438,25 +441,22 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         trading_day_enabled = config.trading_day_enabled
         trading_day_start_hour = config.trading_day_start_hour
         trading_day_start_minute = config.trading_day_start_minute
-    
+
     if trading_day_enabled:
         logging.info(f"Trading day mode enabled: cutoff={trading_day_start_hour:02d}:{trading_day_start_minute:02d} WAT")
-    
+
     # Parse date range
     from_dt = datetime.strptime(from_date, "%Y-%m-%d")
     to_dt = datetime.strptime(to_date, "%Y-%m-%d")
-    
+
     # Generate all dates in range
     date_list = []
     current = from_dt
     while current <= to_dt:
         date_list.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
-    
-    # Load CSV
-    df = pd.read_csv(csv_path)
-    total_rows = len(df)
-    
+    date_set = set(date_list)
+
     # Parse dates from Date/Time column (fallback to Date)
     def parse_date(value):
         """Parse common date/time strings into a naive datetime."""
@@ -474,14 +474,7 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         if pd.isna(dt):
             return None
         return dt.to_pydatetime()
-    
-    # Get date column (prefer Date/Time, fallback to Date)
-    date_col = "Date/Time" if "Date/Time" in df.columns else "Date"
-    if date_col not in df.columns:
-        raise ValueError(f"CSV must contain either 'Date/Time' or 'Date' column")
-    
-    dates_series = df[date_col].apply(parse_date)
-    
+
     # Convert to WAT timezone and compute trading date or calendar date
     # Also track calendar dates for trading day boundary stats
     def get_date_in_wat(dt):
@@ -495,9 +488,9 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
                 dt = dt.replace(tzinfo=WAT_TZ)
             elif dt.tzinfo != WAT_TZ:
                 dt = dt.astimezone(WAT_TZ)
-            
+
             calendar_date = dt.date()
-            
+
             if trading_day_enabled:
                 # Compute trading date based on cutoff
                 trading_date = compute_trading_date(dt, trading_day_start_hour, trading_day_start_minute)
@@ -507,105 +500,159 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
                 return calendar_date.strftime("%Y-%m-%d"), None
         except (AttributeError, ValueError, TypeError):
             return None, None
-    
-    # Apply function and extract both trading dates and calendar dates
-    date_results = dates_series.apply(get_date_in_wat)
-    date_strings = date_results.apply(lambda x: x[0] if isinstance(x, tuple) else x)
-    
-    # Extract calendar dates for trading day stats (only when trading_day_enabled)
-    calendar_date_strings = None
-    if trading_day_enabled:
-        calendar_date_strings = date_results.apply(lambda x: x[1] if isinstance(x, tuple) and x[1] else None)
-    
-    # Log trading day assignments for debugging (sample a few rows)
-    if trading_day_enabled:
-        sample_indices = min(5, len(df))
-        for idx in range(sample_indices):
-            dt_val = dates_series.iloc[idx]
-            if dt_val is not None and not pd.isna(dt_val):
-                try:
-                    if dt_val.tzinfo is None:
-                        dt_wat = dt_val.replace(tzinfo=WAT_TZ)
-                    else:
-                        dt_wat = dt_val.astimezone(WAT_TZ)
-                    trading_date = compute_trading_date(dt_wat, trading_day_start_hour, trading_day_start_minute)
-                    logging.info(f"Trading day sample: row_datetime={dt_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT => trading_date={trading_date}")
-                except Exception:
-                    pass
-    
-    # Count null/unparseable dates
-    null_count = int(date_strings.isna().sum())
-    if null_count > 0:
-        logging.warning(f"Found {null_count} row(s) with null/unparseable dates (will be ignored)")
-    
-    # Count past dates (< from_date) - log but don't save
-    all_dates = date_strings.dropna().unique()
-    past_dates = [d for d in all_dates if d < from_date]
-    past_count = 0
-    if past_dates:
-        past_mask = date_strings.isin(past_dates)
-        past_count = int(past_mask.sum())
-        logging.info(f"Found {past_count} row(s) for past dates (< {from_date}): {', '.join(sorted(past_dates))} (ignored)")
-    
+
     # Create directory for split files using human-readable company folder name
     split_dir = repo_root / "uploads" / "range_raw" / company_dir / f"{from_date}_to_{to_date}"
     split_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Split by date (in-range) - track row counts without re-reading
+
+    # Output tracking
     date_to_file = {}
+    future_spill_to_file = {}
+    future_spill_details = {}
+
+    in_range_rows_by_date = {}
+    future_rows_by_date = {}
+    past_dates_set = set()
+
+    total_rows = 0
     in_range_count = 0
+    future_count = 0
+    past_count = 0
+    null_count = 0
+
+    split_written = set()
+    spill_written = set()
+
+    trading_day_stats = None
+    if trading_day_enabled:
+        cutoff_str = f"{trading_day_start_hour:02d}:{trading_day_start_minute:02d}"
+        trading_day_stats = {
+            "cutoff": cutoff_str,
+            "by_date": {},
+        }
+
+    sample_logged = 0
+    sample_limit = 5
+
+    date_col = None
+    spill_raw_dir = None
+
+    for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+        if date_col is None:
+            date_col = "Date/Time" if "Date/Time" in chunk.columns else "Date"
+            if date_col not in chunk.columns:
+                raise ValueError("CSV must contain either 'Date/Time' or 'Date' column")
+
+        total_rows += len(chunk)
+        dates_series = chunk[date_col].apply(parse_date)
+
+        # Log trading day assignments for debugging (sample a few rows)
+        if trading_day_enabled and sample_logged < sample_limit:
+            for dt_val in dates_series:
+                if dt_val is not None and not pd.isna(dt_val):
+                    try:
+                        if dt_val.tzinfo is None:
+                            dt_wat = dt_val.replace(tzinfo=WAT_TZ)
+                        else:
+                            dt_wat = dt_val.astimezone(WAT_TZ)
+                        trading_date = compute_trading_date(dt_wat, trading_day_start_hour, trading_day_start_minute)
+                        logging.info(f"Trading day sample: row_datetime={dt_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT => trading_date={trading_date}")
+                        sample_logged += 1
+                        if sample_logged >= sample_limit:
+                            break
+                    except Exception:
+                        pass
+
+        date_results = dates_series.apply(get_date_in_wat)
+        date_strings = date_results.apply(lambda x: x[0] if isinstance(x, tuple) else x)
+
+        # Extract calendar dates for trading day stats (only when trading_day_enabled)
+        calendar_date_strings = None
+        if trading_day_enabled:
+            calendar_date_strings = date_results.apply(lambda x: x[1] if isinstance(x, tuple) and x[1] else None)
+
+        null_mask = date_strings.isna()
+        null_count += int(null_mask.sum())
+        valid_mask = ~null_mask
+
+        # Past dates (< from_date) - log but don't save
+        past_mask = valid_mask & (date_strings < from_date)
+        if past_mask.any():
+            past_count += int(past_mask.sum())
+            try:
+                past_dates_set.update(set(date_strings[past_mask].dropna().unique()))
+            except Exception:
+                pass
+
+        # In-range dates
+        in_range_mask = valid_mask & (date_strings.isin(date_set))
+        if in_range_mask.any():
+            in_range_dates = date_strings[in_range_mask]
+            for date_str, idx in in_range_dates.groupby(in_range_dates).groups.items():
+                sub = chunk.loc[idx]
+                split_filename = f"BookKeeping_{date_str}.csv"
+                split_path = split_dir / split_filename
+                write_header = split_path not in split_written
+                sub.to_csv(split_path, index=False, mode="a", header=write_header)
+                split_written.add(split_path)
+                date_to_file[date_str] = str(split_path)
+                count = len(sub)
+                in_range_rows_by_date[date_str] = in_range_rows_by_date.get(date_str, 0) + count
+                in_range_count += count
+
+                if trading_day_enabled and calendar_date_strings is not None:
+                    cal_series = calendar_date_strings.loc[idx]
+                    stats = trading_day_stats["by_date"].setdefault(
+                        date_str,
+                        {"total": 0, "pre_cutoff_reassigned": 0, "same_calendar_day": 0},
+                    )
+                    stats["total"] += count
+                    next_calendar_date = (datetime.strptime(date_str, "%Y-%m-%d").date() + timedelta(days=1)).strftime("%Y-%m-%d")
+                    stats["pre_cutoff_reassigned"] += int((cal_series == next_calendar_date).sum())
+                    stats["same_calendar_day"] += int((cal_series == date_str).sum())
+
+        # Future out-of-range dates (calendar day mode only)
+        if not trading_day_enabled:
+            future_mask = valid_mask & (date_strings > to_date)
+            if future_mask.any():
+                if spill_raw_dir is None:
+                    spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
+                    spill_raw_dir.mkdir(parents=True, exist_ok=True)
+                future_dates = date_strings[future_mask]
+                for date_str, idx in future_dates.groupby(future_dates).groups.items():
+                    sub = chunk.loc[idx]
+                    spill_filename = f"BookKeeping_raw_spill_{date_str}.csv"
+                    spill_path = spill_raw_dir / spill_filename
+                    write_header = spill_path not in spill_written
+                    sub.to_csv(spill_path, index=False, mode="a", header=write_header)
+                    spill_written.add(spill_path)
+                    future_spill_to_file[date_str] = str(spill_path)
+                    count = len(sub)
+                    future_rows_by_date[date_str] = future_rows_by_date.get(date_str, 0) + count
+                    future_count += count
+
+    # Log summary (no re-reading CSVs needed)
+    if null_count > 0:
+        logging.warning(f"Found {null_count} row(s) with null/unparseable dates (will be ignored)")
+
+    if past_dates_set:
+        logging.info(f"Found {past_count} row(s) for past dates (< {from_date}): {', '.join(sorted(past_dates_set))} (ignored)")
+
     for target_date_str in date_list:
-        target_mask = date_strings == target_date_str
-        target_df = df[target_mask].copy().reset_index(drop=True)
-        
-        if len(target_df) > 0:
-            # Create filename: BookKeeping_YYYY-MM-DD.csv
-            split_filename = f"BookKeeping_{target_date_str}.csv"
-            split_path = split_dir / split_filename
-            target_df.to_csv(split_path, index=False)
-            date_to_file[target_date_str] = str(split_path)
-            in_range_count += len(target_df)
-            logging.info(f"Created split file for {target_date_str}: {split_filename} ({len(target_df)} rows)")
+        if target_date_str in in_range_rows_by_date:
+            count = in_range_rows_by_date[target_date_str]
+            logging.info(f"Created split file for {target_date_str}: BookKeeping_{target_date_str}.csv ({count} rows)")
         else:
             logging.warning(f"No rows found for {target_date_str}, skipping split file")
-    
-    # Identify and write future out-of-range rows as raw spill files
-    # Future = date > to_date
-    # NOTE: In trading day mode, we do NOT create spill files (all rows are assigned to trading dates)
-    future_spill_to_file = {}
-    future_spill_details = {}  # {date: row_count} for notifications
-    future_count = 0
-    
-    if not trading_day_enabled:
-        # Only create spill files in calendar day mode
-        # Get all unique dates that are future (> to_date)
-        future_dates = [d for d in all_dates if d > to_date]
-        
-        if future_dates:
-            # Create spill_raw directory
-            spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
-            spill_raw_dir.mkdir(parents=True, exist_ok=True)
-            
-            logging.info(f"\nFound {len(future_dates)} future date(s) outside range (> {to_date})")
-            
-            for future_date_str in sorted(future_dates):
-                future_mask = date_strings == future_date_str
-                future_df = df[future_mask].copy().reset_index(drop=True)
-                
-                if len(future_df) > 0:
-                    spill_filename = f"BookKeeping_raw_spill_{future_date_str}.csv"
-                    spill_path = spill_raw_dir / spill_filename
-                    future_df.to_csv(spill_path, index=False)
-                    future_spill_to_file[future_date_str] = str(spill_path)
-                    future_spill_details[future_date_str] = len(future_df)
-                    future_count += len(future_df)
-                    logging.info(f"Created raw spill file for {future_date_str}: {spill_filename} ({len(future_df)} rows)")
-    else:
-        logging.info("Trading day mode: skipping spill file creation (all rows assigned to trading dates)")
-    
-    # Log summary (no re-reading CSVs needed)
+
+    if not trading_day_enabled and future_rows_by_date:
+        logging.info(f"\nFound {len(future_rows_by_date)} future date(s) outside range (> {to_date})")
+        for future_date_str in sorted(future_rows_by_date):
+            count = future_rows_by_date[future_date_str]
+            logging.info(f"Created raw spill file for {future_date_str}: BookKeeping_raw_spill_{future_date_str}.csv ({count} rows)")
+
     logging.info(f"\nSplit summary: {in_range_count} rows in-range, {future_count} rows future spill, {past_count} rows past (ignored), {null_count} rows null (ignored)")
-    
+
     # Build stats dict for caller
     split_stats = {
         "total_rows": total_rows,
@@ -613,62 +660,22 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         "future_rows": future_count,
         "past_rows": past_count,
         "null_rows": null_count,
-        "future_spill_details": future_spill_details,
+        "future_spill_details": {k: v for k, v in future_rows_by_date.items()},
     }
-    
+
     # Compute trading day boundary stats if trading day mode is enabled
-    if trading_day_enabled and calendar_date_strings is not None:
-        cutoff_str = f"{trading_day_start_hour:02d}:{trading_day_start_minute:02d}"
-        trading_day_stats = {
-            "cutoff": cutoff_str,
-            "by_date": {}
-        }
-        
-        # For each trading date in the range, compute boundary stats
-        for target_date_str in date_list:
-            if target_date_str not in date_to_file:
-                continue  # Skip dates with no rows
-            
-            # Get rows for this trading date
-            target_mask = date_strings == target_date_str
-            target_calendar_dates = calendar_date_strings[target_mask]
-            
-            # Count rows where calendar_date == trading_date + 1 day (pre-cutoff reassigned)
-            target_trading_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
-            next_calendar_date = (target_trading_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            
-            pre_cutoff_reassigned = 0
-            same_calendar_day = 0
-            total_for_trading_day = int(target_mask.sum())
-            
-            # Count reassigned and same-day rows
-            for cal_date_str in target_calendar_dates:
-                if cal_date_str is None or pd.isna(cal_date_str):
-                    continue
-                if cal_date_str == next_calendar_date:
-                    # Calendar date is D+1, but assigned to trading date D (pre-cutoff)
-                    pre_cutoff_reassigned += 1
-                elif cal_date_str == target_date_str:
-                    # Calendar date equals trading date
-                    same_calendar_day += 1
-            
-            trading_day_stats["by_date"][target_date_str] = {
-                "total": total_for_trading_day,
-                "pre_cutoff_reassigned": pre_cutoff_reassigned,
-                "same_calendar_day": same_calendar_day
-            }
-            
-            # Log trading day adjustment for this date
-            if pre_cutoff_reassigned > 0:
-                logging.info(f"Trading-day adjustment for {target_date_str}: pre-cutoff reassigned={pre_cutoff_reassigned} (cutoff={cutoff_str} WAT)")
-        
+    if trading_day_enabled and trading_day_stats is not None:
+        for target_date_str, stats in trading_day_stats["by_date"].items():
+            if stats.get("pre_cutoff_reassigned", 0) > 0:
+                logging.info(
+                    f"Trading-day adjustment for {target_date_str}: pre-cutoff reassigned={stats['pre_cutoff_reassigned']} "
+                    f"(cutoff={trading_day_stats['cutoff']} WAT)"
+                )
         split_stats["trading_day_stats"] = trading_day_stats
     else:
-        # No trading day stats for calendar day mode
         split_stats["trading_day_stats"] = None
-    
-    return date_to_file, future_spill_to_file, split_stats
 
+    return date_to_file, future_spill_to_file, split_stats
 
 def reconcile_company(company_key: str, target_date: str, config, repo_root: Path) -> dict:
     """

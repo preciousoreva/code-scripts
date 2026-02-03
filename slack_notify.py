@@ -14,6 +14,8 @@ try:
 except ImportError:  # pragma: no cover - best effort
     certifi = None
 
+SLACK_TIMEOUT_SECS = 10
+
 
 def send_slack_success(message: str, webhook_url: str = None) -> None:
     """
@@ -51,7 +53,7 @@ def send_slack_success(message: str, webhook_url: str = None) -> None:
     )
 
     try:
-        with urllib.request.urlopen(req, context=context) as resp:
+        with urllib.request.urlopen(req, context=context, timeout=SLACK_TIMEOUT_SECS) as resp:
             logging.info(f"Slack message sent (status {resp.status})")
     except Exception as e:
         logging.error(f"Failed to send Slack message: {e}")

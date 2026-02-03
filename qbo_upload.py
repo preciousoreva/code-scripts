@@ -7,13 +7,25 @@ import argparse
 import sys
 import re
 import csv
+import contextlib
+import time
 from typing import Optional, Dict, Callable, Any, Tuple, List, Set, Union
 from urllib.parse import quote
-from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import requests
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 from load_env import load_env_file
 from company_config import load_company_config, get_available_companies
 from token_manager import get_access_token, refresh_access_token, verify_realm_match
@@ -22,6 +34,14 @@ from token_manager import get_access_token, refresh_access_token, verify_realm_m
 load_env_file()
 
 BASE_URL = "https://quickbooks.api.intuit.com"
+
+QBO_REQUEST_TIMEOUT = (10, 120)
+QBO_MAX_RETRIES = 3
+QBO_BACKOFF_BASE = 1.0
+QBO_BACKOFF_MAX = 10.0
+QBO_RETRY_STATUS = {429, 500, 502, 503, 504}
+QBO_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_QBO_SESSION = requests.Session()
 
 # Tax code id for your 7.5% VAT ("7.5% S")
 TAX_CODE_ID = "2"
@@ -68,40 +88,71 @@ def get_repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def load_uploaded_docnumbers(repo_root: str, config) -> set:
-    """Load set of DocNumbers that have been successfully uploaded."""
-    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
+
+
+def _read_uploaded_docnumbers(ledger_path: str) -> set:
     if not os.path.exists(ledger_path):
         return set()
-    
     try:
         with open(ledger_path, "r") as f:
             data = json.load(f)
             return set(data.get("docnumbers", []))
     except Exception as e:
-        print(f"[WARN] Failed to load {config.uploaded_docnumbers_file}: {e}")
+        print(f"[WARN] Failed to load {os.path.basename(ledger_path)}: {e}")
         return set()
+
+
+@contextlib.contextmanager
+def _file_lock(lock_path: str):
+    lock_file = open(lock_path, "a+")
+    try:
+        if fcntl:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            lock_file.close()
+
+
+def load_uploaded_docnumbers(repo_root: str, config) -> set:
+    """Load set of DocNumbers that have been successfully uploaded."""
+    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
+    lock_path = ledger_path + ".lock"
+    with _file_lock(lock_path):
+        return _read_uploaded_docnumbers(ledger_path)
 
 
 def save_uploaded_docnumber(repo_root: str, docnumber: str, config) -> None:
     """Add a DocNumber to the uploaded ledger."""
     ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
-    
-    # Load existing
-    docnumbers = load_uploaded_docnumbers(repo_root, config)
-    docnumbers.add(docnumber)
-    
-    # Save back
-    data = {
-        "docnumbers": sorted(list(docnumbers)),
-        "last_updated": datetime.now().isoformat(),
-    }
-    
-    try:
-        with open(ledger_path, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"[WARN] Failed to save {config.uploaded_docnumbers_file}: {e}")
+    lock_path = ledger_path + ".lock"
+    with _file_lock(lock_path):
+        docnumbers = _read_uploaded_docnumbers(ledger_path)
+        docnumbers.add(docnumber)
+        data = {
+            "docnumbers": sorted(list(docnumbers)),
+            "last_updated": datetime.now().isoformat(),
+        }
+        tmp_path = ledger_path + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, ledger_path)
+        except Exception as e:
+            print(f"[WARN] Failed to save {config.uploaded_docnumbers_file}: {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
 
 
 def check_qbo_existing_docnumbers(
@@ -113,14 +164,14 @@ def check_qbo_existing_docnumbers(
 ) -> Tuple[set, dict]:
     """
     Check QBO for existing SalesReceipts by DocNumber.
-    
+
     Args:
         docnumbers: List of DocNumbers to check
         token_mgr: TokenManager instance
         realm_id: QBO Realm ID
         batch_size: Batch size for queries
         target_date: Optional target date (YYYY-MM-DD). If provided, only receipts with matching TxnDate are considered "existing".
-    
+
     Returns:
         Tuple of (existing_docnumbers, date_mismatches):
         - existing_docnumbers: Set of DocNumbers that exist in QBO with matching TxnDate (or any TxnDate if target_date not provided)
@@ -128,7 +179,7 @@ def check_qbo_existing_docnumbers(
     """
     existing = set()
     date_mismatches = {}
-    
+
     # Query in batches to avoid URL length limits
     for i in range(0, len(docnumbers), batch_size):
         batch = docnumbers[i:i + batch_size]
@@ -136,34 +187,36 @@ def check_qbo_existing_docnumbers(
         docnumber_list = "', '".join(d.replace("'", "''") for d in batch)
         query = f"select Id, DocNumber, TxnDate from SalesReceipt where DocNumber in ('{docnumber_list}')"
         url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
-        
-        resp = _make_qbo_request("GET", url, token_mgr)
-        if resp.status_code == 200:
-            data = resp.json()
-            receipts = data.get("QueryResponse", {}).get("SalesReceipt", [])
-            if not isinstance(receipts, list):
-                receipts = [receipts] if receipts else []
-            
-            for receipt in receipts:
-                doc_num = receipt.get("DocNumber")
-                if not doc_num:
-                    continue
-                
-                txn_date = receipt.get("TxnDate")
-                
-                # If target_date is provided, only consider it "existing" if TxnDate matches
-                if target_date and txn_date:
-                    if txn_date == target_date:
-                        existing.add(doc_num)
-                    else:
-                        # Receipt exists but with different TxnDate - this is a date mismatch
-                        date_mismatches[doc_num] = txn_date
-                else:
-                    # No target_date provided - consider any match as existing
-                    existing.add(doc_num)
-    
-    return existing, date_mismatches
 
+        resp = _make_qbo_request("GET", url, token_mgr)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"QBO DocNumber query failed: HTTP {resp.status_code}. {resp.text[:200]}"
+            )
+        data = resp.json()
+        receipts = data.get("QueryResponse", {}).get("SalesReceipt", [])
+        if not isinstance(receipts, list):
+            receipts = [receipts] if receipts else []
+
+        for receipt in receipts:
+            doc_num = receipt.get("DocNumber")
+            if not doc_num:
+                continue
+
+            txn_date = receipt.get("TxnDate")
+
+            # If target_date is provided, only consider it "existing" if TxnDate matches
+            if target_date and txn_date:
+                if txn_date == target_date:
+                    existing.add(doc_num)
+                else:
+                    # Receipt exists but with different TxnDate - this is a date mismatch
+                    date_mismatches[doc_num] = txn_date
+            else:
+                # No target_date provided - consider any match as existing
+                existing.add(doc_num)
+
+    return existing, date_mismatches
 
 def find_latest_single_csv(repo_root: str, config) -> str:
     """
@@ -283,6 +336,24 @@ class TokenManager:
         return self.access_token
 
 
+
+
+def _retry_after_seconds(resp: requests.Response) -> Optional[int]:
+    retry_after = resp.headers.get("Retry-After")
+    if not retry_after:
+        return None
+    try:
+        return max(0, int(retry_after))
+    except ValueError:
+        try:
+            dt = parsedate_to_datetime(retry_after)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0, int((dt - datetime.now(tz=dt.tzinfo)).total_seconds()))
+        except Exception:
+            return None
+
+
 def _make_qbo_request(
     method: str,
     url: str,
@@ -291,36 +362,57 @@ def _make_qbo_request(
 ) -> requests.Response:
     """
     Make a QBO API request with automatic token refresh on 401 errors.
-    
+    Adds timeouts and retry/backoff for transient errors.
+
     Args:
         method: HTTP method ('GET', 'POST', etc.)
         url: Full URL for the request
         token_mgr: TokenManager instance to get/refresh tokens
         **kwargs: Additional arguments to pass to requests (headers, json, data, etc.)
-    
+
     Returns:
         requests.Response object
     """
-    # Ensure headers include the access token
+    method_upper = method.upper()
     headers = kwargs.pop("headers", {})
     if "Authorization" not in headers:
         headers.update(_qbo_headers(token_mgr.get()))
     kwargs["headers"] = headers
-    
-    # Make the request
-    resp = requests.request(method, url, **kwargs)
-    
-    # If we get a 401, refresh token and retry once
-    if resp.status_code == 401:
-        print("[INFO] Got 401, refreshing access token and retrying...")
-        token_mgr.refresh()
-        # Update headers with new token
-        headers["Authorization"] = f"Bearer {token_mgr.get()}"
-        kwargs["headers"] = headers
-        resp = requests.request(method, url, **kwargs)
-    
-    return resp
 
+    timeout = kwargs.pop("timeout", QBO_REQUEST_TIMEOUT)
+    max_retries = kwargs.pop("max_retries", QBO_MAX_RETRIES)
+
+    attempt = 0
+    while True:
+        try:
+            resp = _QBO_SESSION.request(method_upper, url, timeout=timeout, **kwargs)
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt < max_retries and method_upper in QBO_SAFE_METHODS:
+                sleep_for = min(QBO_BACKOFF_MAX, QBO_BACKOFF_BASE * (2 ** attempt))
+                time.sleep(sleep_for)
+                attempt += 1
+                continue
+            raise
+
+        # If we get a 401, refresh token and retry once
+        if resp.status_code == 401 and attempt < max_retries:
+            print("[INFO] Got 401, refreshing access token and retrying...")
+            token_mgr.refresh()
+            headers["Authorization"] = f"Bearer {token_mgr.get()}"
+            kwargs["headers"] = headers
+            attempt += 1
+            continue
+
+        if resp.status_code in QBO_RETRY_STATUS:
+            if attempt < max_retries and (method_upper in QBO_SAFE_METHODS or resp.status_code == 429):
+                retry_after = _retry_after_seconds(resp)
+                if retry_after is None:
+                    retry_after = min(QBO_BACKOFF_MAX, QBO_BACKOFF_BASE * (2 ** attempt))
+                time.sleep(retry_after)
+                attempt += 1
+                continue
+
+        return resp
 
 def get_tax_code_id_by_name(name: str, token_mgr: TokenManager, realm_id: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
     """
@@ -2696,6 +2788,11 @@ def main():
     print(f"DEPOSIT ACCOUNT: {config.deposit_account}")
     print(f"TAX MODE: {config.tax_mode}")
     print("=" * 60)
+
+    inventory_enabled = bool(getattr(config, "inventory_enabled", False))
+    if args.bypass_inventory_startdate and not inventory_enabled:
+        print("Error: --bypass-inventory-startdate requires inventory items to be enabled for this company.")
+        sys.exit(1)
     
     # Resolved target_date: CLI arg, or (when trading-day mode) default to yesterday for pre-flight/single-day behavior
     resolved_target_date: Optional[str] = args.target_date
@@ -2787,36 +2884,35 @@ def main():
     if skip_docnumbers:
         print(f"Skipping {len(skip_docnumbers)} DocNumbers (confirmed existing in QBO with matching TxnDate)")
 
-    # Prefetch QBO items once (used for blocker-from-batch when inventory enabled, and for resolve_all_unique_items)
-    existing_items_by_name: Dict[str, Dict[str, Any]] = prefetch_all_items(token_mgr, config.realm_id)
-    print(f"[INFO] Prefetch: {len(existing_items_by_name)} existing Items loaded from QBO")
+    
+    # Prefetch QBO items once (inventory mode only)
+    existing_items_by_name: Dict[str, Dict[str, Any]] = {}
+    if inventory_enabled:
+        existing_items_by_name = prefetch_all_items(token_mgr, config.realm_id)
+        print(f"[INFO] Prefetch: {len(existing_items_by_name)} existing Items loaded from QBO")
 
     item_cache: Dict[str, str] = {}
     department_cache: Dict[str, Optional[str]] = {}
     payment_method_cache: Dict[str, Optional[str]] = {}
     category_item_cache: Dict[str, str] = {}
-    
-    # Load category mapping and account cache (only if inventory items are enabled)
+
+    # Load category mapping and account cache only when inventory items are enabled
     mapping_cache: Optional[Dict[str, Dict[str, str]]] = None
     account_cache: Dict[str, Optional[str]] = {}
     inventory_start_date_issues_count = 0
     inventory_start_date_report_path: Optional[str] = None
-    
-    if config.inventory_enabled:
+    if inventory_enabled:
         print(f"\n[INFO] Items created as Inventory. QtyOnHand starts at {config.default_qty_on_hand}. QBO must allow negative inventory.")
         print("[INFO] Item hierarchy enabled: True")
         print("[INFO] For InvStartDate issues (QBO 6270), use: python scripts/qbo_inv_manager.py --company <key> list-invstart / set-invstart-bulk")
         try:
             mapping_cache = load_category_account_mapping(config)
             print(f"[INFO] Loaded {len(mapping_cache)} category mappings from {config.product_mapping_file}")
-        except FileNotFoundError as e:
-            print(f"[ERROR] Product.Mapping.csv not found but inventory_enabled=True. {e}")
-            raise
         except Exception as e:
             print(f"[ERROR] Failed to load category mapping: {e}")
             raise
     else:
-        print(f"\n[INFO] Inventory items disabled (enable_inventory_items=false). Items will be created as Service items.")
+        print("[INFO] Inventory items disabled for this company; using default item for all lines.")
 
     # Pre-fetch tax code for Company B (tax_inclusive_composite mode) to validate it exists
     if config.tax_mode == "tax_inclusive_composite" and config.tax_code_name:
@@ -2860,35 +2956,52 @@ def main():
     items_autofixed: List[Dict[str, Any]] = []
     items_patched_pricing_tax: List[Dict[str, Any]] = []
 
+    
+
+
+
     # Phase 1: O(U) item resolution (desired_item_state + prefetch + resolve once per unique name)
     desired_item_state = build_desired_item_state(df)
     unique_names = list(desired_item_state.keys())
     print(f"[INFO] Item resolution: {len(unique_names)} unique item names from {len(df)} rows")
     item_result_by_name: Dict[str, Dict[str, Any]] = {}
     patched_items: Set[str] = set()
-    resolve_stats = resolve_all_unique_items(
-        unique_names,
-        desired_item_state,
-        existing_items_by_name,
-        config,
-        token_mgr,
-        config.realm_id,
-        mapping_cache,
-        account_cache,
-        category_item_cache,
-        args.target_date,
-        item_result_by_name,
-        patched_items,
-        items_wrong_type,
-        items_autofixed,
-        items_patched_pricing_tax,
-    )
-    print(
-        f"[INFO] Item resolution summary: total_lines={len(df)} unique_items={len(item_result_by_name)} "
-        f"items_created={resolve_stats['items_created']} items_patched={resolve_stats['items_patched']} "
-        f"item_lookups_from_prefetch={resolve_stats['lookups_from_prefetch']}"
-    )
-    stats["items_patched_count"] = resolve_stats["items_patched"]
+
+    if inventory_enabled:
+        resolve_stats = resolve_all_unique_items(
+            unique_names,
+            desired_item_state,
+            existing_items_by_name,
+            config,
+            token_mgr,
+            config.realm_id,
+            mapping_cache,
+            account_cache,
+            category_item_cache,
+            args.target_date,
+            item_result_by_name,
+            patched_items,
+            items_wrong_type,
+            items_autofixed,
+            items_patched_pricing_tax,
+        )
+        print(
+            f"[INFO] Item resolution summary: total_lines={len(df)} unique_items={len(item_result_by_name)} "
+            f"items_created={resolve_stats['items_created']} items_patched={resolve_stats['items_patched']} "
+            f"item_lookups_from_prefetch={resolve_stats['lookups_from_prefetch']}"
+        )
+        stats["items_patched_count"] = resolve_stats["items_patched"]
+    else:
+        default_item_id = config.get_qbo_config().get("default_item_id", "1")
+        for name in unique_names:
+            item_result_by_name[name] = {
+                "item_id": default_item_id,
+                "created": False,
+                "type_label": "Default",
+                "fallback_reason": "inventory_disabled",
+            }
+        stats["items_patched_count"] = 0
+        print("[INFO] Inventory disabled: default item will be used for all line items.")
 
     for group_key, group_df in grouped:
         stats["attempted"] += 1
