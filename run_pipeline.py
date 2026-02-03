@@ -1152,13 +1152,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                         found_dir = None
                         for range_folder in company_range_dir.iterdir():
                             if range_folder.is_dir():
-                # Check if this folder contains any of our requested date files
-                test_file = range_folder / f"BookKeeping_{company_dir}_{from_date}.csv"
-                legacy_test_file = range_folder / f"BookKeeping_{from_date}.csv"
-                if test_file.exists() or legacy_test_file.exists():
-                    found_dir = range_folder
-                    logging.info(f"Found files in range folder: {range_folder.name}")
-                    break
+                                # Check if this folder contains any of our requested date files
+                                test_file = range_folder / f"BookKeeping_{company_dir}_{from_date}.csv"
+                                legacy_test_file = range_folder / f"BookKeeping_{from_date}.csv"
+                                if test_file.exists() or legacy_test_file.exists():
+                                    found_dir = range_folder
+                                    logging.info(f"Found files in range folder: {range_folder.name}")
+                                    break
                         
                         if found_dir:
                             split_dir = found_dir
