@@ -7,7 +7,7 @@ import argparse
 import sys
 import re
 import csv
-import contextlib
+import sqlite3
 import time
 from typing import Optional, Dict, Callable, Any, Tuple, List, Set, Union
 from urllib.parse import quote
@@ -18,17 +18,9 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
-try:
-    import msvcrt
-except ImportError:
-    msvcrt = None
 from load_env import load_env_file
 from company_config import load_company_config, get_available_companies
-from token_manager import get_access_token, refresh_access_token, verify_realm_match
+from token_manager import get_access_token, refresh_access_token, verify_realm_match, DB_FILE
 
 # Load .env if present so QBO_* vars are available (shared secrets only)
 load_env_file()
@@ -108,7 +100,7 @@ def get_company_output_dir(repo_root: str, config) -> str:
 
 
 
-def _read_uploaded_docnumbers(ledger_path: str) -> set:
+def _read_uploaded_docnumbers_json(ledger_path: str) -> set:
     if not os.path.exists(ledger_path):
         return set()
     try:
@@ -120,56 +112,72 @@ def _read_uploaded_docnumbers(ledger_path: str) -> set:
         return set()
 
 
-@contextlib.contextmanager
-def _file_lock(lock_path: str):
-    lock_file = open(lock_path, "a+")
+def _init_docnumbers_db() -> None:
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     try:
-        if fcntl:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        elif msvcrt:
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        yield
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS uploaded_docnumbers (
+                company_key TEXT NOT NULL,
+                realm_id TEXT NOT NULL,
+                docnumber TEXT NOT NULL,
+                uploaded_at INTEGER NOT NULL,
+                PRIMARY KEY (company_key, realm_id, docnumber)
+            )
+        """)
+        conn.commit()
     finally:
-        try:
-            if fcntl:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            elif msvcrt:
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        finally:
-            lock_file.close()
+        conn.close()
+
+
+def _migrate_docnumbers_from_json(repo_root: str, config) -> None:
+    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
+    docnumbers = _read_uploaded_docnumbers_json(ledger_path)
+    if not docnumbers:
+        return
+    _init_docnumbers_db()
+    now_ts = int(datetime.now().timestamp())
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.executemany(
+            "INSERT OR IGNORE INTO uploaded_docnumbers (company_key, realm_id, docnumber, uploaded_at) VALUES (?, ?, ?, ?)",
+            [(config.company_key, config.realm_id, doc, now_ts) for doc in docnumbers],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def load_uploaded_docnumbers(repo_root: str, config) -> set:
     """Load set of DocNumbers that have been successfully uploaded."""
-    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
-    lock_path = ledger_path + ".lock"
-    with _file_lock(lock_path):
-        return _read_uploaded_docnumbers(ledger_path)
+    _migrate_docnumbers_from_json(repo_root, config)
+    _init_docnumbers_db()
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        cursor = conn.execute(
+            "SELECT docnumber FROM uploaded_docnumbers WHERE company_key = ? AND realm_id = ?",
+            (config.company_key, config.realm_id),
+        )
+        return {row[0] for row in cursor.fetchall()}
+    finally:
+        conn.close()
 
 
 def save_uploaded_docnumber(repo_root: str, docnumber: str, config) -> None:
     """Add a DocNumber to the uploaded ledger."""
-    ledger_path = os.path.join(repo_root, config.uploaded_docnumbers_file)
-    lock_path = ledger_path + ".lock"
-    with _file_lock(lock_path):
-        docnumbers = _read_uploaded_docnumbers(ledger_path)
-        docnumbers.add(docnumber)
-        data = {
-            "docnumbers": sorted(list(docnumbers)),
-            "last_updated": datetime.now().isoformat(),
-        }
-        tmp_path = ledger_path + ".tmp"
-        try:
-            with open(tmp_path, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp_path, ledger_path)
-        except Exception as e:
-            print(f"[WARN] Failed to save {config.uploaded_docnumbers_file}: {e}")
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
+    _init_docnumbers_db()
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(
+            "INSERT OR IGNORE INTO uploaded_docnumbers (company_key, realm_id, docnumber, uploaded_at) VALUES (?, ?, ?, ?)",
+            (config.company_key, config.realm_id, docnumber, int(datetime.now().timestamp())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 
