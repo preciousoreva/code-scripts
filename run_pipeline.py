@@ -1068,39 +1068,40 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 
             else:
                 # NORMAL MODE: Download and split
-                # Deterministic range-mode raw CSV detection: snapshot repo-root CSVs before download
-                # This ensures we use exactly the file created by the download, not a stale CSV
-                before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+                # Save downloads into a company-specific folder to avoid collisions in parallel runs
+                download_dir = repo_root / "downloads" / company_dir
+                download_dir.mkdir(parents=True, exist_ok=True)
+                download_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+                download_tag = f"{download_tag}-{os.getpid()}"
+                output_filename = f"BookKeeping_{from_date}_to_{to_date}_{download_tag}.csv"
                 
                 # Phase 1: Download EPOS CSV once for the entire range
                 run_step(
                     "Phase 1: Download EPOS CSV (epos_playwright) - Range",
                     "epos_playwright.py",
-                    ["--company", company_key, "--from-date", from_date, "--to-date", to_date]
+                    [
+                        "--company", company_key,
+                        "--from-date", from_date,
+                        "--to-date", to_date,
+                        "--output-dir", str(download_dir),
+                        "--output-filename", output_filename,
+                    ]
                 )
                 
-                # Snapshot repo-root CSVs after download and detect new files via set difference
-                after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
-                new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
-                
-                # Defensive: exclude processed CSVs if any appeared (shouldn't happen, but safety check)
-                new_csvs = [
-                    p for p in new_csvs
-                    if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
-                ]
-                
-                if not new_csvs:
-                    error_msg = "[ERROR] Range mode: no new raw EPOS CSV appeared in repo root after download"
-                    logging.error(error_msg)
-                    raise SystemExit(error_msg)
-                
-                if len(new_csvs) > 1:
+                downloaded_csv = download_dir / output_filename
+                if not downloaded_csv.exists():
+                    # Fallback to newest CSV in download_dir if the expected filename wasn't created
+                    candidates = sorted(download_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+                    if not candidates:
+                        error_msg = "[ERROR] Range mode: no raw EPOS CSV appeared in downloads folder after download"
+                        logging.error(error_msg)
+                        raise SystemExit(error_msg)
+                    downloaded_csv = candidates[-1]
                     logging.warning(
-                        "Range mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
-                        ", ".join(p.name for p in new_csvs),
+                        "Range mode: expected download file missing; using newest in downloads folder: %s",
+                        downloaded_csv.name,
                     )
                 
-                downloaded_csv = new_csvs[-1]
                 logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
                 
                 # Split CSV into per-day files
@@ -1391,38 +1392,39 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             company_dir = company_dir_name(config.display_name)
             logging.info(f"Using company folder: {company_dir}")
             
-            # Deterministic CSV detection: snapshot repo-root CSVs before download
-            before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+            # Download into a company-specific folder to avoid collisions in parallel runs
+            download_dir = repo_root / "downloads" / company_dir
+            download_dir.mkdir(parents=True, exist_ok=True)
+            download_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+            download_tag = f"{download_tag}-{os.getpid()}"
+            output_filename = f"BookKeeping_{target_date}_{download_tag}.csv"
             
             # Phase 1: Download from EPOS with target_date and company config
             run_step(
                 "Phase 1: Download EPOS CSV (epos_playwright)",
                 "epos_playwright.py",
-                ["--company", company_key, "--target-date", target_date]
+                [
+                    "--company", company_key,
+                    "--target-date", target_date,
+                    "--output-dir", str(download_dir),
+                    "--output-filename", output_filename,
+                ]
             )
             
-            # Snapshot repo-root CSVs after download and detect new files via set difference
-            after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
-            new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
-            
-            # Defensive: exclude processed CSVs if any appeared
-            new_csvs = [
-                p for p in new_csvs
-                if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
-            ]
-            
-            if not new_csvs:
-                error_msg = "[ERROR] Single-day mode: no new raw EPOS CSV appeared in repo root after download"
-                logging.error(error_msg)
-                raise SystemExit(error_msg)
-            
-            if len(new_csvs) > 1:
+            downloaded_csv = download_dir / output_filename
+            if not downloaded_csv.exists():
+                # Fallback to newest CSV in download_dir if the expected filename wasn't created
+                candidates = sorted(download_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+                if not candidates:
+                    error_msg = "[ERROR] Single-day mode: no raw EPOS CSV appeared in downloads folder after download"
+                    logging.error(error_msg)
+                    raise SystemExit(error_msg)
+                downloaded_csv = candidates[-1]
                 logging.warning(
-                    "Single-day mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
-                    ", ".join(p.name for p in new_csvs),
+                    "Single-day mode: expected download file missing; using newest in downloads folder: %s",
+                    downloaded_csv.name,
                 )
             
-            downloaded_csv = new_csvs[-1]
             logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
             
             # Split CSV into per-day files (same mechanism as range mode)
@@ -1800,4 +1802,3 @@ Examples:
         parser.error("--skip-download can only be used with --from-date and --to-date (range mode)")
     
     raise SystemExit(main(args.company, args.target_date, args.from_date, args.to_date, args.skip_download))
-
