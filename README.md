@@ -637,6 +637,27 @@ python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoic
 python3 scripts/qbo_import_invoices.py --company company_a --csv /path/to/invoices.csv --validate-only --aliases templates/item_aliases.csv
 ```
 
+### Invoice CSV preparation
+
+Use `scripts/prepare_invoice_csv.py` to normalize a source invoice spreadsheet into the invoice template and perform alias-first + fuzzy matching.
+
+**Run (with live QBO item list)**
+
+```bash
+python3 scripts/prepare_invoice_csv.py --csv /path/to/source.csv --company company_a
+```
+
+**Run (offline QBO item list)**
+
+```bash
+python3 scripts/prepare_invoice_csv.py --csv /path/to/source.csv --qbo-items-csv /path/to/qbo_items.csv
+```
+
+**Outputs**
+
+- `{source_stem}_prepared.csv`
+- `{source_stem}_unmatched.csv` (if any)
+
 | Subcommand | Purpose | Example |
 |------------|---------|---------|
 | `get` | Get item by ID or search by name | `python scripts/qbo_inv_manager.py --company company_a get --item-id 7220` or `get --name "NAN-OPTIPRO"` |
