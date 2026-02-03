@@ -36,6 +36,10 @@ __pycache__/
 last_epos_transform.json
 transform_metadata.json
 
+# Per-company generated outputs / downloads
+outputs/
+downloads/
+
 # RAW spill staging (future-date rows awaiting processing)
 # These files are managed by run_pipeline.py and archived after use
 uploads/spill_raw/

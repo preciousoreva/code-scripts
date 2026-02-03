@@ -131,6 +131,18 @@ def get_repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def company_dir_name(display_name: str) -> str:
+    """
+    Convert company display name to Title_Case_With_Underscores.
+    Safe for filesystem paths across OSes.
+    """
+    name = re.sub(r"[^A-Za-z0-9 ]+", " ", str(display_name or "").strip())
+    name = re.sub(r"\s+", " ", name).strip()
+    if not name:
+        return "Company"
+    return "_".join(word.capitalize() for word in name.split())
+
+
 def find_latest_raw_file(repo_root: str) -> str:
     """
     Find the most recently modified CSV in repo root (excluding processed files).
@@ -592,10 +604,13 @@ def main():
         else:
             normalized_date = datetime.now().strftime("%Y-%m-%d")
     
-    # Write ONE QuickBooks-ready CSV in repo root
+    # Write ONE QuickBooks-ready CSV in per-company output folder
+    company_dir = company_dir_name(config.display_name)
+    output_dir = os.path.join(repo_root, "outputs", company_dir)
+    os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(raw_file))[0]
     output_filename = f"{config.csv_prefix}_{base_name}.csv"
-    output_path = os.path.join(repo_root, output_filename)
+    output_path = os.path.join(output_dir, output_filename)
     
     transformed.to_csv(output_path, index=False)
     print(f"\nWrote combined QuickBooks file: {output_path}")
@@ -638,4 +653,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

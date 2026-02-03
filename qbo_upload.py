@@ -88,6 +88,24 @@ def get_repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def company_dir_name(display_name: str) -> str:
+    """
+    Convert company display name to Title_Case_With_Underscores.
+    Safe for filesystem paths across OSes.
+    """
+    name = re.sub(r"[^A-Za-z0-9 ]+", " ", str(display_name or "").strip())
+    name = re.sub(r"\s+", " ", name).strip()
+    if not name:
+        return "Company"
+    return "_".join(word.capitalize() for word in name.split())
+
+
+def get_company_output_dir(repo_root: str, config) -> str:
+    """Return per-company output directory for transformed CSVs."""
+    company_dir = company_dir_name(getattr(config, "display_name", None) or getattr(config, "company_key", "Company"))
+    return os.path.join(repo_root, "outputs", company_dir)
+
+
 
 
 def _read_uploaded_docnumbers(ledger_path: str) -> set:
@@ -222,8 +240,14 @@ def find_latest_single_csv(repo_root: str, config) -> str:
     """
     Find the most recently modified CSV file matching company's prefix pattern.
     """
-    pattern = os.path.join(repo_root, f"{config.csv_prefix}_*.csv")
+    # Prefer per-company outputs directory (new behavior)
+    output_dir = get_company_output_dir(repo_root, config)
+    pattern = os.path.join(output_dir, f"{config.csv_prefix}_*.csv")
     files = glob.glob(pattern)
+    if not files:
+        # Fallback to repo root for backward compatibility
+        pattern = os.path.join(repo_root, f"{config.csv_prefix}_*.csv")
+        files = glob.glob(pattern)
     if not files:
         raise FileNotFoundError(
             f"No {config.csv_prefix}_*.csv files found in {repo_root}"

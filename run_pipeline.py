@@ -294,6 +294,9 @@ def archive_files(repo_root: Path, config) -> None:
         logging.warning("No raw_file_path or raw_file in metadata, skipping raw file archive")
     
     # Move processed file(s)
+    display_name = getattr(config, "display_name", None) or getattr(config, "company_key", "Company")
+    company_dir = company_dir_name(display_name)
+    outputs_dir = repo_root / "outputs" / company_dir
     processed_files = metadata.get("processed_files", [])
     for processed_file in processed_files:
         if not processed_file or not processed_file.strip():
@@ -301,6 +304,8 @@ def archive_files(repo_root: Path, config) -> None:
             continue
         
         processed_path = repo_root / processed_file
+        if not processed_path.exists():
+            processed_path = outputs_dir / processed_file
         
         # Safety check: ensure we're not trying to move the repo root or a directory
         if processed_path == repo_root:
@@ -715,12 +720,18 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
             csv_prefix = "single_sales_receipts"
 
         # Get EPOS total from processed CSV
-        # Check repo root first (before archiving), then Uploaded folder (after archiving)
+        # Check per-company outputs first (before archiving), then repo root, then Uploaded folder (after archiving)
         csv_pattern = f"{csv_prefix}_*.csv"
         csv_files = []
+        display_name = getattr(config, "display_name", None) or getattr(config, "company_key", "Company")
+        outputs_dir = repo_root / "outputs" / company_dir_name(display_name)
 
-        # Check repo root first (where CSV is before archiving)
-        csv_files = list(repo_root.glob(csv_pattern))
+        if outputs_dir.exists():
+            csv_files = list(outputs_dir.glob(csv_pattern))
+
+        # Fallback to repo root (legacy location)
+        if not csv_files:
+            csv_files = list(repo_root.glob(csv_pattern))
 
         # Fallback to Uploaded folder if not found in repo root
         if not csv_files:
@@ -1073,7 +1084,7 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 download_dir.mkdir(parents=True, exist_ok=True)
                 download_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
                 download_tag = f"{download_tag}-{os.getpid()}"
-                output_filename = f"BookKeeping_{from_date}_to_{to_date}_{download_tag}.csv"
+                output_filename = f"BookKeeping_{company_dir}_{from_date}_to_{to_date}_{download_tag}.csv"
                 
                 # Phase 1: Download EPOS CSV once for the entire range
                 run_step(
@@ -1397,7 +1408,7 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             download_dir.mkdir(parents=True, exist_ok=True)
             download_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
             download_tag = f"{download_tag}-{os.getpid()}"
-            output_filename = f"BookKeeping_{target_date}_{download_tag}.csv"
+            output_filename = f"BookKeeping_{company_dir}_{target_date}_{download_tag}.csv"
             
             # Phase 1: Download from EPOS with target_date and company config
             run_step(
