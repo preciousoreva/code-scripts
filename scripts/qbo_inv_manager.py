@@ -769,7 +769,7 @@ def cmd_import_products(args: argparse.Namespace, token_mgr: TokenManager, realm
         return 0
 
     if not dry_run and config.slack_webhook_url:
-        notify_import_start("products", config.company_key, {"total": len(rows)}, config.slack_webhook_url)
+        notify_import_start("products", config.display_name, {"total": len(rows)}, config.slack_webhook_url)
 
     created = 0
     skipped = 0
@@ -894,7 +894,7 @@ def cmd_import_products(args: argparse.Namespace, token_mgr: TokenManager, realm
         if not dry_run and config.slack_webhook_url:
             notify_import_success(
                 "products",
-                config.company_key,
+                config.display_name,
                 {"created": created, "skipped": skipped, "failed": failed},
                 config.slack_webhook_url,
             )
@@ -913,7 +913,7 @@ def cmd_import_products(args: argparse.Namespace, token_mgr: TokenManager, realm
         return 0
     except Exception as e:
         if config.slack_webhook_url:
-            notify_import_failure("products", config.company_key, str(e), config.slack_webhook_url)
+            notify_import_failure("products", config.display_name, str(e), config.slack_webhook_url)
         raise
 
 

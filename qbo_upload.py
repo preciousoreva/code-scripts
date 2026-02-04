@@ -739,10 +739,17 @@ def get_department_id(name: str, token_mgr: TokenManager, realm_id: str, cache: 
     - First checks if there's a department_mapping in config (maps CSV location -> QBO Department ID)
     - If the name exists in cache, reuse its Id.
     - Otherwise, try a QBO query by Name.
-    - Returns None if department not found or name is empty.
+    - If no name is provided or lookup fails, fall back to config.qbo.default_department_id (if set).
+    - Returns None if department not found and no default is configured.
     """
+    default_department_id = None
+    if config:
+        default_department_id = config.get_qbo_config().get("default_department_id")
+        if default_department_id is not None:
+            default_department_id = str(default_department_id).strip() or None
+
     if not name or not name.strip():
-        return None
+        return default_department_id
     
     name_clean = name.strip()
     
@@ -773,11 +780,49 @@ def get_department_id(name: str, token_mgr: TokenManager, realm_id: str, cache: 
     
     if department_id:
         cache[name_clean] = department_id
+        return department_id
+
+    # Cache None to avoid repeated failed queries
+    cache[name_clean] = None
+
+    return default_department_id
+
+
+def get_term_id(name: str, token_mgr: TokenManager, realm_id: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """
+    Resolve a Term (payment terms) name to a Term Id with simple caching.
+
+    - Returns None if name is empty.
+    - Checks cache first.
+    - Otherwise, queries QBO by Name.
+    """
+    if not name or not name.strip():
+        return None
+
+    name_clean = name.strip()
+
+    # Check cache
+    if name_clean in cache:
+        return cache[name_clean]
+
+    safe_name = name_clean.replace("'", "''")
+    query = f"select Id from Term where Name = '{safe_name}'"
+    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion=70"
+
+    resp = _make_qbo_request("GET", url, token_mgr)
+    term_id: Optional[str] = None
+    if resp.status_code == 200:
+        data = resp.json()
+        terms = data.get("QueryResponse", {}).get("Term", [])
+        if terms:
+            term_id = terms[0].get("Id")
+
+    if term_id:
+        cache[name_clean] = term_id
     else:
-        # Cache None to avoid repeated failed queries
         cache[name_clean] = None
-    
-    return department_id
+
+    return term_id
 
 
 def build_blockers_from_batch(

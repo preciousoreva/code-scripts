@@ -148,6 +148,72 @@ def notify_import_failure(
     send_slack_success(message, webhook_url)
 
 
+def notify_invoice_import_start(
+    company_name: str,
+    csv_name: str,
+    num_invoices: int,
+    num_lines: int,
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when invoice import starts.
+
+    Args:
+        company_name: Human-readable company name (e.g. config.display_name).
+        csv_name: Name of the CSV file being imported.
+        num_invoices: Number of invoice groups to process.
+        num_lines: Total number of lines in the CSV.
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping invoice import start notification.")
+        return
+    message = (
+        f"*Invoice import started* — {company_name}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• CSV: {csv_name}\n"
+        f"• Invoices to process: {num_invoices}  |  Lines: {num_lines}"
+    )
+    send_slack_success(message, webhook_url)
+
+
+def notify_invoice_import_success(
+    company_name: str,
+    invoices_created: int,
+    lines_uploaded: int,
+    lines_skipped: int,
+    invoice_list: List[tuple],
+    grand_total: float,
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when invoice import completes successfully.
+
+    Args:
+        company_name: Human-readable company name (e.g. config.display_name).
+        invoices_created: Number of invoices created.
+        lines_uploaded: Number of lines uploaded.
+        lines_skipped: Number of lines skipped (unmatched).
+        invoice_list: List of (doc_number, customer_name, total) for each created invoice.
+        grand_total: Sum of all invoice totals.
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping invoice import success notification.")
+        return
+    message = (
+        f"*Invoice import completed* — {company_name}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Invoices created: {invoices_created}  |  Lines uploaded: {lines_uploaded}  |  Lines skipped: {lines_skipped}"
+    )
+    if invoice_list:
+        message += "\n\n*Invoices created:*\n"
+        for doc_number, customer_name, total in invoice_list:
+            message += f"• {doc_number} ({customer_name}) — ₦{total:,.2f}\n"
+        message += f"\n*Grand total: ₦{grand_total:,.2f}*"
+    send_slack_success(message, webhook_url)
+
+
 def notify_pipeline_update(
     pipeline_name: str,
     log_file: Path,

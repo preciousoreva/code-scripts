@@ -6,11 +6,11 @@ Use this after exporting bills (qbo_export_bills.py), deleting them in QBO,
 and updating InvStartDate for inventory items, to re-create bills accurately.
 
 Usage (example):
-  python scripts/qbo_import_bills.py --company company_a --bill-id 123 --dry-run
-  python scripts/qbo_import_bills.py --company company_a --bill-id 123 --create
-  python scripts/qbo_import_bills.py --company company_a --bill-ids 58984 58985 58986 --create
-  python scripts/qbo_import_bills.py --company company_a --all --create
-  python scripts/qbo_import_bills.py --company company_a --bill-ids 58984 58985 --taxcode-id 4 --create
+  python scripts/bills/qbo_import_bills.py --company company_a --bill-id 123 --dry-run
+  python scripts/bills/qbo_import_bills.py --company company_a --bill-id 123 --create
+  python scripts/bills/qbo_import_bills.py --company company_a --bill-ids 58984 58985 58986 --create
+  python scripts/bills/qbo_import_bills.py --company company_a --all --create
+  python scripts/bills/qbo_import_bills.py --company company_a --bill-ids 58984 58985 --taxcode-id 4 --create
 
 Pass exactly one of: --bill-id (single), --bill-ids (list), or --all (every BillId in header with lines).
 TaxCode is resolved once at start (by name or --taxcode-id) and reused for every bill.
@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from urllib.parse import quote
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -692,7 +692,7 @@ def main() -> None:
         print(f"  resolved SalesTermRef Id: {sales_term_ref_id or '(none)'}")
 
     if not args.dry_run and bill_ids and config.slack_webhook_url:
-        notify_import_start("bills", args.company, {"total": len(bill_ids)}, config.slack_webhook_url)
+        notify_import_start("bills", config.display_name, {"total": len(bill_ids)}, config.slack_webhook_url)
 
     try:
         for bill_id in bill_ids:
@@ -719,7 +719,7 @@ def main() -> None:
             except ValueError as e:
                 print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)
                 if not args.dry_run and config.slack_webhook_url:
-                    notify_import_failure("bills", args.company, str(e), config.slack_webhook_url)
+                    notify_import_failure("bills", config.display_name, str(e), config.slack_webhook_url)
                 sys.exit(1)
 
             header_total = _as_float(header_row.get("TotalAmt"))
@@ -728,7 +728,7 @@ def main() -> None:
             except ValueError as e:
                 print(f"Error (BillId {bill_id}): {e}", file=sys.stderr)
                 if not args.dry_run and config.slack_webhook_url:
-                    notify_import_failure("bills", args.company, str(e), config.slack_webhook_url)
+                    notify_import_failure("bills", config.display_name, str(e), config.slack_webhook_url)
                 sys.exit(1)
 
             line_count = len(payload.get("Line", []))
@@ -768,7 +768,7 @@ def main() -> None:
                 err_msg = f"QBO POST failed for BillId {bill_id} ({resp.status_code}): {resp.text[:500]}"
                 print(f"Error: {err_msg}", file=sys.stderr)
                 if not args.dry_run and config.slack_webhook_url:
-                    notify_import_failure("bills", args.company, err_msg, config.slack_webhook_url)
+                    notify_import_failure("bills", config.display_name, err_msg, config.slack_webhook_url)
                 sys.exit(1)
 
             result = resp.json()
@@ -782,7 +782,7 @@ def main() -> None:
                 print(json.dumps(bill, indent=2))
     except Exception as e:
         if not args.dry_run and config.slack_webhook_url:
-            notify_import_failure("bills", args.company, str(e), config.slack_webhook_url)
+            notify_import_failure("bills", config.display_name, str(e), config.slack_webhook_url)
         raise
 
     if args.dry_run:
@@ -791,7 +791,7 @@ def main() -> None:
         if config.slack_webhook_url:
             notify_import_success(
                 "bills",
-                args.company,
+                config.display_name,
                 {"created": len(created_ids), "total": len(bill_ids)},
                 config.slack_webhook_url,
             )

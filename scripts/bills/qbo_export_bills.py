@@ -4,7 +4,7 @@ Export QBO Bills to CSV (header + line details) for a given date range.
 Use this before manually deleting Bills in QBO so you can recreate later.
 
 Usage (example):
-  python scripts/qbo_export_bills.py --company company_a --from 2020-01-01 --to 2026-01-31 --out ./exports/company_a_bills/
+  python scripts/bills/qbo_export_bills.py --company company_a --from 2020-01-01 --to 2026-01-31 --out ./exports/company_a_bills/
 
 Notes:
 - Uses QBO Query API with pagination (STARTPOSITION / MAXRESULTS).
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
