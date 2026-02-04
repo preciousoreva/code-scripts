@@ -31,8 +31,14 @@ __pycache__/
 
 # Temporary processing files (these get archived, but exclude from git)
 *.csv
+# Allow category mapping (no secrets; required for inventory account resolution)
+!mappings/Product.Mapping.csv
 last_epos_transform.json
 transform_metadata.json
+
+# Per-company generated outputs / downloads
+outputs/
+downloads/
 
 # RAW spill staging (future-date rows awaiting processing)
 # These files are managed by run_pipeline.py and archived after use
@@ -48,6 +54,9 @@ logs/
 
 # Archived files (authoritative after successful runs, but exclude from git)
 Uploaded/
+
+# Generated reports (inventory start date issues, patched items, etc.)
+reports/
 
 # IDE
 .vscode/
@@ -78,3 +87,9 @@ CombinedRaw_*.csv
 
 # Pre-commit hooks: downloaded binaries (auto-downloaded by gitleaks-wrapper)
 .pre-commit-hooks/.bin/
+
+# Repomix / codebase snapshot (generated; not needed in repo)
+repomix-output.xml
+
+# Local debug / env trees (e.g. debugpy, ad-hoc venvs)
+dataPandasLib/

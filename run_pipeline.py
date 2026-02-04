@@ -101,6 +101,128 @@ def run_step(label: str, script_name: str, args: list = None) -> None:
     logging.info(f"[OK] {label} completed successfully.")
 
 
+def _drop_summary_rows(df: pd.DataFrame, date_col: Optional[str]) -> tuple[pd.DataFrame, int]:
+    """
+    Drop EPOS summary rows (e.g., Staff == 'Total:') from a raw dataframe.
+    Returns (filtered_df, dropped_count).
+    """
+    if "Staff" not in df.columns:
+        return df, 0
+    staff = df["Staff"].astype(str).str.strip().str.lower()
+    summary_mask = staff.isin(["total:", "total"])
+    if date_col and date_col in df.columns:
+        date_raw = df[date_col]
+        date_empty = date_raw.isna() | (date_raw.astype(str).str.strip() == "")
+        summary_mask = summary_mask & date_empty
+    dropped = int(summary_mask.sum())
+    if dropped:
+        df = df.loc[~summary_mask].copy()
+    return df, dropped
+
+
+def _compute_raw_totals(raw_path: Path) -> Optional[dict]:
+    """
+    Compute totals from a raw EPOS CSV, excluding summary rows.
+    Returns dict with totals/rows if TOTAL Sales column exists, else None.
+    """
+    if not raw_path.exists():
+        return None
+    df = pd.read_csv(raw_path)
+    date_col = "Date/Time" if "Date/Time" in df.columns else ("Date" if "Date" in df.columns else None)
+    df, dropped = _drop_summary_rows(df, date_col)
+    total_col = None
+    for col in ("TOTAL Sales", "Total Sales", "TOTAL", "Total"):
+        if col in df.columns:
+            total_col = col
+            break
+    if not total_col:
+        return None
+    total = pd.to_numeric(df[total_col], errors="coerce").fillna(0).sum()
+    net_total = None
+    if "NET Sales" in df.columns:
+        net_total = pd.to_numeric(df["NET Sales"], errors="coerce").fillna(0).sum()
+    return {
+        "total": float(total),
+        "net_total": float(net_total) if net_total is not None else None,
+        "rows": int(len(df)),
+        "summary_dropped": int(dropped),
+    }
+
+
+def _compute_processed_totals(processed_path: Path) -> Optional[dict]:
+    """
+    Compute totals from a processed QBO CSV.
+    Returns dict with totals/rows if *ItemAmount exists, else None.
+    """
+    if not processed_path.exists():
+        return None
+    df = pd.read_csv(processed_path)
+    if "*ItemAmount" not in df.columns:
+        return None
+    total = pd.to_numeric(df["*ItemAmount"], errors="coerce").fillna(0).sum()
+    net_total = None
+    if "NET Sales" in df.columns:
+        net_total = pd.to_numeric(df["NET Sales"], errors="coerce").fillna(0).sum()
+    return {
+        "total": float(total),
+        "net_total": float(net_total) if net_total is not None else None,
+        "rows": int(len(df)),
+    }
+
+
+def _log_raw_vs_processed_totals(raw_file_path: str, config, repo_root: Path) -> None:
+    """
+    Log a sanity check comparing raw line-item totals to processed totals.
+    """
+    try:
+        raw_path = Path(raw_file_path)
+        raw_stats = _compute_raw_totals(raw_path)
+        if not raw_stats:
+            return
+
+        metadata_path = repo_root / config.metadata_file
+        if not metadata_path.exists():
+            return
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+
+        processed_files = metadata.get("processed_files", [])
+        if not processed_files:
+            return
+        processed_file = processed_files[0]
+
+        display_name = getattr(config, "display_name", None) or getattr(config, "company_key", "Company")
+        outputs_dir = repo_root / "outputs" / company_dir_name(display_name)
+        processed_path = outputs_dir / processed_file
+        if not processed_path.exists():
+            processed_path = repo_root / processed_file
+
+        processed_stats = _compute_processed_totals(processed_path)
+        if not processed_stats:
+            return
+
+        diff = raw_stats["total"] - processed_stats["total"]
+        logging.info(
+            "Totals check: raw_total=%s (rows=%s, dropped_summary=%s) vs processed_total=%s (rows=%s) diff=%s",
+            f"{raw_stats['total']:.2f}",
+            raw_stats["rows"],
+            raw_stats["summary_dropped"],
+            f"{processed_stats['total']:.2f}",
+            processed_stats["rows"],
+            f"{diff:.2f}",
+        )
+        if raw_stats.get("net_total") is not None and processed_stats.get("net_total") is not None:
+            net_diff = raw_stats["net_total"] - processed_stats["net_total"]
+            logging.info(
+                "Totals check (NET): raw_net=%s vs processed_net=%s diff=%s",
+                f"{raw_stats['net_total']:.2f}",
+                f"{processed_stats['net_total']:.2f}",
+                f"{net_diff:.2f}",
+            )
+    except Exception as e:
+        logging.warning(f"Totals check failed: {e}")
+
+
 repo_root = Path(__file__).resolve().parent
 logs_dir = repo_root / "logs"
 logs_dir.mkdir(exist_ok=True)
@@ -294,6 +416,9 @@ def archive_files(repo_root: Path, config) -> None:
         logging.warning("No raw_file_path or raw_file in metadata, skipping raw file archive")
     
     # Move processed file(s)
+    display_name = getattr(config, "display_name", None) or getattr(config, "company_key", "Company")
+    company_dir = company_dir_name(display_name)
+    outputs_dir = repo_root / "outputs" / company_dir
     processed_files = metadata.get("processed_files", [])
     for processed_file in processed_files:
         if not processed_file or not processed_file.strip():
@@ -301,6 +426,8 @@ def archive_files(repo_root: Path, config) -> None:
             continue
         
         processed_path = repo_root / processed_file
+        if not processed_path.exists():
+            processed_path = outputs_dir / processed_file
         
         # Safety check: ensure we're not trying to move the repo root or a directory
         if processed_path == repo_root:
@@ -390,13 +517,24 @@ def compute_trading_date(dt_wat: datetime, start_hour: int, start_minute: int) -
     return trading_date
 
 
-def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir: str, repo_root: Path, config=None) -> tuple:
+
+
+def split_csv_by_date(
+    csv_path: Path,
+    from_date: str,
+    to_date: str,
+    company_dir: str,
+    repo_root: Path,
+    config=None,
+    chunk_size: int = 100000,
+    clear_existing: bool = True,
+) -> tuple:
     """
     Split a downloaded EPOS CSV into per-day raw files.
     Also writes future out-of-range rows as raw spill files.
-    
+
     Works for both range mode (from_date != to_date) and single-day mode (from_date == to_date).
-    
+
     If trading_day_enabled is True in config:
         - Computes trading_date for each row based on datetime in WAT and trading day cutoff
         - Writes rows to uploads/range_raw/<company_dir>/<from>_to_<to>/BookKeeping_<trading_date>.csv
@@ -404,7 +542,7 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
     If trading_day_enabled is False (default):
         - Uses calendar date (existing behavior)
         - Creates spill files for future dates
-    
+
     Args:
         csv_path: Path to the downloaded CSV file
         from_date: Start date in YYYY-MM-DD format
@@ -412,7 +550,8 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         company_dir: Human-readable company folder name (Title_Case_With_Underscores)
         repo_root: Repository root path
         config: Optional CompanyConfig object (required if trading_day_enabled is True)
-    
+        chunk_size: Read CSV in chunks of this size to reduce memory use
+
     Returns:
         Tuple of three items:
         - date_to_file: Dict mapping in-range date strings (YYYY-MM-DD) to file paths
@@ -426,10 +565,10 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
             - future_spill_details: Dict {date_str: row_count} for Slack notifications (empty if trading_day_enabled)
     """
     from datetime import timezone, timedelta
-    
+
     # WAT timezone (UTC+1)
     WAT_TZ = timezone(timedelta(hours=1))
-    
+
     # Check if trading day mode is enabled
     trading_day_enabled = False
     trading_day_start_hour = 5
@@ -438,25 +577,22 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         trading_day_enabled = config.trading_day_enabled
         trading_day_start_hour = config.trading_day_start_hour
         trading_day_start_minute = config.trading_day_start_minute
-    
+
     if trading_day_enabled:
         logging.info(f"Trading day mode enabled: cutoff={trading_day_start_hour:02d}:{trading_day_start_minute:02d} WAT")
-    
+
     # Parse date range
     from_dt = datetime.strptime(from_date, "%Y-%m-%d")
     to_dt = datetime.strptime(to_date, "%Y-%m-%d")
-    
+
     # Generate all dates in range
     date_list = []
     current = from_dt
     while current <= to_dt:
         date_list.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
-    
-    # Load CSV
-    df = pd.read_csv(csv_path)
-    total_rows = len(df)
-    
+    date_set = set(date_list)
+
     # Parse dates from Date/Time column (fallback to Date)
     def parse_date(value):
         """Parse common date/time strings into a naive datetime."""
@@ -474,14 +610,7 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         if pd.isna(dt):
             return None
         return dt.to_pydatetime()
-    
-    # Get date column (prefer Date/Time, fallback to Date)
-    date_col = "Date/Time" if "Date/Time" in df.columns else "Date"
-    if date_col not in df.columns:
-        raise ValueError(f"CSV must contain either 'Date/Time' or 'Date' column")
-    
-    dates_series = df[date_col].apply(parse_date)
-    
+
     # Convert to WAT timezone and compute trading date or calendar date
     # Also track calendar dates for trading day boundary stats
     def get_date_in_wat(dt):
@@ -495,9 +624,9 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
                 dt = dt.replace(tzinfo=WAT_TZ)
             elif dt.tzinfo != WAT_TZ:
                 dt = dt.astimezone(WAT_TZ)
-            
+
             calendar_date = dt.date()
-            
+
             if trading_day_enabled:
                 # Compute trading date based on cutoff
                 trading_date = compute_trading_date(dt, trading_day_start_hour, trading_day_start_minute)
@@ -507,105 +636,189 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
                 return calendar_date.strftime("%Y-%m-%d"), None
         except (AttributeError, ValueError, TypeError):
             return None, None
-    
-    # Apply function and extract both trading dates and calendar dates
-    date_results = dates_series.apply(get_date_in_wat)
-    date_strings = date_results.apply(lambda x: x[0] if isinstance(x, tuple) else x)
-    
-    # Extract calendar dates for trading day stats (only when trading_day_enabled)
-    calendar_date_strings = None
-    if trading_day_enabled:
-        calendar_date_strings = date_results.apply(lambda x: x[1] if isinstance(x, tuple) and x[1] else None)
-    
-    # Log trading day assignments for debugging (sample a few rows)
-    if trading_day_enabled:
-        sample_indices = min(5, len(df))
-        for idx in range(sample_indices):
-            dt_val = dates_series.iloc[idx]
-            if dt_val is not None and not pd.isna(dt_val):
-                try:
-                    if dt_val.tzinfo is None:
-                        dt_wat = dt_val.replace(tzinfo=WAT_TZ)
-                    else:
-                        dt_wat = dt_val.astimezone(WAT_TZ)
-                    trading_date = compute_trading_date(dt_wat, trading_day_start_hour, trading_day_start_minute)
-                    logging.info(f"Trading day sample: row_datetime={dt_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT => trading_date={trading_date}")
-                except Exception:
-                    pass
-    
-    # Count null/unparseable dates
-    null_count = int(date_strings.isna().sum())
-    if null_count > 0:
-        logging.warning(f"Found {null_count} row(s) with null/unparseable dates (will be ignored)")
-    
-    # Count past dates (< from_date) - log but don't save
-    all_dates = date_strings.dropna().unique()
-    past_dates = [d for d in all_dates if d < from_date]
-    past_count = 0
-    if past_dates:
-        past_mask = date_strings.isin(past_dates)
-        past_count = int(past_mask.sum())
-        logging.info(f"Found {past_count} row(s) for past dates (< {from_date}): {', '.join(sorted(past_dates))} (ignored)")
-    
+
     # Create directory for split files using human-readable company folder name
     split_dir = repo_root / "uploads" / "range_raw" / company_dir / f"{from_date}_to_{to_date}"
     split_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Split by date (in-range) - track row counts without re-reading
+
+    # Prevent accidental append if a previous run left split files behind
+    if clear_existing:
+        for date_str in date_list:
+            for filename in (
+                f"BookKeeping_{company_dir}_{date_str}.csv",
+                f"BookKeeping_{date_str}.csv",
+                f"CombinedRaw_{company_dir}_{date_str}.csv",
+                f"CombinedRaw_{date_str}.csv",
+            ):
+                existing = split_dir / filename
+                if existing.exists() and existing.is_file():
+                    existing.unlink()
+                    logging.info(f"Removed existing split file before write: {existing.name}")
+
+    # Output tracking
     date_to_file = {}
+    future_spill_to_file = {}
+    future_spill_details = {}
+
+    in_range_rows_by_date = {}
+    future_rows_by_date = {}
+    past_dates_set = set()
+
+    total_rows = 0
     in_range_count = 0
+    future_count = 0
+    past_count = 0
+    null_count = 0
+    summary_dropped = 0
+
+    split_written = set()
+    spill_written = set()
+
+    trading_day_stats = None
+    if trading_day_enabled:
+        cutoff_str = f"{trading_day_start_hour:02d}:{trading_day_start_minute:02d}"
+        trading_day_stats = {
+            "cutoff": cutoff_str,
+            "by_date": {},
+        }
+
+    sample_logged = 0
+    sample_limit = 5
+
+    date_col = None
+    spill_raw_dir = None
+
+    for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+        if date_col is None:
+            date_col = "Date/Time" if "Date/Time" in chunk.columns else "Date"
+            if date_col not in chunk.columns:
+                raise ValueError("CSV must contain either 'Date/Time' or 'Date' column")
+
+        # Drop summary rows (e.g., Staff == 'Total:') so totals don't double-count
+        chunk, dropped = _drop_summary_rows(chunk, date_col)
+        summary_dropped += dropped
+        if dropped:
+            logging.info(f"Dropped {dropped} summary row(s) from raw CSV chunk")
+
+        total_rows += len(chunk)
+        dates_series = chunk[date_col].apply(parse_date)
+
+        # Log trading day assignments for debugging (sample a few rows)
+        if trading_day_enabled and sample_logged < sample_limit:
+            for dt_val in dates_series:
+                if dt_val is not None and not pd.isna(dt_val):
+                    try:
+                        if dt_val.tzinfo is None:
+                            dt_wat = dt_val.replace(tzinfo=WAT_TZ)
+                        else:
+                            dt_wat = dt_val.astimezone(WAT_TZ)
+                        trading_date = compute_trading_date(dt_wat, trading_day_start_hour, trading_day_start_minute)
+                        logging.info(f"Trading day sample: row_datetime={dt_wat.strftime('%Y-%m-%d %H:%M:%S')} WAT => trading_date={trading_date}")
+                        sample_logged += 1
+                        if sample_logged >= sample_limit:
+                            break
+                    except Exception:
+                        pass
+
+        date_results = dates_series.apply(get_date_in_wat)
+        date_strings = date_results.apply(lambda x: x[0] if isinstance(x, tuple) else x)
+
+        # Extract calendar dates for trading day stats (only when trading_day_enabled)
+        calendar_date_strings = None
+        if trading_day_enabled:
+            calendar_date_strings = date_results.apply(lambda x: x[1] if isinstance(x, tuple) and x[1] else None)
+
+        null_mask = date_strings.isna()
+        null_count += int(null_mask.sum())
+        valid_mask = ~null_mask
+
+        # Past dates (< from_date) - log but don't save
+        past_mask = valid_mask & (date_strings < from_date)
+        if past_mask.any():
+            past_count += int(past_mask.sum())
+            try:
+                past_dates_set.update(set(date_strings[past_mask].dropna().unique()))
+            except Exception:
+                pass
+
+        # In-range dates
+        in_range_mask = valid_mask & (date_strings.isin(date_set))
+        if in_range_mask.any():
+            in_range_dates = date_strings[in_range_mask]
+            for date_str, idx in in_range_dates.groupby(in_range_dates).groups.items():
+                sub = chunk.loc[idx]
+                split_filename = f"BookKeeping_{company_dir}_{date_str}.csv"
+                split_path = split_dir / split_filename
+                write_header = split_path not in split_written
+                sub.to_csv(split_path, index=False, mode="a", header=write_header)
+                split_written.add(split_path)
+                date_to_file[date_str] = str(split_path)
+                count = len(sub)
+                in_range_rows_by_date[date_str] = in_range_rows_by_date.get(date_str, 0) + count
+                in_range_count += count
+
+                if trading_day_enabled and calendar_date_strings is not None:
+                    cal_series = calendar_date_strings.loc[idx]
+                    stats = trading_day_stats["by_date"].setdefault(
+                        date_str,
+                        {"total": 0, "pre_cutoff_reassigned": 0, "same_calendar_day": 0},
+                    )
+                    stats["total"] += count
+                    next_calendar_date = (datetime.strptime(date_str, "%Y-%m-%d").date() + timedelta(days=1)).strftime("%Y-%m-%d")
+                    stats["pre_cutoff_reassigned"] += int((cal_series == next_calendar_date).sum())
+                    stats["same_calendar_day"] += int((cal_series == date_str).sum())
+
+        # Future out-of-range dates (calendar day mode only)
+        if not trading_day_enabled:
+            future_mask = valid_mask & (date_strings > to_date)
+            if future_mask.any():
+                if spill_raw_dir is None:
+                    spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
+                    spill_raw_dir.mkdir(parents=True, exist_ok=True)
+                future_dates = date_strings[future_mask]
+                for date_str, idx in future_dates.groupby(future_dates).groups.items():
+                    sub = chunk.loc[idx]
+                    spill_filename = f"BookKeeping_raw_spill_{date_str}.csv"
+                    spill_path = spill_raw_dir / spill_filename
+                    write_header = spill_path not in spill_written
+                    sub.to_csv(spill_path, index=False, mode="a", header=write_header)
+                    spill_written.add(spill_path)
+                    future_spill_to_file[date_str] = str(spill_path)
+                    count = len(sub)
+                    future_rows_by_date[date_str] = future_rows_by_date.get(date_str, 0) + count
+                    future_count += count
+
+    # Log summary (no re-reading CSVs needed)
+    if summary_dropped > 0:
+        logging.info(f"Dropped {summary_dropped} summary row(s) from raw CSV (Staff='Total:')")
+
+    if null_count > 0:
+        logging.warning(f"Found {null_count} row(s) with null/unparseable dates (will be ignored)")
+
+    if past_dates_set:
+        logging.info(f"Found {past_count} row(s) for past dates (< {from_date}): {', '.join(sorted(past_dates_set))} (ignored)")
+
     for target_date_str in date_list:
-        target_mask = date_strings == target_date_str
-        target_df = df[target_mask].copy().reset_index(drop=True)
-        
-        if len(target_df) > 0:
-            # Create filename: BookKeeping_YYYY-MM-DD.csv
-            split_filename = f"BookKeeping_{target_date_str}.csv"
-            split_path = split_dir / split_filename
-            target_df.to_csv(split_path, index=False)
-            date_to_file[target_date_str] = str(split_path)
-            in_range_count += len(target_df)
-            logging.info(f"Created split file for {target_date_str}: {split_filename} ({len(target_df)} rows)")
+        if target_date_str in in_range_rows_by_date:
+            count = in_range_rows_by_date[target_date_str]
+            logging.info(
+                f"Created split file for {target_date_str}: BookKeeping_{company_dir}_{target_date_str}.csv ({count} rows)"
+            )
         else:
             logging.warning(f"No rows found for {target_date_str}, skipping split file")
-    
-    # Identify and write future out-of-range rows as raw spill files
-    # Future = date > to_date
-    # NOTE: In trading day mode, we do NOT create spill files (all rows are assigned to trading dates)
-    future_spill_to_file = {}
-    future_spill_details = {}  # {date: row_count} for notifications
-    future_count = 0
-    
-    if not trading_day_enabled:
-        # Only create spill files in calendar day mode
-        # Get all unique dates that are future (> to_date)
-        future_dates = [d for d in all_dates if d > to_date]
-        
-        if future_dates:
-            # Create spill_raw directory
-            spill_raw_dir = repo_root / "uploads" / "spill_raw" / company_dir
-            spill_raw_dir.mkdir(parents=True, exist_ok=True)
-            
-            logging.info(f"\nFound {len(future_dates)} future date(s) outside range (> {to_date})")
-            
-            for future_date_str in sorted(future_dates):
-                future_mask = date_strings == future_date_str
-                future_df = df[future_mask].copy().reset_index(drop=True)
-                
-                if len(future_df) > 0:
-                    spill_filename = f"BookKeeping_raw_spill_{future_date_str}.csv"
-                    spill_path = spill_raw_dir / spill_filename
-                    future_df.to_csv(spill_path, index=False)
-                    future_spill_to_file[future_date_str] = str(spill_path)
-                    future_spill_details[future_date_str] = len(future_df)
-                    future_count += len(future_df)
-                    logging.info(f"Created raw spill file for {future_date_str}: {spill_filename} ({len(future_df)} rows)")
-    else:
-        logging.info("Trading day mode: skipping spill file creation (all rows assigned to trading dates)")
-    
-    # Log summary (no re-reading CSVs needed)
-    logging.info(f"\nSplit summary: {in_range_count} rows in-range, {future_count} rows future spill, {past_count} rows past (ignored), {null_count} rows null (ignored)")
-    
+
+    if not trading_day_enabled and future_rows_by_date:
+        logging.info(f"\nFound {len(future_rows_by_date)} future date(s) outside range (> {to_date})")
+        for future_date_str in sorted(future_rows_by_date):
+            count = future_rows_by_date[future_date_str]
+            logging.info(f"Created raw spill file for {future_date_str}: BookKeeping_raw_spill_{future_date_str}.csv ({count} rows)")
+
+    logging.info(
+        f"\nSplit summary: {in_range_count} rows in-range, {future_count} rows future spill, "
+        f"{past_count} rows past (ignored), {null_count} rows null (ignored), "
+        f"{summary_dropped} summary row(s) dropped"
+    )
+
     # Build stats dict for caller
     split_stats = {
         "total_rows": total_rows,
@@ -613,62 +826,23 @@ def split_csv_by_date(csv_path: Path, from_date: str, to_date: str, company_dir:
         "future_rows": future_count,
         "past_rows": past_count,
         "null_rows": null_count,
-        "future_spill_details": future_spill_details,
+        "future_spill_details": {k: v for k, v in future_rows_by_date.items()},
+        "summary_rows_dropped": summary_dropped,
     }
-    
+
     # Compute trading day boundary stats if trading day mode is enabled
-    if trading_day_enabled and calendar_date_strings is not None:
-        cutoff_str = f"{trading_day_start_hour:02d}:{trading_day_start_minute:02d}"
-        trading_day_stats = {
-            "cutoff": cutoff_str,
-            "by_date": {}
-        }
-        
-        # For each trading date in the range, compute boundary stats
-        for target_date_str in date_list:
-            if target_date_str not in date_to_file:
-                continue  # Skip dates with no rows
-            
-            # Get rows for this trading date
-            target_mask = date_strings == target_date_str
-            target_calendar_dates = calendar_date_strings[target_mask]
-            
-            # Count rows where calendar_date == trading_date + 1 day (pre-cutoff reassigned)
-            target_trading_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
-            next_calendar_date = (target_trading_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            
-            pre_cutoff_reassigned = 0
-            same_calendar_day = 0
-            total_for_trading_day = int(target_mask.sum())
-            
-            # Count reassigned and same-day rows
-            for cal_date_str in target_calendar_dates:
-                if cal_date_str is None or pd.isna(cal_date_str):
-                    continue
-                if cal_date_str == next_calendar_date:
-                    # Calendar date is D+1, but assigned to trading date D (pre-cutoff)
-                    pre_cutoff_reassigned += 1
-                elif cal_date_str == target_date_str:
-                    # Calendar date equals trading date
-                    same_calendar_day += 1
-            
-            trading_day_stats["by_date"][target_date_str] = {
-                "total": total_for_trading_day,
-                "pre_cutoff_reassigned": pre_cutoff_reassigned,
-                "same_calendar_day": same_calendar_day
-            }
-            
-            # Log trading day adjustment for this date
-            if pre_cutoff_reassigned > 0:
-                logging.info(f"Trading-day adjustment for {target_date_str}: pre-cutoff reassigned={pre_cutoff_reassigned} (cutoff={cutoff_str} WAT)")
-        
+    if trading_day_enabled and trading_day_stats is not None:
+        for target_date_str, stats in trading_day_stats["by_date"].items():
+            if stats.get("pre_cutoff_reassigned", 0) > 0:
+                logging.info(
+                    f"Trading-day adjustment for {target_date_str}: pre-cutoff reassigned={stats['pre_cutoff_reassigned']} "
+                    f"(cutoff={trading_day_stats['cutoff']} WAT)"
+                )
         split_stats["trading_day_stats"] = trading_day_stats
     else:
-        # No trading day stats for calendar day mode
         split_stats["trading_day_stats"] = None
-    
-    return date_to_file, future_spill_to_file, split_stats
 
+    return date_to_file, future_spill_to_file, split_stats
 
 def reconcile_company(company_key: str, target_date: str, config, repo_root: Path) -> dict:
     """
@@ -708,12 +882,18 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
             csv_prefix = "single_sales_receipts"
 
         # Get EPOS total from processed CSV
-        # Check repo root first (before archiving), then Uploaded folder (after archiving)
+        # Check per-company outputs first (before archiving), then repo root, then Uploaded folder (after archiving)
         csv_pattern = f"{csv_prefix}_*.csv"
         csv_files = []
+        display_name = getattr(config, "display_name", None) or getattr(config, "company_key", "Company")
+        outputs_dir = repo_root / "outputs" / company_dir_name(display_name)
 
-        # Check repo root first (where CSV is before archiving)
-        csv_files = list(repo_root.glob(csv_pattern))
+        if outputs_dir.exists():
+            csv_files = list(outputs_dir.glob(csv_pattern))
+
+        # Fallback to repo root (legacy location)
+        if not csv_files:
+            csv_files = list(repo_root.glob(csv_pattern))
 
         # Fallback to Uploaded folder if not found in repo root
         if not csv_files:
@@ -771,10 +951,10 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
 
         epos_count = df["*SalesReceiptNo"].nunique() if "*SalesReceiptNo" in df.columns else 0
 
-        # Get QBO total using query_qbo_for_company.py
-        query_script = repo_root / "query_qbo_for_company.py"
+        # Get QBO total using scripts/qbo_queries/qbo_query.py
+        query_script = repo_root / "scripts" / "qbo_queries" / "qbo_query.py"
         if not query_script.exists():
-            reconcile_result["reason"] = "query_qbo_for_company.py not found"
+            reconcile_result["reason"] = "scripts/qbo_queries/qbo_query.py not found"
             return reconcile_result
 
         # Query QBO for receipts on target_date (get Id and TotalAmt)
@@ -973,8 +1153,9 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                         for range_folder in company_range_dir.iterdir():
                             if range_folder.is_dir():
                                 # Check if this folder contains any of our requested date files
-                                test_file = range_folder / f"BookKeeping_{from_date}.csv"
-                                if test_file.exists():
+                                test_file = range_folder / f"BookKeeping_{company_dir}_{from_date}.csv"
+                                legacy_test_file = range_folder / f"BookKeeping_{from_date}.csv"
+                                if test_file.exists() or legacy_test_file.exists():
                                     found_dir = range_folder
                                     logging.info(f"Found files in range folder: {range_folder.name}")
                                     break
@@ -1012,10 +1193,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                     date_list.append(current.strftime("%Y-%m-%d"))
                     current += timedelta(days=1)
                 
-                # Look for BookKeeping_<date>.csv files
+                # Look for BookKeeping_<company>_<date>.csv files (fallback to legacy name)
                 for day_date in date_list:
-                    split_file = split_dir / f"BookKeeping_{day_date}.csv"
-                    if split_file.exists():
+                    split_file = split_dir / f"BookKeeping_{company_dir}_{day_date}.csv"
+                    legacy_split_file = split_dir / f"BookKeeping_{day_date}.csv"
+                    if split_file.exists() or legacy_split_file.exists():
+                        if not split_file.exists():
+                            split_file = legacy_split_file
                         date_to_file[day_date] = str(split_file)
                         # Count rows for stats
                         try:
@@ -1030,7 +1214,8 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 
                 # Also check for CombinedRaw files (merged with spill)
                 for day_date in date_list:
-                    combined_file = split_dir / f"CombinedRaw_{day_date}.csv"
+                    combined_file = split_dir / f"CombinedRaw_{company_dir}_{day_date}.csv"
+                    legacy_combined_file = split_dir / f"CombinedRaw_{day_date}.csv"
                     if combined_file.exists():
                         # Prefer CombinedRaw over BookKeeping if both exist
                         date_to_file[day_date] = str(combined_file)
@@ -1039,6 +1224,13 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                             logging.info(f"Found existing combined file for {day_date}: {combined_file.name} ({len(df)} rows)")
                         except Exception as e:
                             logging.warning(f"Could not read {combined_file.name}: {e}")
+                    elif legacy_combined_file.exists():
+                        date_to_file[day_date] = str(legacy_combined_file)
+                        try:
+                            df = pd.read_csv(legacy_combined_file)
+                            logging.info(f"Found existing combined file for {day_date}: {legacy_combined_file.name} ({len(df)} rows)")
+                        except Exception as e:
+                            logging.warning(f"Could not read {legacy_combined_file.name}: {e}")
                 
                 if not date_to_file:
                     error_msg = f"[ERROR] Skip-download mode: no split files found in {split_dir}"
@@ -1061,44 +1253,53 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 
             else:
                 # NORMAL MODE: Download and split
-                # Deterministic range-mode raw CSV detection: snapshot repo-root CSVs before download
-                # This ensures we use exactly the file created by the download, not a stale CSV
-                before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+                # Save downloads into a company-specific folder to avoid collisions in parallel runs
+                download_dir = repo_root / "downloads" / company_dir
+                download_dir.mkdir(parents=True, exist_ok=True)
+                download_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+                download_tag = f"{download_tag}-{os.getpid()}"
+                output_filename = f"BookKeeping_{company_dir}_{from_date}_to_{to_date}_{download_tag}.csv"
                 
                 # Phase 1: Download EPOS CSV once for the entire range
                 run_step(
                     "Phase 1: Download EPOS CSV (epos_playwright) - Range",
                     "epos_playwright.py",
-                    ["--company", company_key, "--from-date", from_date, "--to-date", to_date]
+                    [
+                        "--company", company_key,
+                        "--from-date", from_date,
+                        "--to-date", to_date,
+                        "--output-dir", str(download_dir),
+                        "--output-filename", output_filename,
+                    ]
                 )
                 
-                # Snapshot repo-root CSVs after download and detect new files via set difference
-                after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
-                new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
-                
-                # Defensive: exclude processed CSVs if any appeared (shouldn't happen, but safety check)
-                new_csvs = [
-                    p for p in new_csvs
-                    if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
-                ]
-                
-                if not new_csvs:
-                    error_msg = "[ERROR] Range mode: no new raw EPOS CSV appeared in repo root after download"
-                    logging.error(error_msg)
-                    raise SystemExit(error_msg)
-                
-                if len(new_csvs) > 1:
+                downloaded_csv = download_dir / output_filename
+                if not downloaded_csv.exists():
+                    # Fallback to newest CSV in download_dir if the expected filename wasn't created
+                    candidates = sorted(download_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+                    if not candidates:
+                        error_msg = "[ERROR] Range mode: no raw EPOS CSV appeared in downloads folder after download"
+                        logging.error(error_msg)
+                        raise SystemExit(error_msg)
+                    downloaded_csv = candidates[-1]
                     logging.warning(
-                        "Range mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
-                        ", ".join(p.name for p in new_csvs),
+                        "Range mode: expected download file missing; using newest in downloads folder: %s",
+                        downloaded_csv.name,
                     )
                 
-                downloaded_csv = new_csvs[-1]
                 logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
                 
                 # Split CSV into per-day files
                 logging.info("\n=== Splitting CSV into per-day files ===")
-                date_to_file, future_spill_to_file, split_stats = split_csv_by_date(downloaded_csv, from_date, to_date, company_dir, repo_root, config)
+                date_to_file, future_spill_to_file, split_stats = split_csv_by_date(
+                    downloaded_csv,
+                    from_date,
+                    to_date,
+                    company_dir,
+                    repo_root,
+                    config,
+                    clear_existing=True,
+                )
                 
                 if not date_to_file:
                     raise SystemExit("No data found in date range after splitting")
@@ -1166,7 +1367,7 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                     
                     # Merge day_raw_file + raw_spill into a combined file
                     split_dir = Path(day_raw_file).parent
-                    combined_path = split_dir / f"CombinedRaw_{day_date}.csv"
+                    combined_path = split_dir / f"CombinedRaw_{company_dir}_{day_date}.csv"
                     
                     merge_stats = merge_raw_csvs(
                         Path(day_raw_file),
@@ -1185,7 +1386,10 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                     "transform.py",
                     ["--company", company_key, "--target-date", day_date, "--raw-file", raw_file_to_use]
                 )
-                
+
+                # Sanity check: compare raw line-item totals vs processed totals
+                _log_raw_vs_processed_totals(raw_file_to_use, config, repo_root)
+
                 # Check for spill files after Phase 2
                 metadata_path = repo_root / config.metadata_file
                 if metadata_path.exists():
@@ -1384,45 +1588,52 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             company_dir = company_dir_name(config.display_name)
             logging.info(f"Using company folder: {company_dir}")
             
-            # Deterministic CSV detection: snapshot repo-root CSVs before download
-            before_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
+            # Download into a company-specific folder to avoid collisions in parallel runs
+            download_dir = repo_root / "downloads" / company_dir
+            download_dir.mkdir(parents=True, exist_ok=True)
+            download_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+            download_tag = f"{download_tag}-{os.getpid()}"
+            output_filename = f"BookKeeping_{company_dir}_{target_date}_{download_tag}.csv"
             
             # Phase 1: Download from EPOS with target_date and company config
             run_step(
                 "Phase 1: Download EPOS CSV (epos_playwright)",
                 "epos_playwright.py",
-                ["--company", company_key, "--target-date", target_date]
+                [
+                    "--company", company_key,
+                    "--target-date", target_date,
+                    "--output-dir", str(download_dir),
+                    "--output-filename", output_filename,
+                ]
             )
             
-            # Snapshot repo-root CSVs after download and detect new files via set difference
-            after_csvs = {p.resolve() for p in repo_root.glob("*.csv")}
-            new_csvs = sorted(after_csvs - before_csvs, key=lambda p: p.stat().st_mtime)
-            
-            # Defensive: exclude processed CSVs if any appeared
-            new_csvs = [
-                p for p in new_csvs
-                if not (p.name.startswith("single_sales_receipts_") or p.name.startswith("gp_sales_receipts_"))
-            ]
-            
-            if not new_csvs:
-                error_msg = "[ERROR] Single-day mode: no new raw EPOS CSV appeared in repo root after download"
-                logging.error(error_msg)
-                raise SystemExit(error_msg)
-            
-            if len(new_csvs) > 1:
+            downloaded_csv = download_dir / output_filename
+            if not downloaded_csv.exists():
+                # Fallback to newest CSV in download_dir if the expected filename wasn't created
+                candidates = sorted(download_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime)
+                if not candidates:
+                    error_msg = "[ERROR] Single-day mode: no raw EPOS CSV appeared in downloads folder after download"
+                    logging.error(error_msg)
+                    raise SystemExit(error_msg)
+                downloaded_csv = candidates[-1]
                 logging.warning(
-                    "Single-day mode: multiple new CSVs detected after EPOS download; using newest. Candidates: %s",
-                    ", ".join(p.name for p in new_csvs),
+                    "Single-day mode: expected download file missing; using newest in downloads folder: %s",
+                    downloaded_csv.name,
                 )
             
-            downloaded_csv = new_csvs[-1]
             logging.info(f"Using raw EPOS file for splitting: {downloaded_csv.name}")
             
             # Split CSV into per-day files (same mechanism as range mode)
             # For single-day, from_date == to_date
             logging.info("\n=== Splitting CSV by date ===")
             date_to_file, future_spill_to_file, split_stats = split_csv_by_date(
-                downloaded_csv, target_date, target_date, company_dir, repo_root, config
+                downloaded_csv,
+                target_date,
+                target_date,
+                company_dir,
+                repo_root,
+                config,
+                clear_existing=True,
             )
             
             # Store trading day stats for later use in summaries
@@ -1490,6 +1701,9 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 "transform.py",
                 ["--company", company_key, "--target-date", target_date, "--raw-file", raw_file_to_use]
             )
+
+            # Sanity check: compare raw line-item totals vs processed totals
+            _log_raw_vs_processed_totals(raw_file_to_use, config, repo_root)
             
             # Check for spill files after Phase 2 (transformed spill - still logged but we don't rely on it)
             metadata_path = repo_root / config.metadata_file
@@ -1793,4 +2007,3 @@ Examples:
         parser.error("--skip-download can only be used with --from-date and --to-date (range mode)")
     
     raise SystemExit(main(args.company, args.target_date, args.from_date, args.to_date, args.skip_download))
-

@@ -126,6 +126,11 @@ This script is intentionally thin — all business logic remains in `run_pipelin
 
 ## Architecture Overview
 
+### Trading day mode vs calendar day
+
+- **Calendar day:** Each receipt is assigned the calendar date of the transaction. Deduplication checks DocNumber only.
+- **Trading day mode** (config: `trading_day.enabled: true`): The "day" is determined by a cutoff time (e.g. 05:00). Transactions after midnight but before the cutoff are grouped with the previous calendar day. Used when your business day spans midnight. Deduplication checks both DocNumber and TxnDate so receipts are matched to the correct trading day.
+
 ### RAW-First Processing
 
 The pipeline enforces **date correctness BEFORE transformation**:
@@ -256,6 +261,15 @@ Uploaded/YYYY-MM-DD/
   - Location/Department mapping
   - VAT-inclusive amount handling
 
+- `transform.py`  
+  Transforms a single raw EPOS CSV file into QuickBooks-ready CSV. Typically invoked by `run_pipeline.py` with `--raw-file`; can be run standalone for testing.
+
+  **Usage:**
+
+  ```bash
+  python transform.py --company company_a --target-date 2026-01-28 --raw-file path/to/BookKeeping_2026-01-28.csv
+  ```
+
 ### Configuration
 
 - `company_config.py` — Loads company-specific settings from JSON files
@@ -265,9 +279,60 @@ Uploaded/YYYY-MM-DD/
 ### Supporting Files
 
 - `token_manager.py` — QuickBooks OAuth2 token management (SQLite storage, per-company tokens)
-- `query_qbo_for_company.py` — QuickBooks query/reconciliation tool
 - `slack_notify.py` — Slack notification helpers
 - `load_env.py` — Environment variable loader
+- `scripts/qbo_queries/` — QBO query and debug scripts (see [QBO query scripts](#qbo-query-scripts) below)
+
+### Re-import Bills from CSV
+
+Bills can be exported to two CSVs (header + lines) with `scripts/qbo_export_bills.py`, then re-created in QBO after you delete them and adjust inventory (e.g. InvStartDate) using `scripts/qbo_import_bills.py`.
+
+**Two-CSV format:**
+
+- **Header CSV** (`bills_header.csv` by default): one row per bill. Required columns: `BillId`, `VendorId`, `TxnDate`. Optional: `DueDate`, `APAccountId`, `DocNumber`, `PrivateNote`, `Currency`, `ExchangeRate`, `TotalAmt`.
+- **Lines CSV** (`bills_lines.csv` by default): one row per line. Required: `BillId`, `DetailType`, `Amount`. For **ItemBasedExpenseLineDetail**: `ItemId` (optional: `Qty`, `UnitPrice`, `TaxCodeId`, `CustomerId`, `ClassId`, `BillableStatus`). For **AccountBasedExpenseLineDetail**: `AccountId` (optional: `TaxCodeId`, `CustomerId`, `ClassId`). Optional on any line: `Description`.
+
+The script validates that the header `TotalAmt` (if present) matches the sum of line `Amount` within 0.01 before creating.
+
+**Tax (header “Amounts are” and line tax):**
+
+- By default the script sets **GlobalTaxCalculation** to `TaxInclusive` and resolves the TaxCode named **Exempt** (e.g. “Exempt (0%)”) from QBO and applies it to every expense line. This makes the created bill show “Amounts are: Inclusive of Tax” and line tax “Exempt (0%)” instead of “No VAT” or “Out of Scope”.
+- Use `--taxcode-name "Exempt"` (default) or another active TaxCode name; `--global-tax-calc TaxInclusive` (default). Dry-run prints the resolved TaxCode Id and each line’s TaxCodeRef.
+
+**Bill number (DocNumber):**
+
+- If the header CSV has a non-empty `DocNumber`, it is used as-is.
+- Otherwise the script generates a deterministic DocNumber: `BILL-<VENDOR_CODE>-<YYYYMMDD>-<SHORT_HASH>` (e.g. `BILL-JNF-20260111-A3F9`), where VENDOR_CODE is the first letters of up to 3 words from the vendor name, and SHORT_HASH is the first 4 characters of a SHA1 of VendorId, TxnDate, TotalAmt, and BillId. Max length 21 characters. Re-importing the same bill produces the same DocNumber.
+
+**Location (DepartmentRef) and Terms (SalesTermRef):**
+
+- By default the script sets **Location** to “Plot C, Golf Road” and **Terms** to “Due on receipt” by resolving Department and Term by name from QBO and adding `DepartmentRef` and `SalesTermRef` to the Bill payload. Use **`--location-name`** (default: `Plot C, Golf Road`) and **`--terms-name`** (default: `Due on receipt`) to override. Dry-run prints the chosen names and resolved IDs.
+
+**Multi-bill and taxcode:**
+
+- Pass exactly one of **`--bill-id`** (single), **`--bill-ids`** (list), or **`--all`** (every BillId in header that has lines). TaxCode is resolved **once** at start (by name or by **`--taxcode-id`**) and reused for every bill. Use **`--taxcode-id 4`** (or your Exempt Id) to skip the TaxCode lookup when you already know it.
+
+**Commands (run from repo root):**
+
+```bash
+# Single bill: dry-run or create
+python scripts/qbo_import_bills.py --company company_a --bill-id 123 --dry-run
+python scripts/qbo_import_bills.py --company company_a --bill-id 123 --create
+
+# Multiple bills by ID list
+python scripts/qbo_import_bills.py --company company_a --bill-ids 58984 58985 58986 --headers exports/company_a_bills/bills_header.csv --lines exports/company_a_bills/bills_lines.csv --create
+
+# All bills in the CSVs
+python scripts/qbo_import_bills.py --company company_a --all --headers exports/company_a_bills/bills_header.csv --lines exports/company_a_bills/bills_lines.csv --create
+
+# Use known Exempt taxcode Id (no TaxCode query)
+python scripts/qbo_import_bills.py --company company_a --bill-ids 58984 58985 --taxcode-id 4 --create
+
+# Custom tax or CSV paths (single bill)
+python scripts/qbo_import_bills.py --company company_a --bill-id 123 --taxcode-name "Exempt" --global-tax-calc TaxInclusive --headers path/to/bills_header.csv --lines path/to/bills_lines.csv --dry-run
+```
+
+You must pass exactly one of `--dry-run` or `--create`. Use `--dry-run` first to confirm the payload, then `--create` to POST to QBO.
 
 ### Data Folders
 
@@ -397,7 +462,7 @@ If `SLACK_WEBHOOK_URL` is configured, the pipeline sends:
 
 - **Start:** Pipeline beginning (includes date/range and company)
 - **Watchdog Update:** When RAW spills are created or merged (high-signal only)
-- **Success:** All phases completed with summary
+- **Success:** All phases completed with a structured summary: *Updates* (row stats, sales receipt upload stats, stale ledger, inventory items created/patched, warnings/blockers) and *Reconciliation* (MATCH/MISMATCH, EPOS total, QBO total, difference).
 - **Failure:** Critical error with concise reason
 
 **Watchdog messages include:**
@@ -509,7 +574,32 @@ python store_tokens.py --list
 
 **Adding a second company:** Simply run the OAuth flow again for the new company and store tokens using the same script with the new company's `--company` argument. The SQLite database stores tokens separately per company.
 
-### 3. Verify .gitignore
+### 3. QBO query scripts
+
+Ad-hoc query and debug scripts live in `scripts/qbo_queries/`. Run from repo root with `--company` (required). See `scripts/qbo_queries/README.md` for the full list.
+
+| Script | Purpose |
+|--------|---------|
+| `qbo_query.py` | Run arbitrary QBO SQL-like query |
+| `qbo_inv_manager.py` | **Inventory manager:** get item by ID/name (incl. ParentRef/FullyQualifiedName), list InvStartDate issues, set InvStartDate (single, bulk, or from CSV). See [Inventory manager](#inventory-manager-qbo_inv_managerpy) below. |
+| `qbo_account_query.py` | Run Account queries (name-based) |
+| `qbo_verify_mapping_accounts.py` | Verify Product.Mapping.csv accounts exist in QBO |
+
+#### Inventory manager (qbo_inv_manager.py)
+
+The inventory manager lives in `scripts/qbo_inv_manager.py` and consolidates item lookup, InvStartDate listing, and InvStartDate patching. Run from repo root with `--company` (required).
+
+| Subcommand | Purpose | Example |
+|------------|---------|---------|
+| `get` | Get item by ID or search by name | `python scripts/qbo_inv_manager.py --company company_a get --item-id 7220` or `get --name "NAN-OPTIPRO"` |
+| `list-invstart` | List inventory items with InvStartDate after cutoff (optional export CSV) | `python scripts/qbo_inv_manager.py --company company_a list-invstart --cutoff-date 2026-01-01 --export-csv reports/issues.csv` |
+| `set-invstart` | Set InvStartDate for one item | `python scripts/qbo_inv_manager.py --company company_a set-invstart --item-id 7220 --date 2026-01-01` |
+| `set-invstart-bulk` | Find all items with InvStartDate > cutoff and patch to new date | `python scripts/qbo_inv_manager.py --company company_a set-invstart-bulk --cutoff-date 2026-01-01 --new-date 2026-01-01` |
+| `set-invstart-from-csv` | Patch InvStartDate for item IDs listed in a CSV (e.g. blockers file) | `python scripts/qbo_inv_manager.py --company company_a set-invstart-from-csv --csv reports/inventory_start_date_blockers_company_a_2026-01-01.csv --new-date 2026-01-01` |
+
+For bypass mode and for `set-invstart-from-csv`, the CSV must have an `ItemId` column. The `list-invstart --export-csv` output uses column `Id`; rename it to `ItemId` for use as blockers CSV or with `set-invstart-from-csv`.
+
+### 4. Verify .gitignore
 
 Ensure these are ignored:
 
@@ -521,7 +611,7 @@ Ensure these are ignored:
 - `logs/` — Execution logs
 - `*.csv` — Processing files
 
-### 4. (Optional) Enable Pre-commit Secret Scanning
+### 5. (Optional) Enable Pre-commit Secret Scanning
 
 To catch hardcoded secrets before committing, you can enable pre-commit hooks:
 
@@ -651,7 +741,184 @@ The pipeline supports multiple companies, each with its own configuration file. 
 
 ---
 
+## Inventory Items Configuration
+
+The pipeline supports creating QBO Inventory items (instead of Service items) when products don't exist in QuickBooks. This feature is configurable per company and uses category-based account mapping.
+
+### Configuration
+
+Add an optional `inventory` section to your company JSON config:
+
+```json
+{
+  "inventory": {
+    "enable_inventory_items": false,
+    "allow_negative_inventory": false,
+    "inventory_start_date": "today",
+    "default_qty_on_hand": 0,
+    "product_mapping_file": "mappings/Product.Mapping.csv"
+  }
+}
+```
+
+**Fields:**
+- `enable_inventory_items`: Enable inventory item creation (default: `false`)
+- `allow_negative_inventory`: Allow negative inventory when posting SalesReceipts (default: `false`)
+- `inventory_start_date`: Start date for inventory tracking - use `"today"` or ISO date like `"2026-01-26"` (default: `"today"`)
+- `default_qty_on_hand`: Starting quantity for new inventory items (default: `0`)
+- `product_mapping_file`: Path to category mapping CSV (default: `"mappings/Product.Mapping.csv"`)
+
+### Environment Variable Overrides
+
+Precedence: **ENV → company JSON → defaults**
+
+You can override inventory settings via environment variables:
+
+```bash
+COMPANY_A_ENABLE_INVENTORY_ITEMS=true
+COMPANY_A_ALLOW_NEGATIVE_INVENTORY=true
+COMPANY_A_INVENTORY_START_DATE=2026-01-26  # or "today"
+COMPANY_A_DEFAULT_QTY_ON_HAND=0
+```
+
+### Product Category Mapping
+
+The pipeline uses `mappings/Product.Mapping.csv` to map EPOS product categories to QBO accounts. The CSV must have these exact headers:
+
+- `Category` — EPOS product category (matches EPOS CSV "Category" column)
+- `Inventory Account` — Asset account (e.g., `"120000 - Inventory:120100 - Grocery"`)
+- `Revenue Account` — Income account (e.g., `"400000 - Revenue:400100 - Revenue - Grocery"`)
+- `Cost of Sale account` — COGS account (e.g., `"200000 - Cost of sales:200100 - Purchases - Groceries"`)
+
+**Account Resolution:**
+- Accounts are resolved by `FullyQualifiedName` first
+- Falls back to `AccountNumber` if FullyQualifiedName not found
+- Account strings format: `"<AccountNumber> - <FullyQualifiedName>"`
+
+**Important:** If any EPOS category is missing in the mapping CSV, the pipeline will fail with a clear error message.
+
+### QuickBooks Settings
+
+When `allow_negative_inventory` is enabled, you must also enable negative inventory in QuickBooks:
+
+1. Go to **Settings** → **Company Settings** → **Sales**
+2. Enable **"Allow negative inventory"**
+3. Save changes
+
+If negative inventory is not enabled in QBO, SalesReceipts will be rejected with an error message.
+
+### Example: Company A Configuration
+
+```json
+{
+  "company_key": "company_a",
+  "inventory": {
+    "enable_inventory_items": true,
+    "allow_negative_inventory": true,
+    "inventory_start_date": "today",
+    "default_qty_on_hand": 0
+  }
+}
+```
+
+### Behavior
+
+**When `enable_inventory_items` is `true`:**
+- Item resolution runs **once per run**: all unique item names are prefetched from QBO, then resolved (patch or create) in a single phase. Per line, only a lookup in `item_result_by_name` is used — no per-line QBO API calls.
+- Missing products are created as **Inventory items** (not Service items)
+- Items start with `QtyOnHand = default_qty_on_hand` (typically 0)
+- Accounts are mapped from category using `mappings/Product.Mapping.csv` (categories → Inventory/Revenue/COGS accounts)
+- When items are created or patched, UnitPrice and PurchaseCost are set/updated from CSV (UnitPrice: when missing/0 or differs by >0.01; PurchaseCost: when missing/0)
+- Unit prices are set from EPOS CSV `NET Sales` column (per-unit); purchase costs from `Cost Price` column (per-unit)
+
+**When `enable_inventory_items` is `false` (default):**
+- Missing products are created as **Service items** (existing behavior)
+- No account mapping required
+- No inventory tracking
+
+**Negative Inventory Handling:**
+- If `allow_negative_inventory` is `true` and QBO accepts the SalesReceipt (with warnings), the pipeline continues and logs a warning
+- If QBO rejects due to inventory, the pipeline fails with instructions to enable negative inventory in QBO settings
+- If `allow_negative_inventory` is `false`, inventory errors are treated as fatal (existing behavior)
+
+### InvStartDate and QBO 6270
+
+Inventory items whose **InvStartDate** is after the receipt date can cause QBO error **6270**. The upload script no longer runs an InvStartDate audit or patch.
+
+- Use the **inventory manager** (see [Inventory manager](#inventory-manager-qbo_inv_managerpy) below) to list issues and set InvStartDate (single item, bulk, or from a blockers CSV).
+
+### Bypass inventory start-date (optional)
+
+When QBO rejects SalesReceipts with error **6270** (transaction date prior to inventory start date), you can optionally **replace** blocked line items with a **Service item** so totals and tax stay correct, without changing inventory items.
+
+**This mode is off by default** and must be explicitly enabled with `--bypass-inventory-startdate`.
+
+**Requirements:**
+- Configure a bypass income account: in company JSON set `qbo.bypass_income_account_id` to your QBO income account ID, or set env `COMPANY_A_BYPASS_INCOME_ACCOUNT_ID` (replace `A` with your company key).
+- Optionally generate a blockers CSV with the inventory manager:  
+  `python scripts/qbo_inv_manager.py --company company_a list-invstart --cutoff-date 2026-01-01 --export-csv reports/inventory_start_date_blockers_company_a_2026-01-01.csv`  
+  (Use the same cutoff date as your run. The blockers CSV must have an `ItemId` column; if you use `list-invstart --export-csv`, that file has column `Id` — rename to `ItemId` for bypass or `set-invstart-from-csv`.)
+
+**Flags (all optional except enabling bypass):**
+
+| Flag | Description |
+|------|-------------|
+| `--bypass-inventory-startdate` | Enable bypass mode (never default). |
+| `--bypass-item-name "EPOS Sales (Bypass)"` | Name of the Service item used for swapped lines (default: `EPOS Sales (Bypass)`). |
+| `--bypass-income-account <id>` | Override income account ID (otherwise from config/env). |
+| `--bypass-report-csv <path>` | Path for swap report CSV (default: `reports/bypass_swaps_<company>_<date>.csv`). |
+| `--bypass-blockers-csv <path>` | Path to blockers CSV (default: `reports/inventory_start_date_blockers_<company>_<date>.csv`). |
+| `--dry-run` | Build payloads, apply swaps, write report CSV; do not upload to QBO. |
+
+**Example:**
+
+```bash
+# With pre-loaded blockers CSV and bypass income account in config
+python qbo_upload.py --company company_a --target-date 2026-01-01 --bypass-inventory-startdate
+
+# Dry run: see what would be swapped and where report would be written
+python qbo_upload.py --company company_a --target-date 2026-01-01 --bypass-inventory-startdate --dry-run
+```
+
+**Behavior:**
+- Blocked lines (item in blockers set) are replaced with the bypass Service item; **line Amount, tax code, and tax treatment are unchanged**.
+- Each swapped line gets audit text in Description: `[BYPASS_INVSTARTDATE] originalItemId=... originalName=...`
+- A CSV report of every swap is written (columns: company, receiptDocNo, receiptTxnDate, originalItemId, originalItemName, bypassItemId, lineAmount, taxCode, reason).
+- If the first upload fails with 6270 and blockers were not pre-loaded, the script diagnoses, applies swaps, and **retries the upload once**.
+
+**When to use:** One-time remediation when many receipts are blocked by InvStartDate; prefer fixing InvStartDate on items using `scripts/qbo_inv_manager.py` (e.g. `set-invstart-bulk` or `set-invstart-from-csv`) when possible.
+
+### Verification Checklist
+
+After enabling inventory items, verify:
+- [ ] No "Uncategorised items or services" in Profit & Loss
+- [ ] Products appear as Inventory items (not Service) in QBO
+- [ ] Inventory items show correct accounts (Asset, Income, COGS)
+- [ ] Companies without inventory enabled still create Service items (unchanged behavior)
+- [ ] Slack summary includes inventory stats (items created, warnings, rejections)
+
+**Inventory pricing (TOTAL Sales / Cost Price):**
+
+1. Run transform so output CSV includes pricing columns:
+   `python transform.py --company company_a --target-date 2026-01-28 --raw-file BookKeeping_2026_01_29_1911.csv`
+   - Confirm output CSV has columns: **TOTAL Sales**, **NET Sales**, **Cost Price** with row values (e.g. 500.00, 465.12, 329.46).
+2. In QBO: Product/Service → open Inventory item → **Purchasing** tab: Purchase cost should match Cost Price / qty (e.g. 329.46). **Sales** tab: Price/rate should match TOTAL Sales / qty (e.g. 500.00) with "Price is inclusive of sales tax" reflected.
+
+---
+
 ## Troubleshooting
+
+### QBO query and item gotchas
+
+- **SubItem cannot be selected in some QBO UI dropdowns:** When using item hierarchy (SubItem + ParentRef), sub-items may not appear as selectable in every QBO screen (e.g. when picking an item for a transaction). Use the **parent category** or search by name where supported. The API accepts sub-items for Sales Receipt lines; the limitation is UI-only.
+- **"Category:Product" display on Sales Receipts:** When `use_item_hierarchy` is true, QuickBooks displays the **FullyQualifiedName** (e.g. `Category Name:Product Name`) in the Product/Service column. This is expected and not a bug; we are not changing this behavior.
+
+### Logs to look for
+
+- **Mapping loaded:** `[INFO] Loaded N category mappings from mappings/Product.Mapping.csv`
+- **Item resolution summary:** `[INFO] Item resolution summary: total_lines=... unique_items=... items_created=... items_patched=... item_lookups_from_prefetch=...`
+- **Items created/patched:** `[INFO] Patched Inventory item fields: Id=... UnitPrice:...->... PurchaseCost:...->...` and `[INFO] Attached ParentRef/SubItem to Inventory item '...'`
+- **Inventory tip:** `[INFO] For InvStartDate issues (QBO 6270), use: python scripts/qbo_inv_manager.py --company <key> list-invstart / set-invstart-bulk`
 
 ### RAW Spill Not Being Merged
 
@@ -670,7 +937,7 @@ The pipeline includes automatic deduplication:
 
 **QBO is the source of truth:** If a DocNumber exists in QBO (with matching TxnDate in trading-day mode), the upload is skipped. Stale ledger entries (in ledger but not in QBO) are detected, logged, and healed by attempting upload.
 
-If you need to re-upload, delete existing receipts first using `query_qbo_for_company.py`.
+If you need to re-upload, delete existing receipts first using the QBO query scripts in `scripts/qbo_queries/` (e.g. `qbo_query.py` to run a query, or QBO UI).
 
 ### Token Refresh Fails
 

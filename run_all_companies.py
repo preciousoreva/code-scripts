@@ -1,7 +1,9 @@
 import argparse
 import subprocess
 import sys
-from typing import Optional
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Tuple
 from company_config import get_available_companies
 
 
@@ -36,6 +38,18 @@ def run(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Skip EPOS download and use existing split files in uploads/range_raw/ (range mode only).",
     )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="Number of companies to run in parallel (default: 1 = sequential).",
+    )
+    parser.add_argument(
+        "--stagger-seconds",
+        type=int,
+        default=2,
+        help="Seconds to wait between starting parallel jobs (default: 2).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -46,6 +60,10 @@ def run(argv: Optional[list[str]] = None) -> int:
     # Validation: --skip-download only works in range mode
     if args.skip_download and (args.from_date is None or args.to_date is None):
         parser.error("--skip-download can only be used with --from-date and --to-date (range mode)")
+    if args.parallel < 1:
+        parser.error("--parallel must be >= 1")
+    if args.stagger_seconds < 0:
+        parser.error("--stagger-seconds must be >= 0")
 
     all_companies = [c for c in get_available_companies() if not c.endswith("_example")]
     if not all_companies:
@@ -77,25 +95,43 @@ def run(argv: Optional[list[str]] = None) -> int:
     if args.skip_download:
         forwarded_date_args.append("--skip-download")
 
-    failures: list = []
-
-    for company in companies:
+    def _run_company(company_key: str) -> Tuple[str, int]:
         if args.from_date and args.to_date:
-            print(f"\n=== Running pipeline for {company} (range {args.from_date} to {args.to_date}) ===")
+            print(f"\n=== Running pipeline for {company_key} (range {args.from_date} to {args.to_date}) ===")
         elif args.target_date:
-            print(f"\n=== Running pipeline for {company} (target-date {args.target_date}) ===")
+            print(f"\n=== Running pipeline for {company_key} (target-date {args.target_date}) ===")
         else:
-            print(f"\n=== Running pipeline for {company} (yesterday) ===")
+            print(f"\n=== Running pipeline for {company_key} (yesterday) ===")
 
-        cmd = [sys.executable, "run_pipeline.py", "--company", company] + forwarded_date_args
+        cmd = [sys.executable, "run_pipeline.py", "--company", company_key] + forwarded_date_args
         result = subprocess.run(cmd)
+        return (company_key, result.returncode)
 
-        if result.returncode != 0:
-            msg = f"Pipeline failed for {company} (exit code {result.returncode})."
-            print(f"[ERROR] {msg}")
-            failures.append(company)
-            if not args.continue_on_failure:
-                return result.returncode
+    failures: list = []
+    if args.parallel == 1:
+        for company in companies:
+            company_key, rc = _run_company(company)
+            if rc != 0:
+                msg = f"Pipeline failed for {company_key} (exit code {rc})."
+                print(f"[ERROR] {msg}")
+                failures.append(company_key)
+                if not args.continue_on_failure:
+                    return rc
+    else:
+        # Small stagger to reduce simultaneous API bursts
+        stagger_seconds = args.stagger_seconds
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = []
+            for idx, company in enumerate(companies):
+                if idx > 0:
+                    time.sleep(stagger_seconds)
+                futures.append(executor.submit(_run_company, company))
+            for fut in as_completed(futures):
+                company_key, rc = fut.result()
+                if rc != 0:
+                    msg = f"Pipeline failed for {company_key} (exit code {rc})."
+                    print(f"[ERROR] {msg}")
+                    failures.append(company_key)
 
     if failures:
         print(f"\nCompleted with failures: {', '.join(failures)}")

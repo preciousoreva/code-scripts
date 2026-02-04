@@ -7,8 +7,10 @@ Provides a single source of truth for company settings.
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
+from datetime import datetime
 
 
 class CompanyConfig:
@@ -185,6 +187,120 @@ class CompanyConfig:
     def trading_day_start_minute(self) -> int:
         """Trading day start minute (default: 0)."""
         return self._data.get("trading_day", {}).get("start_minute", 0)
+    
+    def _get_env_or_config(self, env_key: str, config_key: str, default: Any) -> Any:
+        """Get value from ENV (if set) or config, with fallback to default.
+        
+        Precedence: ENV → company JSON → default
+        """
+        env_value = os.environ.get(env_key)
+        if env_value is not None:
+            # Convert string ENV values to appropriate types
+            if isinstance(default, bool):
+                return env_value.lower() in ("true", "1", "yes", "on")
+            elif isinstance(default, int):
+                try:
+                    return int(env_value)
+                except ValueError:
+                    return default
+            else:
+                return env_value
+        return self._data.get("inventory", {}).get(config_key, default)
+    
+    @property
+    def inventory_enabled(self) -> bool:
+        """Whether inventory items are enabled (default: False).
+        
+        ENV override: {COMPANY_KEY}_ENABLE_INVENTORY_ITEMS
+        """
+        env_key = f"{self.company_key.upper()}_ENABLE_INVENTORY_ITEMS"
+        return self._get_env_or_config(env_key, "enable_inventory_items", False)
+    
+    @property
+    def allow_negative_inventory(self) -> bool:
+        """Whether negative inventory is allowed (default: False).
+        
+        ENV override: {COMPANY_KEY}_ALLOW_NEGATIVE_INVENTORY
+        """
+        env_key = f"{self.company_key.upper()}_ALLOW_NEGATIVE_INVENTORY"
+        return self._get_env_or_config(env_key, "allow_negative_inventory", False)
+    
+    @property
+    def inventory_start_date(self) -> str:
+        """Inventory start date as ISO string (default: "today").
+        
+        If "today", returns current date in YYYY-MM-DD format.
+        ENV override: {COMPANY_KEY}_INVENTORY_START_DATE
+        """
+        env_key = f"{self.company_key.upper()}_INVENTORY_START_DATE"
+        value = self._get_env_or_config(env_key, "inventory_start_date", "today")
+        
+        if value == "today":
+            return datetime.now().strftime("%Y-%m-%d")
+        return str(value)
+    
+    @property
+    def default_qty_on_hand(self) -> int:
+        """Default quantity on hand for new inventory items (default: 0).
+        
+        ENV override: {COMPANY_KEY}_DEFAULT_QTY_ON_HAND
+        """
+        env_key = f"{self.company_key.upper()}_DEFAULT_QTY_ON_HAND"
+        return self._get_env_or_config(env_key, "default_qty_on_hand", 0)
+    
+    @property
+    def auto_fix_wrong_type_items(self) -> bool:
+        """Whether to automatically rename and inactivate wrong-type items to free names for inventory creation (default: False).
+        
+        ENV override: {COMPANY_KEY}_AUTO_FIX_WRONG_TYPE_ITEMS
+        """
+        env_key = f"{self.company_key.upper()}_AUTO_FIX_WRONG_TYPE_ITEMS"
+        return self._get_env_or_config(env_key, "auto_fix_wrong_type_items", False)
+
+    @property
+    def use_item_hierarchy(self) -> bool:
+        """Always True. SubItem/ParentRef (category hierarchy) is always used for inventory items.
+        Config/ENV value is ignored; kept for backward compatibility only.
+        """
+        return True
+
+    @property
+    def auto_fix_inv_start_date_blockers(self) -> bool:
+        """Whether to automatically PATCH Item.InvStartDate for inventory start-date blockers before upload (default: False).
+        ENV override: {COMPANY_KEY}_AUTO_FIX_INV_START_DATE_BLOCKERS
+        """
+        env_key = f"{self.company_key.upper()}_AUTO_FIX_INV_START_DATE_BLOCKERS"
+        return self._get_env_or_config(env_key, "auto_fix_inv_start_date_blockers", False)
+
+    @property
+    def inv_start_date_floor(self) -> str:
+        """Floor date (YYYY-MM-DD) for InvStartDate patches; do not set InvStartDate earlier than this.
+        If not set in config, uses inventory_start_date (resolved)."""
+        explicit = self._data.get("inventory", {}).get("inv_start_date_floor")
+        if explicit is not None and str(explicit).strip():
+            return str(explicit).strip()[:10]
+        return self.inventory_start_date
+
+    @property
+    def product_mapping_file(self) -> Path:
+        """Path to product category mapping CSV file (default: mappings/Product.Mapping.csv)."""
+        mapping_file = self._data.get("inventory", {}).get("product_mapping_file", "mappings/Product.Mapping.csv")
+        repo_root = Path(__file__).resolve().parent
+        return repo_root / mapping_file
+
+    @property
+    def bypass_income_account_id(self) -> Optional[str]:
+        """
+        Income account ID for the bypass Service item (InvStartDate bypass mode).
+        ENV override: {COMPANY_KEY}_BYPASS_INCOME_ACCOUNT_ID
+        Config: qbo.bypass_income_account_id
+        Required when --bypass-inventory-startdate is used.
+        """
+        env_key = f"{self.company_key.upper().replace('-', '_')}_BYPASS_INCOME_ACCOUNT_ID"
+        value = os.environ.get(env_key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        return self._data.get("qbo", {}).get("bypass_income_account_id")
     
     def get_qbo_config(self) -> Dict[str, Any]:
         """Get QBO-specific configuration."""

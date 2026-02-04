@@ -1,5 +1,7 @@
 import os
+import re
 import json
+import csv
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +13,8 @@ try:
     import certifi
 except ImportError:  # pragma: no cover - best effort
     certifi = None
+
+SLACK_TIMEOUT_SECS = 10
 
 
 def send_slack_success(message: str, webhook_url: str = None) -> None:
@@ -49,10 +53,99 @@ def send_slack_success(message: str, webhook_url: str = None) -> None:
     )
 
     try:
-        with urllib.request.urlopen(req, context=context) as resp:
+        with urllib.request.urlopen(req, context=context, timeout=SLACK_TIMEOUT_SECS) as resp:
             logging.info(f"Slack message sent (status {resp.status})")
     except Exception as e:
         logging.error(f"Failed to send Slack message: {e}")
+
+
+def notify_import_start(
+    import_type: str,
+    company_key: str,
+    summary: Dict[str, Any],
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when an import operation starts.
+
+    Args:
+        import_type: Label for the operation (e.g. "bills", "products").
+        company_key: Company identifier (e.g. company_a).
+        summary: Dict with at least "total" (number of items to import).
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping import start notification.")
+        return
+    total = summary.get("total", 0)
+    label = "bill(s) to import" if import_type == "bills" else "row(s) to process"
+    message = (
+        f"*{import_type.title()} import started* — {company_key}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Total: {total} {label}"
+    )
+    send_slack_success(message, webhook_url)
+
+
+def notify_import_success(
+    import_type: str,
+    company_key: str,
+    summary: Dict[str, Any],
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when an import operation completes successfully.
+
+    Args:
+        import_type: Label for the operation (e.g. "bills", "products").
+        company_key: Company identifier.
+        summary: Dict with created (required), optional: failed, skipped, total.
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping import success notification.")
+        return
+    created = summary.get("created", 0)
+    failed = summary.get("failed", 0)
+    skipped = summary.get("skipped")
+    total = summary.get("total")
+    parts = [f"Created: {created}", f"Failed: {failed}"]
+    if skipped is not None:
+        parts.append(f"Skipped: {skipped}")
+    if total is not None:
+        parts.append(f"Total: {total}")
+    message = (
+        f"*{import_type.title()} import completed* — {company_key}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• {', '.join(parts)}"
+    )
+    send_slack_success(message, webhook_url)
+
+
+def notify_import_failure(
+    import_type: str,
+    company_key: str,
+    error: str,
+    webhook_url: Optional[str] = None,
+) -> None:
+    """
+    Send a Slack notification when an import operation fails.
+
+    Args:
+        import_type: Label for the operation (e.g. "bills", "products").
+        company_key: Company identifier.
+        error: Error message string.
+        webhook_url: Optional webhook URL; if None, skip sending.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping import failure notification.")
+        return
+    message = (
+        f"*{import_type.title()} import failed* — {company_key}\n"
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"• Error: {error}"
+    )
+    send_slack_success(message, webhook_url)
 
 
 def notify_pipeline_update(
@@ -103,6 +196,49 @@ def notify_pipeline_success(
     
     message = format_run_summary(pipeline_name, log_file, summary, status="success")
     send_slack_success(message, webhook_url)
+
+
+def _summarize_blockers_csv(repo_root: Path, company_key: str, target_date: str) -> Optional[str]:
+    """
+    If the inventory_start_date_blockers CSV exists for this run, read it and return
+    a short summary (row count + sample items). Used for Slack when 6270 rejections occurred.
+    """
+    if not company_key or not target_date:
+        return None
+    safe_key = re.sub(r"[^\w-]", "_", company_key)
+    filename = f"inventory_start_date_blockers_{safe_key}_{target_date}.csv"
+    filepath = repo_root / "reports" / filename
+    if not filepath.exists():
+        return None
+    try:
+        with open(filepath, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        if not rows:
+            return None
+        # Unique (DocNumber, ItemName, InvStartDate) for a concise summary
+        seen = set()
+        sample_items: List[str] = []
+        for r in rows:
+            name = (r.get("ItemName") or "").strip()
+            inv_date = (r.get("InvStartDate") or "").strip()
+            key = (name, inv_date)
+            if key not in seen and inv_date and inv_date != "(missing)":
+                seen.add(key)
+                sample_items.append(f"{name} ({inv_date})")
+                if len(sample_items) >= 5:
+                    break
+        count = len(rows)
+        if count == 0:
+            return None
+        summary = f"{count} blocker row(s)"
+        if sample_items:
+            summary += f" — e.g. {', '.join(sample_items)}"
+        summary += f"\n  Report: `reports/{filename}`"
+        return summary
+    except Exception as e:
+        logging.warning(f"Could not read blockers CSV for summary: {e}")
+        return None
 
 
 def format_run_summary(
@@ -159,11 +295,11 @@ def format_run_summary(
         reason = extract_error_reason(error)
         message += f"• Reason: {reason}\n"
     
-    # Row statistics
+    # Row statistics (for update / non-success)
     rows_kept = summary.get("rows_kept")
     rows_spilled = summary.get("rows_spilled")
     rows_total = summary.get("rows_total")
-    if rows_total is not None:
+    if rows_total is not None and status != "success":
         message += f"• Rows: {rows_kept} kept, {rows_spilled} spilled (total: {rows_total})\n"
     
     # Spill files
@@ -171,9 +307,102 @@ def format_run_summary(
     if spill_files:
         message += f"• Spill Files: {len(spill_files)} file(s)\n"
     
-    # Upload statistics
+    # --- Success: structured "Updates" and "Reconciliation" sections ---
     upload_stats = summary.get("upload_stats")
-    if upload_stats:
+    if status == "success" and (upload_stats or summary.get("rows_total") is not None):
+        message += "\n*Updates:*\n"
+        if summary.get("rows_total") is not None:
+            message += f"– Rows: {summary.get('rows_kept', '')} kept (total: {summary.get('rows_total', '')})\n"
+        if upload_stats:
+            attempted = upload_stats.get("attempted", 0)
+            uploaded = upload_stats.get("uploaded", 0)
+            skipped = upload_stats.get("skipped", 0)
+            failed = upload_stats.get("failed", 0)
+            stale_ledger = upload_stats.get("stale_ledger_entries_detected", 0)
+            items_created = upload_stats.get("items_created_count", 0)
+            inventory_items_created = upload_stats.get("inventory_items_created_count", 0)
+            service_items_created = upload_stats.get("service_items_created_count", 0)
+            items_patched = upload_stats.get("items_patched_count", 0)
+            inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
+            inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
+            inventory_start_date_issues = upload_stats.get("inventory_start_date_issues_count", 0)
+            target_date = summary.get("target_date", "")
+            repo_root = Path(__file__).resolve().parent
+            company_key = summary.get("company_key", "")
+            
+            # Sales receipts
+            message += f"– Sales receipts: {uploaded} uploaded, {skipped} skipped (duplicates), {failed} failed (attempted: {attempted})\n"
+            if stale_ledger > 0:
+                message += f"– Stale ledger: {stale_ledger} entry/entries healed by uploading\n"
+            
+            # Items created/patched (always show so we explicitly report when new items are created)
+            if items_created > 0 or items_patched > 0:
+                parts = []
+                if inventory_items_created > 0:
+                    parts.append(f"{inventory_items_created} Inventory created")
+                if service_items_created > 0:
+                    parts.append(f"{service_items_created} Service created")
+                if items_patched > 0:
+                    parts.append(f"{items_patched} patched")
+                message += f"– Items: {', '.join(parts)}\n"
+            else:
+                message += "– Items: no new items created or patched\n"
+            if inventory_warnings > 0:
+                message += f"– Inventory warnings: {inventory_warnings}\n"
+            if inventory_rejections > 0:
+                message += f"– Inventory rejections: {inventory_rejections}\n"
+            if inventory_start_date_issues > 0 and target_date:
+                message += f"– InvStartDate: {inventory_start_date_issues} item(s) have InvStartDate after {target_date}\n"
+            if (inventory_rejections > 0 or failed > 0) and target_date:
+                blockers_summary = _summarize_blockers_csv(repo_root, company_key, target_date)
+                if blockers_summary:
+                    message += f"– InvStartDate blockers (6270): {blockers_summary}\n"
+    
+    # Reconciliation block (success: structured; failure: brief)
+    reconcile = summary.get("reconcile")
+    if reconcile:
+        reconcile_status = reconcile.get("status", "NOT RUN")
+        epos_total = reconcile.get("epos_total", 0)
+        epos_count = reconcile.get("epos_count", 0)
+        qbo_total = reconcile.get("qbo_total", 0)
+        qbo_count = reconcile.get("qbo_count", 0)
+        difference = reconcile.get("difference", 0)
+        
+        if status == "success":
+            message += "\n*Reconciliation:* "
+            if reconcile_status == "MATCH":
+                message += "MATCH\n"
+            elif reconcile_status == "MISMATCH":
+                message += "MISMATCH\n"
+            else:
+                message += "NOT RUN\n"
+            if reconcile_status != "NOT RUN":
+                message += f"  – EPOS: ₦{epos_total:,.2f} ({epos_count} receipts)\n"
+                message += f"  – QBO: ₦{qbo_total:,.2f} ({qbo_count} receipts)\n"
+                message += f"  – Difference: ₦{difference:,.2f}\n"
+            else:
+                reason_not_run = reconcile.get("reason", "upload incomplete")
+                message += f"  – Reconciliation not run ({reason_not_run})\n"
+        else:
+            if reconcile_status == "MATCH":
+                message += f"• Reconciliation: MATCH\n"
+            elif reconcile_status == "MISMATCH":
+                message += f"• ⚠️ Reconciliation: MISMATCH\n"
+            else:
+                message += f"• Reconciliation: NOT RUN\n"
+            if reconcile_status != "NOT RUN":
+                message += f"  – EPOS: ₦{epos_total:,.2f} ({epos_count} receipts)\n"
+                message += f"  – QBO: ₦{qbo_total:,.2f} ({qbo_count} receipts)\n"
+                message += f"  – Difference: ₦{difference:,.2f}\n"
+            else:
+                reason_not_run = reconcile.get("reason", "upload incomplete")
+                message += f"  – Reconciliation not run ({reason_not_run})\n"
+    elif status == "failure":
+        message += f"• Reconciliation: NOT RUN\n"
+        message += f"  – Reconciliation not run (upload incomplete)\n"
+    
+    # Non-success: keep legacy upload/inventory lines when no "Updates" section was added
+    if status != "success" and upload_stats:
         attempted = upload_stats.get("attempted", 0)
         uploaded = upload_stats.get("uploaded", 0)
         skipped = upload_stats.get("skipped", 0)
@@ -182,35 +411,25 @@ def format_run_summary(
         message += f"• Upload: {uploaded} uploaded, {skipped} skipped, {failed} failed (attempted: {attempted})\n"
         if stale_ledger > 0:
             message += f"• Stale ledger entries detected: {stale_ledger} (healed by uploading)\n"
-    
-    # Reconciliation
-    reconcile = summary.get("reconcile")
-    if reconcile:
-        reconcile_status = reconcile.get("status", "NOT RUN")
-        if reconcile_status == "MATCH":
-            message += f"• Reconciliation: MATCH\n"
-        elif reconcile_status == "MISMATCH":
-            message += f"• ⚠️ Reconciliation: MISMATCH\n"
-        else:
-            message += f"• Reconciliation: NOT RUN\n"
-        
-        if reconcile_status != "NOT RUN":
-            epos_total = reconcile.get("epos_total", 0)
-            epos_count = reconcile.get("epos_count", 0)
-            qbo_total = reconcile.get("qbo_total", 0)
-            qbo_count = reconcile.get("qbo_count", 0)
-            difference = reconcile.get("difference", 0)
-            
-            message += f"  – EPOS: ₦{epos_total:,.2f} ({epos_count} receipts)\n"
-            message += f"  – QBO: ₦{qbo_total:,.2f} ({qbo_count} receipts)\n"
-            message += f"  – Difference: ₦{difference:,.2f}\n"
-        else:
-            reason_not_run = reconcile.get("reason", "upload incomplete")
-            message += f"  – Reconciliation not run ({reason_not_run})\n"
-    elif status == "failure":
-        # If failure and no reconcile data, indicate it wasn't run
-        message += f"• Reconciliation: NOT RUN\n"
-        message += f"  – Reconciliation not run (upload incomplete)\n"
+        items_created = upload_stats.get("items_created_count", 0)
+        inventory_items_created = upload_stats.get("inventory_items_created_count", 0)
+        service_items_created = upload_stats.get("service_items_created_count", 0)
+        items_patched = upload_stats.get("items_patched_count", 0)
+        inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
+        inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
+        if items_created > 0 or items_patched > 0 or inventory_warnings > 0 or inventory_rejections > 0:
+            parts = []
+            if inventory_items_created > 0:
+                parts.append(f"{inventory_items_created} Inventory created")
+            if service_items_created > 0:
+                parts.append(f"{service_items_created} Service created")
+            if items_patched > 0:
+                parts.append(f"{items_patched} patched")
+            if inventory_warnings > 0:
+                parts.append(f"{inventory_warnings} warnings")
+            if inventory_rejections > 0:
+                parts.append(f"{inventory_rejections} rejections")
+            message += f"• Items: {', '.join(parts)}\n"
     
     # Trading day boundary stats (if available)
     trading_day_stats = summary.get("trading_day_stats")

@@ -131,6 +131,18 @@ def get_repo_root() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def company_dir_name(display_name: str) -> str:
+    """
+    Convert company display name to Title_Case_With_Underscores.
+    Safe for filesystem paths across OSes.
+    """
+    name = re.sub(r"[^A-Za-z0-9 ]+", " ", str(display_name or "").strip())
+    name = re.sub(r"\s+", " ", name).strip()
+    if not name:
+        return "Company"
+    return "_".join(word.capitalize() for word in name.split())
+
+
 def find_latest_raw_file(repo_root: str) -> str:
     """
     Find the most recently modified CSV in repo root (excluding processed files).
@@ -361,6 +373,19 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
             return 0.0
     
     out["*ItemAmount"] = df.get("TOTAL Sales").apply(to_number)
+    out["TOTAL Sales"] = df.get("TOTAL Sales").apply(to_number)
+
+    # Carry through EPOS totals needed for per-unit calculations downstream (uploader needs NET Sales, Cost Price)
+    if "NET Sales" in df.columns:
+        out["NET Sales"] = df.get("NET Sales").apply(to_number)
+    else:
+        out["NET Sales"] = 0.0
+
+    cost_col = "Cost Price" if "Cost Price" in df.columns else ("Cost" if "Cost" in df.columns else None)
+    if cost_col:
+        out["Cost Price"] = df.get(cost_col).apply(to_number)
+    else:
+        out["Cost Price"] = 0.0
     
     # Tax code handling based on company config
     if config.tax_mode == "vat_inclusive_7_5":
@@ -431,7 +456,7 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
     # Drop temporary columns
     out = out.drop(columns=["_parsed_date", "_date_str"])
     
-    # Column order as required
+    # Column order as required (include TOTAL Sales, NET Sales, Cost Price for upload item create/patch)
     columns = [
         "*SalesReceiptNo",
         "Customer",
@@ -444,6 +469,9 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
         "ItemQuantity",
         "ItemRate",
         "*ItemAmount",
+        "TOTAL Sales",
+        "NET Sales",
+        "Cost Price",
         "*ItemTaxCode",
         "ItemTaxAmount",
         "Service Date",
@@ -576,10 +604,13 @@ def main():
         else:
             normalized_date = datetime.now().strftime("%Y-%m-%d")
     
-    # Write ONE QuickBooks-ready CSV in repo root
+    # Write ONE QuickBooks-ready CSV in per-company output folder
+    company_dir = company_dir_name(config.display_name)
+    output_dir = os.path.join(repo_root, "outputs", company_dir)
+    os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(raw_file))[0]
     output_filename = f"{config.csv_prefix}_{base_name}.csv"
-    output_path = os.path.join(repo_root, output_filename)
+    output_path = os.path.join(output_dir, output_filename)
     
     transformed.to_csv(output_path, index=False)
     print(f"\nWrote combined QuickBooks file: {output_path}")
@@ -622,4 +653,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

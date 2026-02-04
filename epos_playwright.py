@@ -113,6 +113,14 @@ def get_args():
         "--to-date",
         help="End date for range in YYYY-MM-DD format (must be used with --from-date)",
     )
+    parser.add_argument(
+        "--output-dir",
+        help="Directory to save the downloaded CSV (default: repo root).",
+    )
+    parser.add_argument(
+        "--output-filename",
+        help="Explicit filename for the downloaded CSV (default: EPOS suggested filename).",
+    )
     args = parser.parse_args()
     
     # Validation: --from-date and --to-date must be provided together
@@ -122,7 +130,15 @@ def get_args():
     return args
 
 
-def run(playwright: Playwright, config, from_date: str = None, to_date: str = None, target_date: str = None) -> None:
+def run(
+    playwright: Playwright,
+    config,
+    from_date: str = None,
+    to_date: str = None,
+    target_date: str = None,
+    output_dir: str = None,
+    output_filename: str = None,
+) -> None:
     # Get credentials from company config
     try:
         epos_username = config.epos_username
@@ -185,9 +201,11 @@ def run(playwright: Playwright, config, from_date: str = None, to_date: str = No
     # Determine repo root by using the current script's directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(script_dir)
+    save_dir = os.path.abspath(output_dir) if output_dir else repo_root
+    os.makedirs(save_dir, exist_ok=True)
 
-    filename = download.suggested_filename
-    save_path = os.path.join(repo_root, filename)
+    filename = output_filename or download.suggested_filename
+    save_path = os.path.join(save_dir, filename)
     download.save_as(save_path)
 
     # ---------------------
@@ -222,4 +240,12 @@ if __name__ == "__main__":
         print(f"No --target-date provided, using yesterday: {target_date}")
     
     with sync_playwright() as playwright:
-        run(playwright, config, from_date=from_date, to_date=to_date, target_date=target_date)
+        run(
+            playwright,
+            config,
+            from_date=from_date,
+            to_date=to_date,
+            target_date=target_date,
+            output_dir=args.output_dir,
+            output_filename=args.output_filename,
+        )
