@@ -4,7 +4,7 @@ Transform raw company_a invoice CSV (block/section format) into template-shaped 
 Reads a raw file with repeated blocks (DATE, QTY, ITEMS, RATE, AMOUNT), section
 headers (GOLDPLATE INVOICE ... HQ/IKORODU), and TOTAL rows. Outputs a single CSV
 with columns: Customer, InvoiceDate, ServiceDate, ItemName, Description, Qty, Rate,
-Amount, Location, DueDate (same as invoice_template.csv).
+Amount, Location, Terms, DueDate (same as invoice_template.csv).
 
 Usage:
   python scripts/invoice/transform_invoice_raw.py --csv invoices/company_a_raw_invoice.csv
@@ -30,6 +30,7 @@ TEMPLATE_COLS = [
     "Rate",
     "Amount",
     "Location",
+    "Terms",
     "DueDate",
 ]
 
@@ -144,6 +145,7 @@ def transform_raw_to_template(csv_path: Path) -> Tuple[List[dict], str]:
                 "Rate": rate,
                 "Amount": amount,
                 "Location": current_location,
+                "Terms": "Net 30",
                 "DueDate": due,
             })
 

@@ -9,7 +9,8 @@
     "tax_rate_id": "2",
     "tax_rate": 0.075,
     "default_item_id": "1",
-    "default_income_account_id": "1"
+    "default_income_account_id": "1",
+    "default_department_id": "2"
   },
   "epos": {
     "username_env_key": "EPOS_USERNAME_A",

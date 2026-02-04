@@ -32,6 +32,7 @@ REQUIRED_OUT_COLS = [
     "Rate",
     "Amount",
     "Location",
+    "Terms",
     "DueDate",
 ]
 
@@ -45,6 +46,7 @@ INFER_MAP = {
     "ServiceDate": ["service date", "service_date", "servicedate"],
     "Description": ["description", "desc", "item description", "item_desc"],
     "Location": ["location", "location name", "location_name"],
+    "Terms": ["terms", "term", "payment terms", "payment_terms"],
     "DueDate": ["due date", "due_date", "duedate"],
 }
 
@@ -91,6 +93,25 @@ def _parse_date(value: str) -> str:
     if pd.isna(dt):
         raise ValueError(f"Invalid date: {value}")
     return dt.strftime("%Y-%m-%d")
+
+
+def _infer_terms(invoice_date: str, due_date: str) -> str:
+    if not invoice_date or not due_date:
+        return ""
+    try:
+        inv_dt = datetime.strptime(invoice_date, "%Y-%m-%d")
+        due_dt = datetime.strptime(due_date, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    delta_days = (due_dt - inv_dt).days
+    mapping = {
+        0: "Due on receipt",
+        15: "Net 15",
+        30: "Net 30",
+        45: "Net 45",
+        60: "Net 60",
+    }
+    return mapping.get(delta_days, "")
 
 
 def _load_spelling_corrections(path: Optional[str]) -> Dict[str, str]:
@@ -326,6 +347,10 @@ def main() -> int:
         if col_map.get("Location") and pd.notna(row[col_map["Location"]]):
             location = str(row[col_map["Location"]]).strip()
 
+        terms = ""
+        if col_map.get("Terms") and pd.notna(row[col_map["Terms"]]):
+            terms = str(row[col_map["Terms"]]).strip()
+
         out_rows.append({
             "Customer": "GPFH",
             "InvoiceDate": invoice_date,
@@ -336,6 +361,7 @@ def main() -> int:
             "Rate": float(row[col_map["Rate"]]),
             "Amount": float(row[col_map["Amount"]]),
             "Location": location,
+            "Terms": terms,
             "DueDate": due_date or "",
         })
 
@@ -343,6 +369,7 @@ def main() -> int:
 
     # Fill group due dates
     out_df["DueDate"] = out_df["DueDate"].replace("", pd.NA)
+    out_df["Terms"] = out_df["Terms"].replace("", pd.NA)
     grouped = out_df.groupby("InvoiceDate", dropna=False)
     for invoice_date, idx in grouped.groups.items():
         if out_df.loc[idx, "DueDate"].notna().any():
@@ -350,6 +377,11 @@ def main() -> int:
         else:
             due_val = (datetime.strptime(invoice_date, "%Y-%m-%d") + timedelta(days=30)).strftime("%Y-%m-%d")
         out_df.loc[idx, "DueDate"] = due_val
+        if out_df.loc[idx, "Terms"].notna().any():
+            term_val = out_df.loc[idx, "Terms"].dropna().iloc[0]
+        else:
+            term_val = _infer_terms(invoice_date, due_val)
+        out_df.loc[idx, "Terms"] = term_val or ""
 
     # Ensure column order
     out_df = out_df[REQUIRED_OUT_COLS]

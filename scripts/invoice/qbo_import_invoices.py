@@ -24,6 +24,7 @@ from qbo_upload import (
     prefetch_all_items,
     get_tax_code_id_by_name,
     get_department_id,
+    get_term_id,
 )
 from slack_notify import notify_invoice_import_start, notify_invoice_import_success
 
@@ -99,6 +100,25 @@ def _parse_date(value: str) -> str:
     if pd.isna(dt):
         raise ValueError(f"Invalid date: {value}")
     return dt.strftime("%Y-%m-%d")
+
+
+def _infer_terms(invoice_date: str, due_date: str) -> str:
+    if not invoice_date or not due_date:
+        return ""
+    try:
+        inv_dt = datetime.strptime(invoice_date, "%Y-%m-%d")
+        due_dt = datetime.strptime(due_date, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    delta_days = (due_dt - inv_dt).days
+    mapping = {
+        0: "Due on receipt",
+        15: "Net 15",
+        30: "Net 30",
+        45: "Net 45",
+        60: "Net 60",
+    }
+    return mapping.get(delta_days, "")
 
 
 def _get_customer_id_by_name(name: str, token_mgr: TokenManager, realm_id: str) -> Optional[str]:
@@ -306,6 +326,7 @@ def main() -> int:
 
     invoice_seq: Dict[str, int] = {}
     department_cache: Dict[str, Optional[str]] = {}
+    term_cache: Dict[str, Optional[str]] = {}
     item_detail_cache: Dict[str, Dict[str, Any]] = {}
 
     invoices_created = 0
@@ -354,6 +375,16 @@ def main() -> int:
                 due_date = _parse_date(due_vals[0])
         if not due_date:
             due_date = (datetime.strptime(invoice_date, "%Y-%m-%d") + timedelta(days=30)).strftime("%Y-%m-%d")
+
+        terms_name = ""
+        if "Terms" in group.columns:
+            for tval in group["Terms"].dropna().astype(str).tolist():
+                tval = tval.strip()
+                if tval and tval.lower() != "nan":
+                    terms_name = tval
+                    break
+        if not terms_name:
+            terms_name = _infer_terms(invoice_date, due_date)
 
         lines = []
         for _, row in group.iterrows():
@@ -432,11 +463,27 @@ def main() -> int:
 
         # Optional Location (Department) if provided in CSV
         if "Location" in group.columns:
-            location_val = str(group["Location"].dropna().astype(str).head(1).values[0]) if group["Location"].notna().any() else ""
+            location_val = ""
+            if group["Location"].notna().any():
+                for lval in group["Location"].dropna().astype(str).tolist():
+                    lval = lval.strip()
+                    if lval and lval.lower() != "nan":
+                        location_val = lval
+                        break
             if location_val:
                 department_id = get_department_id(location_val, token_mgr, config.realm_id, department_cache, config=config)
                 if department_id:
                     payload["DepartmentRef"] = {"value": department_id}
+                else:
+                    print(f"[WARN] Location not found in QBO: {location_val} (invoice {doc_number})")
+
+        # Optional Terms (SalesTermRef) if provided or inferred
+        if terms_name:
+            term_id = get_term_id(terms_name, token_mgr, config.realm_id, term_cache)
+            if term_id:
+                payload["SalesTermRef"] = {"value": term_id}
+            else:
+                print(f"[WARN] Terms not found in QBO: {terms_name} (invoice {doc_number})")
 
         if args.validate_only or args.dry_run:
             print(f"[DRY-RUN] Would create Invoice {doc_number} for {customer_name} ({len(lines)} lines)")
