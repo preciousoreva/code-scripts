@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Runs • EPOS → QBO{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Runs</h1>
+        <a href="{% url 'epos_qbo:overview' %}" class="text-sm text-blue-600 hover:underline">Back to Overview</a>
+    </div>
+
+    {% if perms.epos_qbo.can_trigger_runs %}
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 mb-4">Trigger Run</h2>
+        <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {% csrf_token %}
+            <label class="text-xs text-slate-600">
+                Scope
+                <select name="scope" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    <option value="all_companies">All Companies</option>
+                    <option value="single_company">Single Company</option>
+                </select>
+            </label>
+            <label class="text-xs text-slate-600">
+                Company (single scope)
+                <select name="company_key" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    <option value="">Select company</option>
+                    {% for company in companies %}
+                    <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="text-xs text-slate-600">
+                Date Mode
+                <select name="date_mode" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    <option value="yesterday">Yesterday</option>
+                    <option value="target_date">Target Date</option>
+                    <option value="range">Range</option>
+                </select>
+            </label>
+            <div class="flex items-end">
+                <button type="submit" class="w-full inline-flex justify-center items-center px-3 py-2 bg-slate-900 rounded-md text-sm font-medium text-white hover:bg-slate-800">
+                    Trigger
+                </button>
+            </div>
+            <label class="text-xs text-slate-600">
+                Target Date
+                <input type="date" name="target_date" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+            </label>
+            <label class="text-xs text-slate-600">
+                From Date
+                <input type="date" name="from_date" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+            </label>
+            <label class="text-xs text-slate-600">
+                To Date
+                <input type="date" name="to_date" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+            </label>
+            <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">
+                <input type="checkbox" name="skip_download">
+                Skip download (range only)
+            </label>
+        </form>
+    </section>
+    {% endif %}
+
+    <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <table class="w-full text-sm">
+            <thead class="bg-slate-50 text-slate-600">
+                <tr>
+                    <th class="text-left px-4 py-3">Created</th>
+                    <th class="text-left px-4 py-3">Scope</th>
+                    <th class="text-left px-4 py-3">Company</th>
+                    <th class="text-left px-4 py-3">Status</th>
+                    <th class="text-left px-4 py-3">Exit</th>
+                    <th class="text-left px-4 py-3">Action</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+                {% for job in jobs %}
+                <tr>
+                    <td class="px-4 py-3">{{ job.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td class="px-4 py-3">{{ job.scope }}</td>
+                    <td class="px-4 py-3">{{ job.company_key|default:"all" }}</td>
+                    <td class="px-4 py-3">{{ job.status }}</td>
+                    <td class="px-4 py-3">{{ job.exit_code|default:"-" }}</td>
+                    <td class="px-4 py-3">
+                        <a href="{% url 'epos_qbo:run-detail' job_id=job.id %}" class="text-blue-600 hover:underline">View</a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="px-4 py-6 text-slate-500">No runs yet.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+</div>
+{% endblock %}

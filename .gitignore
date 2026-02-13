@@ -1,3 +1,6 @@
+# Django development database
+db.sqlite3
+
 # QuickBooks tokens and credentials
 # Current: SQLite database (per-company tokens)
 qbo_tokens.sqlite

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login • OIAT Portal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen flex items-center justify-center">
+    <form method="post" class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm w-full max-w-sm">
+        {% csrf_token %}
+        <h1 class="text-lg font-semibold mb-4">Sign In</h1>
+        {% if form.errors %}
+        <p class="text-sm text-red-600 mb-3">Invalid username or password.</p>
+        {% endif %}
+        <label class="block text-sm mb-1">Username</label>
+        <input class="w-full border border-slate-300 rounded px-3 py-2 mb-3" type="text" name="username" required />
+        <label class="block text-sm mb-1">Password</label>
+        <input class="w-full border border-slate-300 rounded px-3 py-2 mb-4" type="password" name="password" required />
+        {% if request.GET.next %}
+        <input type="hidden" name="next" value="{{ request.GET.next }}">
+        {% endif %}
+        <button class="w-full bg-slate-900 text-white rounded px-3 py-2" type="submit">Login</button>
+    </form>
+</body>
+</html>

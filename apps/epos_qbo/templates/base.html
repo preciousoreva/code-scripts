@@ -1,0 +1,84 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" class="antialiased bg-slate-50">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}EPOS → QBO Automation Dashboard{% endblock %}</title>
+
+    <!-- Tailwind (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Iconify Icons -->
+    <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --font-sans: 'Inter', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+        body {
+            font-family: var(--font-sans);
+        }
+        .font-mono {
+            font-family: var(--font-mono);
+        }
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+
+    {% block head_extra %}{% endblock %}
+</head>
+<body class="text-slate-900 flex min-h-screen overflow-hidden selection:bg-blue-100 selection:text-blue-700">
+
+    {% include "components/sidebar.html" %}
+
+    <main class="flex-1 ml-64 overflow-y-auto h-screen bg-slate-50/50">
+        {% block topbar %}{% endblock %}
+
+        <div class="p-8 max-w-7xl mx-auto space-y-8">
+            {% if messages %}
+            <div class="space-y-2">
+                {% for message in messages %}
+                <div class="rounded-md border px-3 py-2 text-sm
+                    {% if message.level_tag == 'error' %}
+                        border-red-200 bg-red-50 text-red-800
+                    {% elif message.level_tag == 'success' %}
+                        border-emerald-200 bg-emerald-50 text-emerald-800
+                    {% else %}
+                        border-slate-200 bg-white text-slate-700
+                    {% endif %}
+                ">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <!-- Alpine.js -->
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@2.0.2"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <!-- Dashboard JS (charts + interactions) -->
+    <script src="{% static 'js/charts.js' %}"></script>
+
+    {% block body_extra %}{% endblock %}
+</body>
+</html>
+

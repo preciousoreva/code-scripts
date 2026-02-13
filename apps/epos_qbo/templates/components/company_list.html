@@ -1,0 +1,95 @@
+<div class="lg:col-span-2 space-y-6">
+    <!-- Section Header -->
+    <div class="flex items-center justify-between">
+        <h3 class="text-base font-semibold text-slate-900">Company Status</h3>
+        <div class="flex gap-2">
+            <input
+                type="text"
+                placeholder="Filter companies..."
+                class="px-3 py-1.5 bg-white border border-slate-200 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-slate-100 w-48 transition-shadow"
+            >
+        </div>
+    </div>
+
+    <!-- Company List -->
+    <div class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden divide-y divide-slate-100">
+        {% for company in companies %}
+            {% with name_initial=company.name|first %}
+            <div class="group p-4 hover:bg-slate-50 transition-colors cursor-pointer {% if company.status == 'warning' %}border-l-4 border-l-amber-400 bg-amber-50/10{% elif company.status == 'critical' %}border-l-4 border-l-red-500 bg-red-50/10{% endif %}">
+                <div class="flex items-center justify-between mb-2">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded bg-slate-100 flex items-center justify-center text-slate-600 text-xs font-bold">
+                            {{ name_initial }}
+                        </div>
+                        <div>
+                            <h4 class="text-sm font-medium text-slate-900">{{ company.name }}</h4>
+                            <p class="text-xs text-slate-500">
+                                Last run:
+                                {{ company.last_run|date:"M j, Y H:i" }}
+                            </p>
+                        </div>
+                    </div>
+
+                    {% if company.status == 'healthy' %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-100">
+                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                            Healthy
+                        </span>
+                    {% elif company.status == 'warning' %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-100">
+                            <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                            Warning
+                        </span>
+                    {% else %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-100">
+                            <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+                            Critical
+                        </span>
+                    {% endif %}
+                </div>
+
+                <div class="grid grid-cols-3 gap-4 pl-11">
+                    <div>
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-medium">Records</span>
+                        <span class="text-xs font-medium text-slate-700">
+                            {{ company.records_synced|default:"0" }} synced
+                        </span>
+                    </div>
+                    <div>
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-medium">Token</span>
+                        <span class="text-xs font-medium {% if company.token_days and company.token_days <= 5 %}text-amber-600{% else %}text-emerald-600{% endif %}">
+                            {% if company.token_days %}
+                                Valid ({{ company.token_days }}d)
+                            {% else %}
+                                Unknown
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="flex justify-end items-center">
+                        {% if company.status == 'critical' %}
+                            <a href="{% url 'epos_qbo:company-advanced' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white border border-slate-200 rounded text-slate-700 hover:bg-slate-50">
+                                View Details
+                            </a>
+                        {% else %}
+                            <a href="{% url 'epos_qbo:company-advanced' company_key=company.company_key %}" class="text-xs font-medium text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                                View Details <iconify-icon icon="solar:arrow-right-linear"></iconify-icon>
+                            </a>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% if company.summary %}
+                    <div class="mt-2 pl-11">
+                        <p class="text-xs text-slate-500">{{ company.summary }}</p>
+                    </div>
+                {% endif %}
+            </div>
+            {% endwith %}
+        {% empty %}
+            <div class="p-6 text-sm text-slate-500">
+                No companies configured yet.
+            </div>
+        {% endfor %}
+    </div>
+</div>
+

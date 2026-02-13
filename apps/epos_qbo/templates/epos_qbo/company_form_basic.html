@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}New Company • EPOS → QBO{% endblock %}
+
+{% block content %}
+<div class="space-y-6 max-w-4xl">
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Add Company (Step 1/2)</h1>
+        <a href="{% url 'epos_qbo:overview' %}" class="text-sm text-blue-600 hover:underline">Back to Overview</a>
+    </div>
+
+    <form method="post" class="bg-white border border-slate-200 rounded-xl shadow-sm p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% csrf_token %}
+        {% for field in form %}
+        <label class="text-xs text-slate-600 {% if field.name == 'slack_webhook_env_key' %}md:col-span-2{% endif %}">
+            {{ field.label }}
+            {{ field.errors }}
+            <input
+                type="{% if field.name == 'realm_id' %}text{% elif field.name == 'company_key' %}text{% else %}text{% endif %}"
+                name="{{ field.name }}"
+                value="{{ field.value|default:'' }}"
+                class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm"
+            >
+            {% if field.help_text %}<span class="text-[11px] text-slate-400">{{ field.help_text }}</span>{% endif %}
+        </label>
+        {% endfor %}
+        <div class="md:col-span-2 flex justify-end">
+            <button type="submit" class="inline-flex items-center px-4 py-2 bg-slate-900 text-white text-sm rounded-md hover:bg-slate-800">
+                Save and Continue
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}

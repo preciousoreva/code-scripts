@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}Run {{ job.id }} • EPOS → QBO{% endblock %}
+
+{% block content %}
+<div class="space-y-6" data-run-id="{{ job.id }}">
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Run {{ job.id }}</h1>
+        <a href="{% url 'epos_qbo:runs' %}" class="text-sm text-blue-600 hover:underline">Back to Runs</a>
+    </div>
+
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+        <div><span class="text-slate-500 block">Status</span><span class="font-medium">{{ job.status }}</span></div>
+        <div><span class="text-slate-500 block">Scope</span><span class="font-medium">{{ job.scope }}</span></div>
+        <div><span class="text-slate-500 block">Company</span><span class="font-medium">{{ job.company_key|default:"all" }}</span></div>
+        <div><span class="text-slate-500 block">Exit Code</span><span class="font-medium">{{ job.exit_code|default:"-" }}</span></div>
+        <div><span class="text-slate-500 block">Started</span><span class="font-medium">{{ job.started_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
+        <div><span class="text-slate-500 block">Finished</span><span class="font-medium">{{ job.finished_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
+        <div class="md:col-span-2 lg:col-span-2">
+            <span class="text-slate-500 block">Command</span>
+            <code class="font-mono text-xs break-all">{{ job.command_display|default:"-" }}</code>
+        </div>
+        {% if job.failure_reason %}
+        <div class="md:col-span-2 lg:col-span-4 text-red-700 bg-red-50 border border-red-100 rounded-md p-3">
+            {{ job.failure_reason }}
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 mb-3">Live Log</h2>
+        <pre id="run-log" class="bg-slate-900 text-slate-100 text-xs p-4 rounded-md h-80 overflow-auto whitespace-pre-wrap"></pre>
+    </section>
+
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 mb-3">Artifacts</h2>
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead class="bg-slate-50 text-slate-600">
+                    <tr>
+                        <th class="text-left px-3 py-2">Company</th>
+                        <th class="text-left px-3 py-2">Target Date</th>
+                        <th class="text-left px-3 py-2">Processed</th>
+                        <th class="text-left px-3 py-2">Rows Kept</th>
+                        <th class="text-left px-3 py-2">Reliability</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                    {% for artifact in artifacts %}
+                    <tr>
+                        <td class="px-3 py-2">{{ artifact.company_key }}</td>
+                        <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.rows_kept|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.reliability_status }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="5" class="px-3 py-4 text-slate-500">No artifacts linked yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script>
+    (function () {
+        const logEl = document.getElementById("run-log");
+        if (!logEl) return;
+        let offset = 0;
+        const logsUrl = "{% url 'epos_qbo:run-logs' job_id=job.id %}";
+
+        const tick = () => {
+            fetch(`${logsUrl}?offset=${offset}`, { credentials: "same-origin" })
+                .then((res) => res.json())
+                .then((data) => {
+                    if (data.chunk) {
+                        logEl.textContent += data.chunk;
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+                    offset = data.next_offset;
+                    if (data.status === "running" || data.status === "queued") {
+                        setTimeout(tick, 1500);
+                    }
+                })
+                .catch(() => setTimeout(tick, 3000));
+        };
+        tick();
+    })();
+</script>
+{% endblock %}

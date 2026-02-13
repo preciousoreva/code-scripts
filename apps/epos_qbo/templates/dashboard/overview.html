@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Overview • EPOS → QBO Automation{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+    <div class="flex items-end justify-between">
+        <div>
+            <h1 class="text-2xl font-semibold tracking-tight text-slate-900">System Overview</h1>
+            <p class="text-sm text-slate-500 mt-1">
+                Real-time monitoring of EPOS to QuickBooks Online synchronization.
+            </p>
+        </div>
+        <div class="flex items-center gap-3">
+            <a href="{% url 'epos_qbo:company-new' %}" class="inline-flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 transition-all shadow-sm">
+                <iconify-icon icon="solar:add-circle-linear" width="16"></iconify-icon>
+                Add Company
+            </a>
+            <a href="{% url 'epos_qbo:runs' %}" class="inline-flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-md text-sm font-medium text-slate-700 hover:bg-slate-50 transition-all shadow-sm">
+                <iconify-icon icon="solar:refresh-linear" width="16"></iconify-icon>
+                View Runs
+            </a>
+        </div>
+    </div>
+
+    {% include "components/kpi_cards.html" %}
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {% include "components/company_list.html" %}
+        {% include "components/live_log.html" %}
+    </div>
+{% endblock %}
+

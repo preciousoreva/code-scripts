@@ -124,6 +124,54 @@ This script is intentionally thin — all business logic remains in `run_pipelin
 
 ---
 
+## OIAT Portal (Django Dashboard)
+
+The OIAT Portal is a Django web application that provides a monitoring dashboard, run triggering, and company onboarding UI for the pipeline.
+
+### Portal Setup
+
+After installing dependencies (`pip install -r requirements.txt`), run:
+
+```bash
+# 1. Apply database migrations
+python manage.py migrate
+
+# 2. Create an admin/operator user (required — there is no registration page)
+python manage.py createsuperuser
+
+# 3. Import existing company configs from JSON into the database
+python manage.py sync_companies_from_json
+
+# 4. (Optional) Backfill historical run artifacts from Uploaded/ metadata files
+python manage.py ingest_run_history --days 60
+
+# 5. Start the development server
+python manage.py runserver
+```
+
+Then open `http://127.0.0.1:8000/` in your browser and log in with the superuser credentials.
+
+### Portal Permissions
+
+Two custom permissions control dashboard actions:
+
+- `can_trigger_runs` — allows triggering pipeline runs from the Runs page
+- `can_edit_companies` — allows creating/editing company configurations
+
+Assign these to users via Django Admin (`/admin/`). Superusers have all permissions by default.
+
+### Portal Management Commands
+
+| Command | Purpose |
+|---------|---------|
+| `python manage.py sync_companies_from_json` | Import company configs from JSON files into DB |
+| `python manage.py sync_companies_to_json` | Export DB company configs back to JSON files |
+| `python manage.py check_company_config_drift` | Detect mismatches between DB and JSON configs |
+| `python manage.py ingest_run_history --days 60` | Import historical run metadata from Uploaded/ |
+| `python manage.py reconcile_run_jobs` | Mark stuck running jobs as failed (reaper) |
+
+---
+
 ## Architecture Overview
 
 ### Trading day mode vs calendar day
