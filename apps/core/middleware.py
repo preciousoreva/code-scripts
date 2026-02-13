@@ -13,7 +13,7 @@ class LoginRequiredMiddleware:
         public_prefixes = (
             settings.LOGIN_URL,
             "/logout/",
-            "/admin/login/",
+            "/admin/",  # Django admin handles its own auth
             "/static/",
         )
         if not request.user.is_authenticated and not any(path.startswith(p) for p in public_prefixes):

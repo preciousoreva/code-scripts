@@ -11,7 +11,7 @@
         <h1 class="text-xl font-semibold">OIAT Solutions Portal</h1>
         <div class="flex items-center gap-4 text-sm">
             <span>{{ request.user.username }}</span>
-            <a class="text-blue-600 hover:underline" href="/logout/">Logout</a>
+            <a class="text-blue-600 hover:underline" href="{% url 'logout' %}">Logout</a>
         </div>
     </header>
 
