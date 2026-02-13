@@ -31,3 +31,4 @@ This app is the EPOS→QBO solution module inside the OIAT portal.
 
 - Dashboard uses DB lock (`RunLock`) and scripts use shared global file lock (`code_scripts/run_lock.py`) for cross-trigger exclusion.
 - Scheduled automation remains external; this app observes and safely triggers existing scripts.
+- Template formatting rule: keep each Django variable tag on one line, for example `{{ value|default:"-" }}`. Do not wrap text inside `{{ ... }}` across lines.

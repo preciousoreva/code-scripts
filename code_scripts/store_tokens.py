@@ -52,8 +52,14 @@ def list_stored_tokens() -> None:
 
     try:
         conn = sqlite3.connect(DB_FILE)
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(qbo_tokens)").fetchall()
+        }
+        has_refresh_expires_at = "refresh_expires_at" in columns
+        refresh_select = ", refresh_expires_at" if has_refresh_expires_at else ""
         cursor = conn.execute(
-            "SELECT company_key, realm_id, environment, updated_at "
+            f"SELECT company_key, realm_id, environment, updated_at{refresh_select} "
             "FROM qbo_tokens "
             "ORDER BY company_key, realm_id"
         )
@@ -65,23 +71,46 @@ def list_stored_tokens() -> None:
             return
 
         print("\nStored tokens:")
-        print("-" * 80)
-        print(f"{'Company':<20} {'Realm ID':<20} {'Environment':<12} {'Updated At':<20}")
-        print("-" * 80)
+        if has_refresh_expires_at:
+            print("-" * 120)
+            print(
+                f"{'Company':<20} {'Realm ID':<20} {'Environment':<12} "
+                f"{'Updated At':<20} {'Refresh Expires At':<20}"
+            )
+            print("-" * 120)
+        else:
+            print("-" * 80)
+            print(f"{'Company':<20} {'Realm ID':<20} {'Environment':<12} {'Updated At':<20}")
+            print("-" * 80)
 
         for row in rows:
-            company_key, realm_id, environment, updated_at = row
+            if has_refresh_expires_at:
+                company_key, realm_id, environment, updated_at, refresh_expires_at = row
+            else:
+                company_key, realm_id, environment, updated_at = row
+                refresh_expires_at = None
             # Convert Unix timestamp to human-readable
             if updated_at:
                 dt = datetime.fromtimestamp(updated_at)
                 updated_str = dt.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 updated_str = "N/A"
+            if refresh_expires_at:
+                refresh_dt = datetime.fromtimestamp(refresh_expires_at)
+                refresh_exp_str = refresh_dt.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                refresh_exp_str = "Unknown"
 
             env_str = environment or "production"
-            print(f"{company_key:<20} {realm_id:<20} {env_str:<12} {updated_str:<20}")
+            if has_refresh_expires_at:
+                print(
+                    f"{company_key:<20} {realm_id:<20} {env_str:<12} "
+                    f"{updated_str:<20} {refresh_exp_str:<20}"
+                )
+            else:
+                print(f"{company_key:<20} {realm_id:<20} {env_str:<12} {updated_str:<20}")
 
-        print("-" * 80)
+        print("-" * (120 if has_refresh_expires_at else 80))
         print(f"\nTotal: {len(rows)} token record(s)")
 
     except Exception as e:
@@ -94,6 +123,7 @@ def store_tokens(
     access_token: str,
     refresh_token: str,
     expires_in: int = 3600,
+    refresh_expires_in: int | None = None,
     environment: str = "production"
 ) -> None:
     """Store tokens for a company."""
@@ -108,6 +138,7 @@ def store_tokens(
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=expires_in,
+            refresh_expires_in=refresh_expires_in,
             environment=environment
         )
 
@@ -118,6 +149,8 @@ def store_tokens(
         print(f"   Realm ID: {config.realm_id}")
         print(f"   Environment: {environment}")
         print(f"   Expires in: {expires_in} seconds")
+        if refresh_expires_in is not None:
+            print(f"   Refresh expires in: {refresh_expires_in} seconds")
 
     except FileNotFoundError as e:
         error_msg = redact_tokens(str(e), access_token, refresh_token)
@@ -145,6 +178,9 @@ Examples:
   # Store tokens with custom expires_in and environment
   python store_tokens.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --env sandbox
 
+  # Store tokens with refresh token expiry metadata
+  python store_tokens.py --company company_b --access-token "..." --refresh-token "..." --expires-in 3600 --refresh-expires-in 7776000
+
   # List all stored tokens
   python store_tokens.py --list
         """
@@ -170,6 +206,12 @@ Examples:
         type=int,
         default=3600,
         help="Token expiration time in seconds (default: 3600)"
+    )
+    parser.add_argument(
+        "--refresh-expires-in",
+        type=int,
+        default=None,
+        help="Refresh token expiration time in seconds (optional)"
     )
     parser.add_argument(
         "--env",
@@ -213,10 +255,10 @@ Examples:
         access_token=args.access_token,
         refresh_token=args.refresh_token,
         expires_in=args.expires_in,
+        refresh_expires_in=args.refresh_expires_in,
         environment=args.env
     )
 
 
 if __name__ == "__main__":
     main()
-

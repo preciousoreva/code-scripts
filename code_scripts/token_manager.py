@@ -63,11 +63,18 @@ def _init_database() -> None:
                     access_token TEXT,
                     refresh_token TEXT NOT NULL,
                     access_expires_at INTEGER,
+                    refresh_expires_at INTEGER,
                     updated_at INTEGER NOT NULL,
                     environment TEXT DEFAULT 'production',
                     PRIMARY KEY (company_key, realm_id)
                 )
             """)
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(qbo_tokens)").fetchall()
+            }
+            if "refresh_expires_at" not in columns:
+                conn.execute("ALTER TABLE qbo_tokens ADD COLUMN refresh_expires_at INTEGER")
             conn.commit()
         finally:
             conn.close()
@@ -97,7 +104,8 @@ def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:
         conn = sqlite3.connect(DB_FILE)
         try:
             cursor = conn.execute(
-                "SELECT access_token, refresh_token, access_expires_at, updated_at, environment "
+                "SELECT access_token, refresh_token, access_expires_at, refresh_expires_at, "
+                "updated_at, environment "
                 "FROM qbo_tokens WHERE company_key = ? AND realm_id = ?",
                 (company_key, realm_id)
             )
@@ -110,8 +118,9 @@ def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:
                 "access_token": row[0],
                 "refresh_token": row[1],
                 "expires_at": row[2],
-                "updated_at": row[3],
-                "environment": row[4] or "production",
+                "refresh_expires_at": row[3],
+                "updated_at": row[4],
+                "environment": row[5] or "production",
             }
         finally:
             conn.close()
@@ -123,6 +132,7 @@ def save_tokens(
     access_token: str,
     refresh_token: str,
     expires_at: float,
+    refresh_expires_at: float | None = None,
     environment: str = "production"
 ) -> None:
     """
@@ -134,6 +144,7 @@ def save_tokens(
         access_token: Access token
         refresh_token: Refresh token
         expires_at: Unix timestamp when access token expires
+        refresh_expires_at: Unix timestamp when refresh token expires
         environment: 'production' or 'sandbox'
     """
     _init_database()
@@ -146,9 +157,27 @@ def save_tokens(
         try:
             conn.execute("""
                 INSERT OR REPLACE INTO qbo_tokens 
-                (company_key, realm_id, access_token, refresh_token, access_expires_at, updated_at, environment)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (company_key, realm_id, access_token, refresh_token, int(expires_at), updated_at, environment))
+                (
+                    company_key,
+                    realm_id,
+                    access_token,
+                    refresh_token,
+                    access_expires_at,
+                    refresh_expires_at,
+                    updated_at,
+                    environment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                company_key,
+                realm_id,
+                access_token,
+                refresh_token,
+                int(expires_at),
+                int(refresh_expires_at) if refresh_expires_at else None,
+                updated_at,
+                environment,
+            ))
             conn.commit()
         finally:
             conn.close()
@@ -235,11 +264,18 @@ def refresh_access_token(company_key: str, realm_id: str) -> Dict[str, Any]:
     new_access_token = body.get("access_token")
     new_refresh_token = body.get("refresh_token", refresh_token)  # Use new if provided, else keep old
     expires_in = body.get("expires_in", 3600)
+    refresh_expires_in = body.get("x_refresh_token_expires_in")
     
     if not new_access_token:
         raise RuntimeError("Token refresh response missing access_token")
     
     expires_at = time.time() + int(expires_in)
+    previous_refresh_expires_at = tokens.get("refresh_expires_at")
+    refresh_expires_at = (
+        time.time() + int(refresh_expires_in)
+        if refresh_expires_in is not None
+        else previous_refresh_expires_at
+    )
     
     # Save updated tokens
     save_tokens(
@@ -248,6 +284,7 @@ def refresh_access_token(company_key: str, realm_id: str) -> Dict[str, Any]:
         access_token=new_access_token,
         refresh_token=new_refresh_token,
         expires_at=expires_at,
+        refresh_expires_at=refresh_expires_at,
         environment=tokens.get("environment", "production")
     )
     
@@ -255,6 +292,7 @@ def refresh_access_token(company_key: str, realm_id: str) -> Dict[str, Any]:
         "access_token": new_access_token,
         "refresh_token": new_refresh_token,
         "expires_at": expires_at,
+        "refresh_expires_at": refresh_expires_at,
     }
 
 
@@ -290,6 +328,7 @@ def store_tokens_from_oauth(
     access_token: str,
     refresh_token: str,
     expires_in: int,
+    refresh_expires_in: int | None = None,
     environment: str = "production"
 ) -> None:
     """
@@ -301,15 +340,22 @@ def store_tokens_from_oauth(
         access_token: Access token from OAuth
         refresh_token: Refresh token from OAuth
         expires_in: Expires in seconds
+        refresh_expires_in: Refresh token expiration in seconds
         environment: 'production' or 'sandbox'
     """
     expires_at = time.time() + expires_in
+    refresh_expires_at = (
+        time.time() + refresh_expires_in
+        if refresh_expires_in is not None
+        else None
+    )
     save_tokens(
         company_key=company_key,
         realm_id=realm_id,
         access_token=access_token,
         refresh_token=refresh_token,
         expires_at=expires_at,
+        refresh_expires_at=refresh_expires_at,
         environment=environment
     )
 
@@ -347,4 +393,3 @@ def verify_realm_match(company_key: str, expected_realm_id: str) -> None:
                 )
         finally:
             conn.close()
-

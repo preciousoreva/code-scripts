@@ -7,6 +7,13 @@
 repos:
   - repo: local
     hooks:
+      - id: check-django-template-vars
+        name: Django Template Variable Tag Guard
+        description: Disallow multiline Django variable tags in templates
+        entry: python .pre-commit-hooks/check-django-template-vars.py
+        language: python
+        files: ^(apps/.*/templates/.*\.html|templates/.*\.html)$
+        pass_filenames: false
       - id: gitleaks
         name: Gitleaks Secret Scan
         description: Detect hardcoded secrets and credentials (auto-downloads gitleaks binary)

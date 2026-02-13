@@ -13,6 +13,9 @@ class RunTriggerForm(forms.Form):
     from_date = forms.DateField(required=False)
     to_date = forms.DateField(required=False)
     skip_download = forms.BooleanField(required=False)
+    parallel = forms.IntegerField(required=False, min_value=1, initial=2)
+    stagger_seconds = forms.IntegerField(required=False, min_value=0, initial=2)
+    continue_on_failure = forms.BooleanField(required=False)
 
     def clean(self):
         cleaned = super().clean()
@@ -23,11 +26,21 @@ class RunTriggerForm(forms.Form):
         from_date = cleaned.get("from_date")
         to_date = cleaned.get("to_date")
         skip_download = cleaned.get("skip_download")
+        parallel = cleaned.get("parallel")
+        stagger_seconds = cleaned.get("stagger_seconds")
+        continue_on_failure = cleaned.get("continue_on_failure")
 
         if scope == "single_company" and not company_key:
             self.add_error("company_key", "Company key is required for single-company runs.")
         if scope == "all_companies":
             cleaned["company_key"] = ""
+            cleaned["parallel"] = int(parallel or 2)
+            cleaned["stagger_seconds"] = int(stagger_seconds or 2)
+            cleaned["continue_on_failure"] = bool(continue_on_failure)
+        else:
+            cleaned["parallel"] = 1
+            cleaned["stagger_seconds"] = 2
+            cleaned["continue_on_failure"] = False
 
         if date_mode == "target_date" and not target_date:
             self.add_error("target_date", "Target date is required.")
@@ -44,6 +57,7 @@ class RunTriggerForm(forms.Form):
         if date_mode != "range":
             cleaned["from_date"] = None
             cleaned["to_date"] = None
+            cleaned["skip_download"] = False
 
         return cleaned
 

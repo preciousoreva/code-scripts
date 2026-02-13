@@ -57,24 +57,15 @@
                     </div>
                     <div>
                         <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-medium">Token</span>
-                        <span class="text-xs font-medium {% if company.token_days and company.token_days <= 5 %}text-amber-600{% else %}text-emerald-600{% endif %}">
-                            {% if company.token_days %}
-                                Valid ({{ company.token_days }}d)
-                            {% else %}
-                                Unknown
-                            {% endif %}
+                        <span class="text-xs font-medium {% if company.token_info.severity == 'critical' %}text-red-600{% elif company.token_info.severity == 'warning' %}text-amber-600{% else %}text-emerald-600{% endif %}">
+                            {{ company.token_info.display_label }}
                         </span>
+                        <p class="text-[10px] text-slate-500 mt-0.5">{{ company.token_info.display_subtext }}</p>
                     </div>
                     <div class="flex justify-end items-center">
-                        {% if company.status == 'critical' %}
-                            <a href="{% url 'epos_qbo:company-advanced' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white border border-slate-200 rounded text-slate-700 hover:bg-slate-50">
-                                View Details
-                            </a>
-                        {% else %}
-                            <a href="{% url 'epos_qbo:company-advanced' company_key=company.company_key %}" class="text-xs font-medium text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-                                View Details <iconify-icon icon="solar:arrow-right-linear"></iconify-icon>
-                            </a>
-                        {% endif %}
+                        <a href="{% url 'epos_qbo:company-detail' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white border border-slate-200 rounded text-slate-700 hover:bg-slate-50">
+                            View Details
+                        </a>
                     </div>
                 </div>
 

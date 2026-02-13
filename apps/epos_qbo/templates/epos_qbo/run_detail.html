@@ -1,15 +1,20 @@
 {% extends "base.html" %}
 
-{% block title %}Run {{ job.id }} • EPOS → QBO{% endblock %}
+{% block title %}Run {{ job.display_label }} • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
 
 {% block content %}
 <div class="space-y-6" data-run-id="{{ job.id }}">
-    <div class="flex items-center justify-between">
-        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Run {{ job.id }}</h1>
-        <a href="{% url 'epos_qbo:runs' %}" class="text-sm text-blue-600 hover:underline">Back to Runs</a>
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Run {{ job.display_label }}</h1>
+        <p class="mt-1 text-sm font-mono text-slate-500">ID:{{ job.id }}</p>
     </div>
 
-    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+    <section
+        class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
         <div><span class="text-slate-500 block">Status</span><span class="font-medium">{{ job.status }}</span></div>
         <div><span class="text-slate-500 block">Scope</span><span class="font-medium">{{ job.scope }}</span></div>
         <div><span class="text-slate-500 block">Company</span><span class="font-medium">{{ job.company_key|default:"all" }}</span></div>
@@ -29,7 +34,8 @@
 
     <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
         <h2 class="text-sm font-semibold text-slate-900 mb-3">Live Log</h2>
-        <pre id="run-log" class="bg-slate-900 text-slate-100 text-xs p-4 rounded-md h-80 overflow-auto whitespace-pre-wrap"></pre>
+        <pre id="run-log"
+            class="bg-slate-900 text-slate-100 text-xs p-4 rounded-md h-80 overflow-auto whitespace-pre-wrap"></pre>
     </section>
 
     <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
@@ -42,7 +48,7 @@
                         <th class="text-left px-3 py-2">Target Date</th>
                         <th class="text-left px-3 py-2">Processed</th>
                         <th class="text-left px-3 py-2">Rows Kept</th>
-                        <th class="text-left px-3 py-2">Reliability</th>
+                        <th class="text-left px-3 py-2">Metadata Source</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
@@ -52,7 +58,13 @@
                         <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
                         <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
                         <td class="px-3 py-2">{{ artifact.rows_kept|default:"-" }}</td>
-                        <td class="px-3 py-2">{{ artifact.reliability_status }}</td>
+                        <td class="px-3 py-2">
+                            {% if artifact.reliability_status == 'warning' %}
+                            <span class="inline-flex px-2 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full">Rolling (last_*)</span>
+                            {% else %}
+                            <span class="inline-flex px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded-full">Snapshot (dated)</span>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% empty %}
                     <tr>

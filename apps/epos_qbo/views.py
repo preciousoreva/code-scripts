@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
+import os
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
+from math import ceil
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
+from django.db.models import Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
@@ -21,8 +26,14 @@ from .services.config_sync import (
     sync_record_to_json,
     validate_company_config,
 )
-from .services.job_runner import build_command, read_log_chunk, start_run_job
-from .services.locking import acquire_run_lock, release_run_lock
+from .services.job_runner import dispatch_next_queued_job, read_log_chunk
+
+ACCESS_REFRESH_MARGIN_SECONDS = 60
+REFRESH_EXPIRING_DAYS = 7
+REAUTH_GUIDANCE = (
+    "QBO re-authentication required. Run OAuth flow and store tokens using "
+    "/Volumes/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/code_scripts/store_tokens.py."
+)
 
 
 def _ensure_company_records() -> None:
@@ -32,21 +43,221 @@ def _ensure_company_records() -> None:
 
 
 def _nav_context() -> dict:
-    return {"company_count": CompanyConfigRecord.objects.filter(is_active=True).count()}
+    ui_debug_beacon_enabled = os.getenv("OIAT_UI_DEBUG_BEACON", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    return {
+        "company_count": CompanyConfigRecord.objects.filter(is_active=True).count(),
+        "ui_debug_beacon_enabled": ui_debug_beacon_enabled,
+    }
 
 
-def _company_token_days(company: CompanyConfigRecord) -> int | None:
+def _breadcrumb_context(breadcrumbs, *, back_url=None, back_label=None, show_overview_actions=False):
+    """Add breadcrumbs and optional back link for topbar."""
+    out = {"breadcrumbs": breadcrumbs, "show_overview_actions": show_overview_actions}
+    if back_url and back_label:
+        out["back_url"] = back_url
+        out["back_label"] = back_label
+    return out
+
+
+def _format_duration(seconds: int | None) -> str:
+    if not seconds or seconds <= 0:
+        return "0 minutes"
+    if seconds < 3600:
+        minutes = max(1, seconds // 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    if seconds < 86400:
+        hours = max(1, seconds // 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    days = max(1, ceil(seconds / 86400))
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+def _format_day_count(seconds: int) -> int:
+    return max(1, ceil(seconds / 86400))
+
+
+def _company_token_health(company: CompanyConfigRecord) -> dict:
     cfg = company.config_json or {}
     realm_id = (cfg.get("qbo") or {}).get("realm_id")
     if not realm_id:
-        return None
+        return {
+            "valid": False,
+            "severity": "critical",
+            "status_color": "red",
+            "token_unknown": True,
+            "connection_state": "missing_tokens",
+            "access_state": "unknown",
+            "display_label": "QBO re-authentication required",
+            "display_subtext": REAUTH_GUIDANCE,
+            "status_message": "QBO re-authentication required",
+            "days_remaining": None,
+            "expiring_soon": False,
+            "expires_at": None,
+            "token_days": None,
+            "reauth_guidance": REAUTH_GUIDANCE,
+            "issues": [
+                {
+                    "severity": "red",
+                    "icon": "solar:shield-warning-linear",
+                    "message": "QBO re-authentication required",
+                    "action": "refresh_token",
+                }
+            ],
+        }
+
     tokens = load_tokens(company.company_key, realm_id)
     if not tokens:
-        return None
-    expires_at = tokens.get("expires_at")
-    if not expires_at:
-        return None
-    return int((expires_at - timezone.now().timestamp()) / 86400)
+        return {
+            "valid": False,
+            "severity": "critical",
+            "status_color": "red",
+            "token_unknown": True,
+            "connection_state": "missing_tokens",
+            "access_state": "unknown",
+            "display_label": "QBO re-authentication required",
+            "display_subtext": REAUTH_GUIDANCE,
+            "status_message": "QBO re-authentication required",
+            "days_remaining": None,
+            "expiring_soon": False,
+            "expires_at": None,
+            "token_days": None,
+            "reauth_guidance": REAUTH_GUIDANCE,
+            "issues": [
+                {
+                    "severity": "red",
+                    "icon": "solar:shield-warning-linear",
+                    "message": "QBO re-authentication required",
+                    "action": "refresh_token",
+                }
+            ],
+        }
+
+    access_expires_at = tokens.get("expires_at")
+    refresh_expires_at = tokens.get("refresh_expires_at")
+    refresh_token = tokens.get("refresh_token")
+    now_ts = int(timezone.now().timestamp())
+    access_seconds_left = int(access_expires_at - now_ts) if access_expires_at else None
+    refresh_seconds_left = int(refresh_expires_at - now_ts) if refresh_expires_at else None
+
+    if not refresh_token:
+        return {
+            "valid": False,
+            "severity": "critical",
+            "status_color": "red",
+            "token_unknown": False,
+            "connection_state": "missing_refresh_token",
+            "access_state": "unknown",
+            "display_label": "QBO re-authentication required",
+            "display_subtext": REAUTH_GUIDANCE,
+            "status_message": "QBO re-authentication required",
+            "days_remaining": None,
+            "expiring_soon": False,
+            "expires_at": access_expires_at,
+            "token_days": None,
+            "reauth_guidance": REAUTH_GUIDANCE,
+            "issues": [
+                {
+                    "severity": "red",
+                    "icon": "solar:shield-warning-linear",
+                    "message": "QBO re-authentication required",
+                    "action": "refresh_token",
+                }
+            ],
+        }
+
+    if access_seconds_left is None:
+        access_state = "unknown"
+        access_subtext = "Access token expiry unknown (auto-refreshes during sync)"
+    elif access_seconds_left <= ACCESS_REFRESH_MARGIN_SECONDS:
+        access_state = "expired"
+        access_subtext = "Access token expired (will refresh on next sync)"
+    else:
+        access_state = "active"
+        access_subtext = (
+            f"Access token expires in {_format_duration(access_seconds_left)} "
+            "(auto-refreshes during sync)"
+        )
+
+    if refresh_expires_at is not None and refresh_seconds_left is not None and refresh_seconds_left <= 0:
+        return {
+            "valid": False,
+            "severity": "critical",
+            "status_color": "red",
+            "token_unknown": False,
+            "connection_state": "refresh_expired",
+            "access_state": access_state,
+            "display_label": "QBO re-authentication required",
+            "display_subtext": REAUTH_GUIDANCE,
+            "status_message": "QBO re-authentication required",
+            "days_remaining": 0,
+            "expiring_soon": False,
+            "expires_at": access_expires_at,
+            "token_days": 0,
+            "reauth_guidance": REAUTH_GUIDANCE,
+            "issues": [
+                {
+                    "severity": "red",
+                    "icon": "solar:shield-warning-linear",
+                    "message": "QBO re-authentication required",
+                    "action": "refresh_token",
+                }
+            ],
+        }
+
+    if (
+        refresh_expires_at is not None
+        and refresh_seconds_left is not None
+        and refresh_seconds_left <= REFRESH_EXPIRING_DAYS * 86400
+    ):
+        days_left = _format_day_count(refresh_seconds_left)
+        message = f"Refresh token expires in {days_left} day{'s' if days_left != 1 else ''}"
+        return {
+            "valid": True,
+            "severity": "warning",
+            "status_color": "amber",
+            "token_unknown": False,
+            "connection_state": "refresh_expiring",
+            "access_state": access_state,
+            "display_label": "Connected",
+            "display_subtext": message,
+            "status_message": message,
+            "days_remaining": days_left,
+            "expiring_soon": True,
+            "expires_at": access_expires_at,
+            "token_days": days_left,
+            "reauth_guidance": REAUTH_GUIDANCE,
+            "issues": [
+                {
+                    "severity": "amber",
+                    "icon": "solar:key-minimalistic-linear",
+                    "message": message,
+                    "action": "refresh_token",
+                }
+            ],
+        }
+
+    return {
+        "valid": True,
+        "severity": "healthy",
+        "status_color": "emerald",
+        "token_unknown": False,
+        "connection_state": "connected",
+        "access_state": access_state,
+        "display_label": "Connected",
+        "display_subtext": access_subtext,
+        "status_message": "Connected",
+        "days_remaining": _format_day_count(refresh_seconds_left) if refresh_seconds_left else None,
+        "expiring_soon": False,
+        "expires_at": access_expires_at,
+        "token_days": _format_day_count(refresh_seconds_left) if refresh_seconds_left else None,
+        "reauth_guidance": REAUTH_GUIDANCE,
+        "issues": [],
+    }
 
 
 def _job_failure_source(job: RunJob) -> str:
@@ -66,24 +277,24 @@ def _status_for_company(
     company: CompanyConfigRecord,
     latest_artifact: RunArtifact | None,
     latest_job: RunJob | None,
+    token_info: dict | None = None,
 ) -> tuple[str, str]:
     cfg = company.config_json or {}
     epos = cfg.get("epos") or {}
-    token_days = _company_token_days(company)
+    token_info = token_info or _company_token_health(company)
 
     if not epos.get("username_env_key") or not epos.get("password_env_key"):
         return "warning", "Missing EPOS env key names in company config."
-    if token_days is None:
-        return "warning", "QBO token record missing."
-    if token_days <= 1:
-        return "critical", "QBO token expires in 1 day or less."
-    if token_days <= 5:
-        return "warning", f"QBO token expires soon ({token_days}d)."
+    if token_info["severity"] == "critical":
+        return "critical", token_info["status_message"]
 
     if latest_job and latest_job.status == RunJob.STATUS_FAILED:
         return "critical", latest_job.failure_reason or "Latest run failed."
     if latest_job and latest_job.status in (RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING):
         return "warning", "Run currently queued/running."
+
+    if token_info["severity"] == "warning":
+        return "warning", token_info["status_message"]
 
     if latest_artifact:
         failed_uploads = int((latest_artifact.upload_stats_json or {}).get("failed", 0))
@@ -91,8 +302,6 @@ def _status_for_company(
             return "critical", f"{failed_uploads} upload(s) failed in latest run."
         if latest_artifact.reconcile_difference and abs(latest_artifact.reconcile_difference) > 1.0:
             return "warning", "Reconciliation mismatch above threshold."
-        if latest_artifact.reliability_status == RunArtifact.RELIABILITY_WARNING:
-            return "warning", "Latest metadata source is mutable (last_*)."
     else:
         return "warning", "No artifact metadata ingested yet."
 
@@ -108,18 +317,28 @@ def _overview_context() -> dict:
     artifacts_24h = RunArtifact.objects.filter(imported_at__gte=since_24h)
     records_synced_24h = sum(int(a.rows_kept or 0) for a in artifacts_24h)
 
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
+    company_keys = [company.company_key for company in companies]
+    latest_artifacts: dict[str, RunArtifact] = {}
+    latest_jobs: dict[str, RunJob] = {}
+
+    for artifact in RunArtifact.objects.filter(company_key__in=company_keys).order_by(
+        "company_key", "-processed_at", "-imported_at"
+    ):
+        if artifact.company_key not in latest_artifacts:
+            latest_artifacts[artifact.company_key] = artifact
+    for job in RunJob.objects.filter(company_key__in=company_keys).order_by("company_key", "-created_at"):
+        if job.company_key and job.company_key not in latest_jobs:
+            latest_jobs[job.company_key] = job
+
     companies_context = []
     healthy_count = warning_count = critical_count = 0
 
-    for company in CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"):
-        latest_artifact = (
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .order_by("-processed_at", "-imported_at")
-            .first()
-        )
-        latest_job = RunJob.objects.filter(company_key=company.company_key).order_by("-created_at").first()
-        token_days = _company_token_days(company)
-        status, summary = _status_for_company(company, latest_artifact, latest_job)
+    for company in companies:
+        latest_artifact = latest_artifacts.get(company.company_key)
+        latest_job = latest_jobs.get(company.company_key)
+        token_info = _company_token_health(company)
+        status, summary = _status_for_company(company, latest_artifact, latest_job, token_info)
 
         if status == "healthy":
             healthy_count += 1
@@ -134,7 +353,7 @@ def _overview_context() -> dict:
                 "company_key": company.company_key,
                 "last_run": latest_job.finished_at if latest_job else None,
                 "status": status,
-                "token_days": token_days,
+                "token_info": token_info,
                 "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
                 "summary": summary,
             }
@@ -181,6 +400,11 @@ def _overview_context() -> dict:
         percentage = round((count * 100 / total_sources), 1) if total_sources else 0.0
         failure_sources.append({"label": label, "count": count, "percentage": percentage})
 
+    # Get active run IDs for polling
+    active_runs = RunJob.objects.filter(
+        status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
+    ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
+    
     return {
         "kpis": {
             "healthy_count": healthy_count,
@@ -197,6 +421,8 @@ def _overview_context() -> dict:
         "company_count": len(companies_context),
         "daily_success": daily_success,
         "failure_sources": failure_sources,
+        "active_run_ids": [str(id) for id in active_runs],
+        "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
     }
 
 
@@ -205,6 +431,15 @@ def overview(request):
     _ensure_company_records()
     context = _overview_context()
     context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Overview", "url": None},
+            ],
+            show_overview_actions=True,
+        )
+    )
     return render(request, "dashboard/overview.html", context)
 
 
@@ -214,17 +449,207 @@ def runs_list(request):
     jobs = RunJob.objects.order_by("-created_at")[:100]
     form = RunTriggerForm(initial={"scope": RunJob.SCOPE_ALL, "date_mode": "yesterday"})
     companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
-    context = {"jobs": jobs, "form": form, "companies": companies}
+    
+    # Get active run IDs for polling
+    active_runs = RunJob.objects.filter(
+        status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
+    ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
+    
+    active_run_ids_list = [str(id) for id in active_runs]
+    context = {
+        "jobs": jobs, 
+        "form": form, 
+        "companies": companies,
+        "active_run_ids": active_run_ids_list,
+        "active_run_ids_json": json.dumps(active_run_ids_list),
+    }
     context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Runs", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
     return render(request, "epos_qbo/runs.html", context)
+
+
+@login_required
+def logs_list(request):
+    """Logs page showing structured run events with filters and statistics."""
+    _ensure_company_records()
+    
+    # Get filter parameters
+    company_key = request.GET.get("company", "")
+    status_filter = request.GET.get("status", "")
+    date_from = request.GET.get("date_from", "")
+    date_to = request.GET.get("date_to", "")
+    
+    # Build query
+    jobs_query = RunJob.objects.all()
+    
+    if company_key:
+        jobs_query = jobs_query.filter(company_key=company_key)
+    if status_filter:
+        jobs_query = jobs_query.filter(status=status_filter)
+    if date_from:
+        try:
+            date_from_obj = datetime.strptime(date_from, "%Y-%m-%d").date()
+            jobs_query = jobs_query.filter(created_at__date__gte=date_from_obj)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            date_to_obj = datetime.strptime(date_to, "%Y-%m-%d").date()
+            jobs_query = jobs_query.filter(created_at__date__lte=date_to_obj)
+        except ValueError:
+            pass
+    
+    # Get jobs (limit to 200 most recent)
+    jobs = jobs_query.order_by("-created_at")[:200]
+    
+    # Build structured log events
+    log_events = []
+    company_map = {c.company_key: c.display_name for c in CompanyConfigRecord.objects.filter(is_active=True)}
+    
+    for job in jobs:
+        if job.status == RunJob.STATUS_SUCCEEDED:
+            level = "success"
+            message = f"{job.scope.replace('_', ' ')} run"
+            if job.company_key:
+                message += f" for {company_map.get(job.company_key, job.company_key)}"
+            message += " succeeded"
+        elif job.status == RunJob.STATUS_FAILED:
+            level = "error"
+            message = f"{job.scope.replace('_', ' ')} run"
+            if job.company_key:
+                message += f" for {company_map.get(job.company_key, job.company_key)}"
+            message += " failed"
+            if job.failure_reason:
+                message += f": {job.failure_reason[:100]}"
+        elif job.status == RunJob.STATUS_RUNNING:
+            level = "info"
+            message = f"{job.scope.replace('_', ' ')} run"
+            if job.company_key:
+                message += f" for {company_map.get(job.company_key, job.company_key)}"
+            message += " is running"
+        elif job.status == RunJob.STATUS_CANCELLED:
+            level = "warning"
+            message = f"{job.scope.replace('_', ' ')} run"
+            if job.company_key:
+                message += f" for {company_map.get(job.company_key, job.company_key)}"
+            message += " was cancelled"
+        else:  # queued
+            level = "warning"
+            message = f"{job.scope.replace('_', ' ')} run"
+            if job.company_key:
+                message += f" for {company_map.get(job.company_key, job.company_key)}"
+            message += " queued"
+        
+        # Calculate duration if finished
+        duration = None
+        if job.started_at and job.finished_at:
+            duration_seconds = int((job.finished_at - job.started_at).total_seconds())
+            if duration_seconds < 60:
+                duration = f"{duration_seconds}s"
+            elif duration_seconds < 3600:
+                duration = f"{duration_seconds // 60}m {duration_seconds % 60}s"
+            else:
+                hours = duration_seconds // 3600
+                minutes = (duration_seconds % 3600) // 60
+                duration = f"{hours}h {minutes}m"
+        
+        log_events.append({
+            "job": job,
+            "timestamp": job.created_at,
+            "level": level,
+            "message": message,
+            "company_name": company_map.get(job.company_key, job.company_key or "all"),
+            "duration": duration,
+        })
+    
+    # Calculate statistics
+    now = timezone.now()
+    since_7d = now - timedelta(days=7)
+    since_30d = now - timedelta(days=30)
+    
+    all_jobs_7d = RunJob.objects.filter(created_at__gte=since_7d)
+    all_jobs_30d = RunJob.objects.filter(created_at__gte=since_30d)
+    
+    stats = {
+        "total_runs_7d": all_jobs_7d.count(),
+        "total_runs_30d": all_jobs_30d.count(),
+        "success_rate_7d": round(
+            (all_jobs_7d.filter(status=RunJob.STATUS_SUCCEEDED).count() * 100 / all_jobs_7d.count())
+            if all_jobs_7d.count() > 0 else 100.0,
+            1
+        ),
+        "error_count_7d": all_jobs_7d.filter(status=RunJob.STATUS_FAILED).count(),
+        "active_runs": RunJob.objects.filter(
+            status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
+        ).count(),
+    }
+    
+    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    
+    # Get active run IDs for polling
+    active_runs = RunJob.objects.filter(
+        status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
+    ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
+    
+    context = {
+        "log_events": log_events,
+        "stats": stats,
+        "companies": companies,
+        "filters": {
+            "company": company_key,
+            "status": status_filter,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+        "active_run_ids": [str(id) for id in active_runs],
+        "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Logs", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/logs.html", context)
 
 
 @login_required
 def run_detail(request, job_id):
     job = get_object_or_404(RunJob, id=job_id)
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
-    context = {"job": job, "artifacts": artifacts}
+    active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
+    context = {
+        "job": job, 
+        "artifacts": artifacts,
+        "active_run_ids": active_run_ids_list,
+        "active_run_ids_json": json.dumps(active_run_ids_list),
+    }
     context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Runs", "url": reverse("epos_qbo:runs")},
+                {"label": f"Run {job.display_label}", "url": None},
+            ],
+            back_url=reverse("epos_qbo:runs"),
+            back_label="Runs",
+        )
+    )
     return render(request, "epos_qbo/run_detail.html", context)
 
 
@@ -243,9 +668,45 @@ def run_logs(request, job_id):
 
 
 @login_required
+@require_GET
+def run_status_check(request):
+    """API endpoint to check status of multiple runs."""
+    job_ids_str = request.GET.get("job_ids", "")
+    if not job_ids_str:
+        return JsonResponse({}, status=400)
+    
+    try:
+        from uuid import UUID
+        job_ids = [UUID(id.strip()) for id in job_ids_str.split(",") if id.strip()]
+    except ValueError:
+        return JsonResponse({"error": "Invalid job IDs"}, status=400)
+    
+    if not job_ids:
+        return JsonResponse({})
+    
+    jobs = RunJob.objects.filter(id__in=job_ids)
+    result = {}
+    for job in jobs:
+        result[str(job.id)] = {
+            "status": job.status,
+            "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+            "failure_reason": job.failure_reason or None,
+        }
+    return JsonResponse(result)
+
+
+@login_required
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_POST
 def trigger_run(request):
+    # #region agent log
+    try:
+        import json
+        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
+            f.write(json.dumps({"location": "views.trigger_run:entry", "message": "trigger_run called", "data": {"POST_scope": request.POST.get("scope"), "POST_company_key": request.POST.get("company_key")}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
     form = RunTriggerForm(request.POST)
     if not form.is_valid():
         messages.error(request, f"Invalid trigger payload: {form.errors.as_text()}")
@@ -265,35 +726,38 @@ def trigger_run(request):
         from_date=cleaned.get("from_date"),
         to_date=cleaned.get("to_date"),
         skip_download=bool(cleaned.get("skip_download")),
+        parallel=int(cleaned.get("parallel") or 1),
+        stagger_seconds=int(cleaned.get("stagger_seconds") or 2),
+        continue_on_failure=bool(cleaned.get("continue_on_failure")),
         requested_by=request.user,
         status=RunJob.STATUS_QUEUED,
     )
 
-    ok, reason = acquire_run_lock(holder=f"dashboard:{job.id}", run_job=job)
-    if not ok:
-        job.status = RunJob.STATUS_FAILED
-        job.failure_reason = f"Could not acquire dashboard lock: {reason}"
-        job.finished_at = timezone.now()
-        job.exit_code = 2
-        job.save(update_fields=["status", "failure_reason", "finished_at", "exit_code"])
-        messages.error(request, reason)
-        return redirect("epos_qbo:runs")
-
+    # #region agent log
     try:
-        command = build_command(cleaned)
-        start_run_job(job, command)
-    except Exception as exc:
-        release_run_lock(run_job=job, force=True)
-        job.status = RunJob.STATUS_FAILED
-        job.failure_reason = f"Failed to start subprocess: {exc}"
-        job.finished_at = timezone.now()
-        job.exit_code = 3
-        job.save(update_fields=["status", "failure_reason", "finished_at", "exit_code"])
-        messages.error(request, str(exc))
-        return redirect("epos_qbo:runs")
+        import json
+        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
+            f.write(json.dumps({"location": "views.trigger_run:job_created", "message": "RunJob created", "data": {"job_id": str(job.id), "scope": job.scope, "company_key": str(job.company_key)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H2"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    dispatch_next_queued_job()
 
-    messages.success(request, f"Run started: {job.id}")
-    return redirect("epos_qbo:run-detail", job_id=job.id)
+    # #region agent log
+    try:
+        import json
+        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
+            f.write(json.dumps({"location": "views.trigger_run:redirect", "message": "Redirecting to run detail", "data": {"job_id": str(job.id)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H4"}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    job.refresh_from_db()
+    if job.status == RunJob.STATUS_RUNNING:
+        messages.success(request, f"Run started: {job.display_label}")
+        return redirect("epos_qbo:run-detail", job_id=job.id)
+
+    messages.info(request, f"Run queued: {job.display_label}. It will start automatically.")
+    return redirect("epos_qbo:runs")
 
 
 @login_required
@@ -321,6 +785,16 @@ def company_new(request):
         form = CompanyBasicForm()
     context = {"form": form}
     context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "New Company", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
     return render(request, "epos_qbo/company_form_basic.html", context)
 
 
@@ -368,6 +842,16 @@ def company_advanced(request, company_key):
 
     context = {"form": form, "record": record}
     context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": record.display_name, "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
     return render(request, "epos_qbo/company_form_advanced.html", context)
 
 
@@ -379,3 +863,267 @@ def sync_company_json(request, company_key):
     sync_record_to_json(record)
     messages.success(request, f"Synced {company_key} to JSON")
     return redirect("epos_qbo:company-advanced", company_key=company_key)
+
+
+# --- Companies list / detail helpers (no FK from RunJob to Company; use company_key) ---
+
+
+def _get_token_info_for_display(company: CompanyConfigRecord) -> dict:
+    """Return canonical token health info for templates."""
+    return _company_token_health(company)
+
+
+def _parse_config_for_display(config_json: dict | None) -> dict:
+    """Parse company config JSON into display values for templates."""
+    config = config_json or {}
+    qbo = config.get("qbo") or {}
+    transform = config.get("transform") or {}
+    inventory = config.get("inventory") or {}
+    return {
+        "inventory_enabled": inventory.get("enable_inventory_items", False),
+        "tax_rate": qbo.get("tax_rate"),
+        "deposit_account": qbo.get("deposit_account", "Undeposited Funds"),
+        "schedule": "Daily at 6:00 PM",
+        "group_by": ", ".join(transform.get("group_by", ["date", "tender"])),
+        "date_format": transform.get("date_format", "%Y-%m-%d"),
+        "realm_id": qbo.get("realm_id", "Not set"),
+    }
+
+
+def _format_last_run_time(latest_run: RunJob | None) -> str:
+    if not latest_run or not latest_run.started_at:
+        return "Never run"
+    diff = timezone.now() - latest_run.started_at
+    if diff < timedelta(minutes=1):
+        return "Just now"
+    if diff < timedelta(hours=1):
+        minutes = int(diff.total_seconds() / 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    if diff < timedelta(days=1):
+        hours = int(diff.total_seconds() / 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    if diff < timedelta(days=7):
+        days = diff.days
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    return latest_run.started_at.strftime("%b %d, %Y")
+
+
+def _status_display_from_canonical(status_str: str, latest_run: RunJob | None) -> dict:
+    """Map canonical status from _status_for_company to display dict (level, label, color, icon)."""
+    if status_str == "critical":
+        return {"level": "critical", "label": "Critical", "color": "red", "icon": "solar:close-circle-linear"}
+    if status_str == "healthy":
+        return {"level": "healthy", "label": "Healthy", "color": "emerald", "icon": "solar:check-circle-linear"}
+    # warning: show "Running" when job is running, "Never Run" when no run, else "Warning"
+    if latest_run and latest_run.status == RunJob.STATUS_RUNNING:
+        return {"level": "running", "label": "Running", "color": "blue", "icon": "solar:refresh-linear"}
+    if not latest_run:
+        return {"level": "warning", "label": "Never Run", "color": "amber", "icon": "solar:danger-triangle-linear"}
+    return {"level": "warning", "label": "Warning", "color": "amber", "icon": "solar:danger-triangle-linear"}
+
+
+def _get_company_issues_for_list(
+    company: CompanyConfigRecord,
+    latest_run: RunJob | None,
+    latest_artifact: RunArtifact | None,
+    token_info: dict,
+) -> list:
+    """Return list of issue dicts: severity, icon, message, action."""
+    issues = list(token_info.get("issues", []))
+    if latest_run and latest_run.status == RunJob.STATUS_FAILED:
+        reason = (latest_run.failure_reason or "Unknown error")[:100]
+        if len((latest_run.failure_reason or "")) > 100:
+            reason += "..."
+        issues.append({
+            "severity": "red",
+            "icon": "solar:close-circle-linear",
+            "message": f"Last run failed: {reason}",
+            "action": "view_run",
+        })
+    if not latest_run and not latest_artifact:
+        issues.append({
+            "severity": "amber",
+            "icon": "solar:question-circle-linear",
+            "message": "Company has never been synced",
+            "action": "trigger_sync",
+        })
+    if latest_run and latest_run.started_at:
+        hours_since = (timezone.now() - latest_run.started_at).total_seconds() / 3600
+        if hours_since > 48:
+            issues.append({
+                "severity": "amber",
+                "icon": "solar:clock-circle-linear",
+                "message": f"No sync in {int(hours_since)} hours",
+                "action": "trigger_sync",
+            })
+    return issues
+
+
+def _enrich_company_data(
+    company: CompanyConfigRecord,
+    latest_run: RunJob | None,
+) -> dict:
+    """Build enriched company dict for list/detail templates. Uses same status logic as Overview."""
+    latest_artifact = (
+        RunArtifact.objects.filter(company_key=company.company_key)
+        .order_by("-processed_at", "-imported_at")
+        .first()
+    )
+    artifacts_24h = RunArtifact.objects.filter(
+        company_key=company.company_key,
+        imported_at__gte=timezone.now() - timedelta(hours=24),
+    )
+    # Use canonical status from Overview so counts and labels match
+    token_info = _get_token_info_for_display(company)
+    status_str, _ = _status_for_company(company, latest_artifact, latest_run, token_info)
+    status = _status_display_from_canonical(status_str, latest_run)
+    issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
+    config_display = _parse_config_for_display(company.config_json)
+    records_24h = sum(int(a.rows_kept or 0) for a in artifacts_24h)
+    return {
+        "company": company,
+        "status": status,
+        "latest_run": latest_run,
+        "latest_artifact": latest_artifact,
+        "token_info": token_info,
+        "issues": issues,
+        "config_display": config_display,
+        "records_24h": records_24h,
+        "last_run_display": _format_last_run_time(latest_run),
+    }
+
+
+def _sort_companies_data(companies_data: list, sort_by: str) -> list:
+    if sort_by == "name":
+        return sorted(companies_data, key=lambda c: (c["company"].display_name or "").lower())
+    if sort_by == "last_run":
+        return sorted(
+            companies_data,
+            key=lambda c: c["latest_run"].started_at if c["latest_run"] and c["latest_run"].started_at else timezone.datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+    if sort_by == "status":
+        order = {"critical": 0, "warning": 1, "running": 2, "healthy": 3}
+        return sorted(companies_data, key=lambda c: order.get(c["status"]["level"], 99))
+    return companies_data
+
+
+def _calculate_companies_summary(companies_data: list) -> dict:
+    total = len(companies_data)
+    healthy = sum(1 for c in companies_data if c["status"]["level"] == "healthy")
+    # Count "running" as warning so totals match Overview (Overview has no separate running count)
+    warning = sum(1 for c in companies_data if c["status"]["level"] in ("warning", "running"))
+    critical = sum(1 for c in companies_data if c["status"]["level"] == "critical")
+    return {"total": total, "healthy": healthy, "warning": warning, "critical": critical}
+
+
+@login_required
+def companies_list(request):
+    """Companies management page with search, filter, sort; HTMX partial for list."""
+    _ensure_company_records()
+    search = request.GET.get("search", "").strip()
+    filter_status = request.GET.get("filter", "all")
+    sort_by = request.GET.get("sort", "name")
+    view_mode = request.GET.get("view", "cards")
+
+    companies = CompanyConfigRecord.objects.filter(is_active=True)
+    if search:
+        companies = companies.filter(
+            Q(display_name__icontains=search) | Q(company_key__icontains=search)
+        )
+
+    company_keys = list(companies.values_list("company_key", flat=True))
+    runs_by_company = {}
+    if company_keys:
+        for job in RunJob.objects.filter(company_key__in=company_keys).order_by("-started_at"):
+            if job.company_key and job.company_key not in runs_by_company:
+                runs_by_company[job.company_key] = []
+            if job.company_key and len(runs_by_company[job.company_key]) < 5:
+                runs_by_company[job.company_key].append(job)
+
+    companies_data = []
+    for company in companies:
+        recent = runs_by_company.get(company.company_key, [])
+        latest_run = recent[0] if recent else None
+        company_data = _enrich_company_data(company, latest_run)
+        companies_data.append(company_data)
+
+    if filter_status != "all":
+        companies_data = [c for c in companies_data if c["status"]["level"] == filter_status]
+    companies_data = _sort_companies_data(companies_data, sort_by)
+    summary = _calculate_companies_summary(companies_data)
+
+    context = {
+        "companies_data": companies_data,
+        "search": search,
+        "filter_status": filter_status,
+        "sort_by": sort_by,
+        "view_mode": view_mode,
+        "summary": summary,
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+
+    if request.headers.get("HX-Request"):
+        return render(request, "components/company_cards.html", context)
+    return render(request, "epos_qbo/companies.html", context)
+
+
+@login_required
+def company_detail(request, company_key):
+    """Detail view for a single company."""
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    latest_run = (
+        RunJob.objects.filter(company_key=company_key).order_by("-started_at").first()
+    )
+    company_data = _enrich_company_data(company, latest_run)
+    company_data["config_json_pretty"] = json.dumps(company.config_json or {}, indent=2)
+    recent_runs = RunJob.objects.filter(company_key=company_key).order_by("-started_at")[:30]
+    recent_artifacts = RunArtifact.objects.filter(company_key=company_key).order_by("-processed_at")[:30]
+
+    context = {
+        "company_data": company_data,
+        "recent_runs": recent_runs,
+        "recent_artifacts": recent_artifacts,
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {"label": company.display_name, "url": None},
+            ],
+            back_url=reverse("epos_qbo:companies-list"),
+            back_label="Companies",
+        )
+    )
+    return render(request, "epos_qbo/company_detail.html", context)
+
+
+@login_required
+@permission_required("epos_qbo.can_edit_companies", raise_exception=True)
+@require_POST
+def company_toggle_active(request, company_key):
+    """Toggle company is_active (soft delete/restore). Returns JSON for HTMX else redirects."""
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    company.is_active = not company.is_active
+    company.save(update_fields=["is_active"])
+    if request.headers.get("HX-Request") or request.accepts("application/json"):
+        return JsonResponse({
+            "success": True,
+            "is_active": company.is_active,
+            "message": f"Company {'activated' if company.is_active else 'deactivated'}",
+        })
+    msg = f"Company {company.display_name} has been {'activated' if company.is_active else 'deactivated'}."
+    messages.success(request, msg)
+    return redirect("epos_qbo:companies-list")

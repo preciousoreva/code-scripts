@@ -26,6 +26,7 @@ from code_scripts.token_manager import get_access_token, refresh_access_token, v
 load_env_file()
 
 BASE_URL = "https://quickbooks.api.intuit.com"
+VERBOSE_PIPELINE_LOGS = os.getenv("OIAT_VERBOSE_PIPELINE_LOGS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 QBO_REQUEST_TIMEOUT = (10, 120)
 QBO_MAX_RETRIES = 3
@@ -78,6 +79,10 @@ AUTO_CREATE_ITEMS = True       # Flip to True if you ever want auto item creatio
 def get_repo_root() -> str:
     """Return the directory this script lives in (the repo root for our purposes)."""
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def verbose_logs_enabled() -> bool:
+    return VERBOSE_PIPELINE_LOGS
 
 
 def company_dir_name(display_name: str) -> str:
@@ -2035,13 +2040,14 @@ def build_sales_receipt_payload(
         elif created_type == "Default":
             default_fallback_count += 1
 
-        log_line = (f"[INFO] Line item: DocNumber={doc_number} TxnDate={txn_date} item_name={item_name!r} category={category!r} "
-                    f"qty={qty_val} TOTAL_Sales={total_sales} NET_Sales={net_sales} Cost_Price={cost_total} "
-                    f"unit_sales_price_gross={unit_sales_price_gross} unit_purchase_cost_gross={unit_purchase_cost_gross} "
-                    f"item_id={item_ref_id} created={item_was_created} type={created_type}")
-        if fallback_reason:
-            log_line += f" fallback_reason={fallback_reason}"
-        print(log_line)
+        if verbose_logs_enabled():
+            log_line = (f"[INFO] Line item: DocNumber={doc_number} TxnDate={txn_date} item_name={item_name!r} category={category!r} "
+                        f"qty={qty_val} TOTAL_Sales={total_sales} NET_Sales={net_sales} Cost_Price={cost_total} "
+                        f"unit_sales_price_gross={unit_sales_price_gross} unit_purchase_cost_gross={unit_purchase_cost_gross} "
+                        f"item_id={item_ref_id} created={item_was_created} type={created_type}")
+            if fallback_reason:
+                log_line += f" fallback_reason={fallback_reason}"
+            print(log_line)
 
         # Authoritative gross amount from CSV (*ItemAmount) – VAT-inclusive
         try:
@@ -2686,15 +2692,13 @@ def send_sales_receipt(payload: dict, token_mgr: TokenManager, realm_id: str, co
         json=payload,
     )
 
-    print("Status:", response.status_code)
-    
+    doc_number = str(payload.get("DocNumber", "") or "")
+
     # Parse response body for logging/error messages
     try:
         body = response.json()
-        print(json.dumps(body, indent=2))
     except Exception:
         body = None
-        print(response.text)
     
     # Check for inventory-related errors/warnings
     inventory_warning = False
@@ -2702,8 +2706,43 @@ def send_sales_receipt(payload: dict, token_mgr: TokenManager, realm_id: str, co
     
     # Validate response status first
     is_success = (200 <= response.status_code < 300)
+
+    receipt_id: Optional[str] = None
+    short_error = ""
+    if isinstance(body, dict):
+        receipt_id = (
+            (body.get("SalesReceipt") or {}).get("Id")
+            if isinstance(body.get("SalesReceipt"), dict)
+            else None
+        )
+        fault = body.get("Fault") or body.get("fault") or {}
+        errors = fault.get("Error") or fault.get("error") or []
+        if isinstance(errors, dict):
+            errors = [errors]
+        if errors:
+            first_error = errors[0]
+            short_error = (
+                f"{first_error.get('code', '')} {first_error.get('message', '')} {first_error.get('detail', '')}"
+            ).strip()
+    elif response.text:
+        short_error = response.text[:200]
+
+    if is_success:
+        print(
+            f"[INFO] SalesReceipt response: status={response.status_code} doc={doc_number or '-'} id={receipt_id or '-'}"
+        )
+    else:
+        print(
+            f"[WARN] SalesReceipt response: status={response.status_code} doc={doc_number or '-'} error={short_error or 'unknown'}"
+        )
+
+    if verbose_logs_enabled():
+        if body is not None:
+            print(json.dumps(body, indent=2))
+        elif response.text:
+            print(response.text)
     
-    if body:
+    if isinstance(body, dict):
         # Check for inventory-related messages
         response_text = json.dumps(body).lower()
         inventory_keywords = ["insufficient quantity", "quantity on hand", "inventory", "not enough"]
@@ -2791,6 +2830,7 @@ def send_sales_receipt(payload: dict, token_mgr: TokenManager, realm_id: str, co
 
 
 def main():
+    global VERBOSE_PIPELINE_LOGS
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         description="Upload Sales Receipts to QuickBooks for a specific company."
@@ -2842,7 +2882,16 @@ def main():
         dest="dry_run",
         help="Build payloads and report swaps only; do not upload to QBO",
     )
+    parser.add_argument(
+        "--verbose-logs",
+        action="store_true",
+        help="Enable verbose upload logging (line-item and full response dumps).",
+    )
     args = parser.parse_args()
+
+    if args.verbose_logs:
+        VERBOSE_PIPELINE_LOGS = True
+        os.environ["OIAT_VERBOSE_PIPELINE_LOGS"] = "1"
     
     # Load company configuration
     try:

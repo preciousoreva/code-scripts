@@ -73,29 +73,21 @@ def run_step(label: str, script_name: str, args: list = None) -> None:
     logging.info(f"\n=== {label} ===")
     logging.info(f"Running: {' '.join(cmd)}")
 
-    result = subprocess.run(
+    process = subprocess.Popen(
         cmd,
         cwd=str(repo_root),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
     )
+    if process.stdout is not None:
+        for line in process.stdout:
+            logging.info(f"  {line.rstrip()}")
+    return_code = process.wait()
 
-    # Log stdout and stderr
-    if result.stdout:
-        logging.info("Script output:")
-        for line in result.stdout.splitlines():
-            logging.info(f"  {line}")
-    if result.stderr:
-        logging.warning("Script errors:")
-        for line in result.stderr.splitlines():
-            logging.warning(f"  {line}")
-
-    if result.returncode != 0:
-        error_msg = f"[ERROR] {label} failed with exit code {result.returncode}"
-        if result.stdout:
-            error_msg += f"\nOutput: {result.stdout}"
-        if result.stderr:
-            error_msg += f"\nErrors: {result.stderr}"
+    if return_code != 0:
+        error_msg = f"[ERROR] {label} failed with exit code {return_code}"
         logging.error(error_msg)
         raise SystemExit(error_msg)
 
@@ -1012,7 +1004,14 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
     return reconcile_result
 
 
-def main(company_key: str, target_date: Optional[str] = None, from_date: Optional[str] = None, to_date: Optional[str] = None, skip_download: bool = False) -> int:
+def main(
+    company_key: str,
+    target_date: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    skip_download: bool = False,
+    verbose_logs: bool = False,
+) -> int:
     """
     Full pipeline for a specific company:
 
@@ -1068,6 +1067,11 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
     logging.info(f"DEPOSIT ACCOUNT: {config.deposit_account}")
     logging.info(f"TAX MODE: {config.tax_mode}")
     logging.info("=" * 60)
+
+    if verbose_logs:
+        os.environ["OIAT_VERBOSE_PIPELINE_LOGS"] = "1"
+    else:
+        os.environ.setdefault("OIAT_VERBOSE_PIPELINE_LOGS", "0")
     
     # Determine mode: range mode if both from_date and to_date are provided
     is_range_mode = from_date is not None and to_date is not None
@@ -1407,6 +1411,8 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
                 qbo_upload_args = ["--company", company_key]
                 if config.trading_day_enabled:
                     qbo_upload_args.extend(["--target-date", day_date])
+                if verbose_logs:
+                    qbo_upload_args.append("--verbose-logs")
                 run_step(
                     f"Phase 3: Upload to QBO (qbo_upload) - {day_date}",
                     "qbo_upload.py",
@@ -1722,6 +1728,8 @@ def main(company_key: str, target_date: Optional[str] = None, from_date: Optiona
             qbo_upload_args = ["--company", company_key]
             if config.trading_day_enabled:
                 qbo_upload_args.extend(["--target-date", target_date])
+            if verbose_logs:
+                qbo_upload_args.append("--verbose-logs")
             run_step(
                 "Phase 3: Upload to QBO (qbo_upload)",
                 "qbo_upload.py",
@@ -1994,6 +2002,11 @@ Examples:
         action="store_true",
         help="Skip EPOS download and use existing split files in uploads/range_raw/ (range mode only)",
     )
+    parser.add_argument(
+        "--verbose-logs",
+        action="store_true",
+        help="Enable verbose pipeline logs (line-level and full API responses).",
+    )
     args = parser.parse_args()
     
     if not args.company:
@@ -2013,4 +2026,13 @@ Examples:
         if not lock.acquired:
             print(f"[LOCK] Run blocked: {lock.reason}")
             raise SystemExit(2)
-        raise SystemExit(main(args.company, args.target_date, args.from_date, args.to_date, args.skip_download))
+        raise SystemExit(
+            main(
+                args.company,
+                args.target_date,
+                args.from_date,
+                args.to_date,
+                args.skip_download,
+                args.verbose_logs,
+            )
+        )

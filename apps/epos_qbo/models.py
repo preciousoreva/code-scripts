@@ -4,6 +4,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class CompanyConfigRecord(models.Model):
@@ -71,6 +72,9 @@ class RunJob(models.Model):
     from_date = models.DateField(null=True, blank=True)
     to_date = models.DateField(null=True, blank=True)
     skip_download = models.BooleanField(default=False)
+    parallel = models.PositiveSmallIntegerField(default=1)
+    stagger_seconds = models.PositiveSmallIntegerField(default=2)
+    continue_on_failure = models.BooleanField(default=False)
     command_json = models.JSONField(default=list)
     command_display = models.TextField(blank=True)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
@@ -85,6 +89,8 @@ class RunJob(models.Model):
         related_name="requested_run_jobs",
     )
     failure_reason = models.TextField(blank=True)
+    queued_at = models.DateTimeField(default=timezone.now)
+    dispatched_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -94,6 +100,12 @@ class RunJob(models.Model):
             ("can_trigger_runs", "Can trigger pipeline runs"),
         ]
         ordering = ["-created_at"]
+
+    @property
+    def display_label(self) -> str:
+        """Human-readable run label: YYYY-MM-DD HH:MM from started_at or created_at."""
+        dt = self.started_at or self.created_at
+        return dt.strftime("%Y-%m-%d %H:%M") if dt else str(self.id)
 
     def __str__(self) -> str:
         return f"RunJob {self.id} [{self.status}]"

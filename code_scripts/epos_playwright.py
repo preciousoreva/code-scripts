@@ -121,6 +121,11 @@ def get_args():
         "--output-filename",
         help="Explicit filename for the downloaded CSV (default: EPOS suggested filename).",
     )
+    parser.add_argument(
+        "--download-timeout-ms",
+        type=int,
+        help="Override download timeout in milliseconds.",
+    )
     args = parser.parse_args()
     
     # Validation: --from-date and --to-date must be provided together
@@ -138,6 +143,7 @@ def run(
     target_date: str = None,
     output_dir: str = None,
     output_filename: str = None,
+    download_timeout_ms: int | None = None,
 ) -> None:
     # Get credentials from company config
     try:
@@ -193,8 +199,10 @@ def run(
     page.wait_for_timeout(500)
     
     # Download CSV
-    # For large date ranges, downloads can take longer - increase timeout and don't wait for navigation
-    with page.expect_download(timeout=150000) as download_info:  # 2 minute timeout for large downloads
+    is_range_mode = bool(from_date and to_date and from_date != to_date)
+    timeout_ms = int(download_timeout_ms) if download_timeout_ms else (150000 if is_range_mode else 60000)
+    print(f"Waiting for CSV download (timeout={timeout_ms}ms)")
+    with page.expect_download(timeout=timeout_ms) as download_info:
         page.get_by_role("button", name="Export to .csv").click(timeout=30000, no_wait_after=True)
     download = download_info.value
 
@@ -248,4 +256,5 @@ if __name__ == "__main__":
             target_date=target_date,
             output_dir=args.output_dir,
             output_filename=args.output_filename,
+            download_timeout_ms=args.download_timeout_ms,
         )

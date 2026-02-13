@@ -15,19 +15,19 @@
             <span class="text-xs font-medium text-slate-400 uppercase tracking-wider">Platform</span>
         </div>
 
-        <a href="{% url 'epos_qbo:overview' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md bg-slate-50 text-slate-900 border border-slate-100">
-            <iconify-icon icon="solar:widget-linear" class="text-slate-500 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
+        <a href="{% url 'epos_qbo:overview' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'overview' or request.resolver_match.url_name == 'overview-root' %}bg-slate-50 text-slate-900 border border-slate-100{% else %}text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors{% endif %}">
+            <iconify-icon icon="solar:widget-linear" class="{% if request.resolver_match.url_name == 'overview' or request.resolver_match.url_name == 'overview-root' %}text-slate-500{% else %}text-slate-400 group-hover:text-slate-900{% endif %} transition-colors" width="20"></iconify-icon>
             Overview
         </a>
 
-        <a href="{% url 'epos_qbo:company-new' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
-            <iconify-icon icon="solar:buildings-2-linear" class="text-slate-400 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
+        <a href="{% url 'epos_qbo:companies-list' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'companies-list' or request.resolver_match.url_name == 'company-detail' %}bg-slate-50 text-slate-900 border border-slate-100{% else %}text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors{% endif %}">
+            <iconify-icon icon="solar:buildings-2-linear" class="{% if request.resolver_match.url_name == 'companies-list' or request.resolver_match.url_name == 'company-detail' %}text-slate-500{% else %}text-slate-400 group-hover:text-slate-900{% endif %} transition-colors" width="20"></iconify-icon>
             Companies
             <span class="ml-auto bg-slate-100 text-slate-600 py-0.5 px-2 rounded-full text-xs font-medium">{{ company_count|default:"0" }}</span>
         </a>
 
-        <a href="{% url 'epos_qbo:runs' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
-            <iconify-icon icon="solar:play-circle-linear" class="text-slate-400 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
+        <a href="{% url 'epos_qbo:runs' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'runs' or request.resolver_match.url_name == 'run-detail' %}bg-slate-50 text-slate-900 border border-slate-100{% else %}text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors{% endif %}">
+            <iconify-icon icon="solar:play-circle-linear" class="{% if request.resolver_match.url_name == 'runs' or request.resolver_match.url_name == 'run-detail' %}text-slate-500{% else %}text-slate-400 group-hover:text-slate-900{% endif %} transition-colors" width="20"></iconify-icon>
             Runs
         </a>
 
@@ -36,8 +36,8 @@
             Mappings
         </a>
 
-        <a href="#" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
-            <iconify-icon icon="solar:clipboard-list-linear" class="text-slate-400 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
+        <a href="{% url 'epos_qbo:logs' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'logs' %}bg-slate-50 text-slate-900 border border-slate-100{% else %}text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors{% endif %}">
+            <iconify-icon icon="solar:clipboard-list-linear" class="{% if request.resolver_match.url_name == 'logs' %}text-slate-500{% else %}text-slate-400 group-hover:text-slate-900{% endif %} transition-colors" width="20"></iconify-icon>
             Logs
         </a>
 

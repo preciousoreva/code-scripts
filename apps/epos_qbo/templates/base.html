@@ -1,6 +1,7 @@
 {% load static %}
 <!DOCTYPE html>
 <html lang="en" class="antialiased bg-slate-50">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,33 +16,214 @@
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
 
     <style>
         :root {
             --font-sans: 'Inter', sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
         }
+
         body {
             font-family: var(--font-sans);
         }
+
         .font-mono {
             font-family: var(--font-mono);
         }
+
         .no-scrollbar::-webkit-scrollbar {
             display: none;
         }
+
         .no-scrollbar {
             -ms-overflow-style: none;
             scrollbar-width: none;
+        }
+
+        [x-cloak] {
+            display: none !important;
+        }
+
+        /* Button System - Consistent styling across the app */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition-property: color, background-color, border-color;
+            transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+            transition-duration: 150ms;
+        }
+
+        .btn-primary {
+            background-color: rgb(15 23 42);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: rgb(30 41 59);
+        }
+
+        .btn-secondary {
+            background-color: white;
+            border: 1px solid rgb(226 232 240);
+            color: rgb(51 65 85);
+        }
+
+        .btn-secondary:hover {
+            background-color: rgb(248 250 252);
+        }
+
+        .btn-tertiary {
+            color: rgb(71 85 105);
+        }
+
+        .btn-tertiary:hover {
+            color: rgb(15 23 42);
+        }
+
+        .btn-sm {
+            padding: 0.375rem 0.75rem;
+            font-size: 0.75rem;
+        }
+
+        .btn-icon {
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            transition-property: color, background-color;
+            transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+            transition-duration: 150ms;
+        }
+
+        .btn-icon:hover {
+            background-color: rgb(241 245 249);
+        }
+
+        /* Toast Notification System */
+        .toast-container {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            max-width: 400px;
+            pointer-events: none;
+        }
+
+        .toast {
+            pointer-events: auto;
+            padding: 0.875rem 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            display: flex;
+            align-items: start;
+            gap: 0.75rem;
+            animation: slideInRight 0.3s ease-out;
+            transition: opacity 0.3s ease-out, transform 0.3s ease-out;
+        }
+
+        .toast.hiding {
+            animation: slideOutRight 0.3s ease-in forwards;
+        }
+
+        .toast-success {
+            background-color: rgb(236 253 245);
+            border: 1px solid rgb(167 243 208);
+            color: rgb(6 78 59);
+        }
+
+        .toast-error {
+            background-color: rgb(254 242 242);
+            border: 1px solid rgb(254 202 202);
+            color: rgb(153 27 27);
+        }
+
+        .toast-info {
+            background-color: rgb(239 246 255);
+            border: 1px solid rgb(191 219 254);
+            color: rgb(30 64 175);
+        }
+
+        .toast-icon {
+            flex-shrink: 0;
+            margin-top: 0.125rem;
+        }
+
+        .toast-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            font-size: 0.875rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .toast-message {
+            font-size: 0.8125rem;
+            opacity: 0.9;
+            line-height: 1.4;
+        }
+
+        .toast-close {
+            flex-shrink: 0;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0.25rem;
+            opacity: 0.6;
+            transition: opacity 0.2s;
+            color: inherit;
+        }
+
+        .toast-close:hover {
+            opacity: 1;
+        }
+
+        @keyframes slideInRight {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        @keyframes slideOutRight {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+
+            to {
+                transform: translateX(100%);
+                opacity: 0;
+            }
         }
     </style>
 
     {% block head_extra %}{% endblock %}
 </head>
-<body class="text-slate-900 flex min-h-screen overflow-hidden selection:bg-blue-100 selection:text-blue-700">
+
+<body data-debug-beacon="{% if ui_debug_beacon_enabled %}1{% else %}0{% endif %}"
+    class="text-slate-900 flex min-h-screen overflow-hidden selection:bg-blue-100 selection:text-blue-700">
 
     {% include "components/sidebar.html" %}
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
 
     <main class="flex-1 ml-64 overflow-y-auto h-screen bg-slate-50/50">
         {% block topbar %}{% endblock %}
@@ -78,7 +260,10 @@
     <!-- Dashboard JS (charts + interactions) -->
     <script src="{% static 'js/charts.js' %}"></script>
 
+    <!-- Toast Notifications & Run Status Polling -->
+    <script src="{% static 'js/toasts.js' %}"></script>
+
     {% block body_extra %}{% endblock %}
 </body>
-</html>
 
+</html>

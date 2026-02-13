@@ -82,6 +82,36 @@ That's it! The pipeline will download, split, transform, upload, archive, and re
 
 ---
 
+## First-time setup (all in one)
+
+Use this sequence once per machine (or per new clone/venv) so both the pipeline and the OIAT Portal work, including **triggering runs from the dashboard**:
+
+1. **Create and activate a virtual environment** (recommended)
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # macOS/Linux
+   # .\.venv\Scripts\Activate.ps1   # Windows
+   ```
+
+2. **Install Python dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Install Playwright browser** (required for EPOS download; also needed if you trigger runs from the dashboard)
+   ```bash
+   playwright install chromium
+   ```
+
+4. **On Linux/WSL: install Playwright system dependencies** (avoids “libnspr4.so not found” and similar errors when Chromium starts)
+   ```bash
+   sudo playwright install-deps
+   ```
+
+5. **If you use the OIAT Portal:** run [Portal Setup](#portal-setup) (migrate, createsuperuser, sync companies, runserver).
+
+---
+
 ## Running the Pipeline for All Companies (Daily Run)
 
 The `run_all_companies.py` script orchestrates running the pipeline for all configured companies in sequence. It's designed for daily automation via cron or Task Scheduler.
@@ -130,7 +160,9 @@ The OIAT Portal is a Django web application that provides a monitoring dashboard
 
 ### Portal Setup
 
-After installing dependencies (`pip install -r requirements.txt`), run:
+Use the **same virtual environment** as the pipeline. If you have not already done so, run the [First-time setup (all in one)](#first-time-setup-all-in-one) steps (venv, `pip install -r requirements.txt`, `playwright install chromium`, and on Linux/WSL `sudo playwright install-deps`). That ensures the dashboard can trigger runs without missing dependencies (pandas, Playwright, Chromium system libs).
+
+Then run:
 
 ```bash
 # 1. Apply database migrations
@@ -150,6 +182,8 @@ python manage.py runserver
 ```
 
 Then open `http://127.0.0.1:8000/` in your browser and log in with the superuser credentials.
+
+- Template formatting rule: keep each Django variable tag on one line, for example `{{ value|default:"-" }}`. Do not wrap text inside `{{ ... }}` across lines.
 
 ### Portal Permissions
 

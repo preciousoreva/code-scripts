@@ -2,6 +2,10 @@
 
 {% block title %}Advanced Company Settings • EPOS → QBO{% endblock %}
 
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
 {% block content %}
 <div class="space-y-6 max-w-5xl">
     <div class="flex items-center justify-between">
@@ -83,7 +87,7 @@
 
         <div class="flex items-center justify-between">
             <span class="text-xs text-slate-500">Saving this form updates DB config and syncs JSON atomically.</span>
-            <button type="submit" class="inline-flex items-center px-4 py-2 bg-slate-900 text-white text-sm rounded-md hover:bg-slate-800">
+            <button type="submit" class="btn btn-primary">
                 Save Advanced Settings
             </button>
         </div>

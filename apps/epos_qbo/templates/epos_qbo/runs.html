@@ -2,63 +2,99 @@
 
 {% block title %}Runs • EPOS → QBO{% endblock %}
 
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
 {% block content %}
-<div class="space-y-6">
-    <div class="flex items-center justify-between">
+<div class="space-y-6" data-active-runs='{{ active_run_ids_json|safe }}'>
+    <div>
         <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Runs</h1>
-        <a href="{% url 'epos_qbo:overview' %}" class="text-sm text-blue-600 hover:underline">Back to Overview</a>
     </div>
 
     {% if perms.epos_qbo.can_trigger_runs %}
-    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm" x-data="runTriggerForm()">
         <h2 class="text-sm font-semibold text-slate-900 mb-4">Trigger Run</h2>
-        <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="space-y-4">
             {% csrf_token %}
-            <label class="text-xs text-slate-600">
-                Scope
-                <select name="scope" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
-                    <option value="all_companies">All Companies</option>
-                    <option value="single_company">Single Company</option>
-                </select>
-            </label>
-            <label class="text-xs text-slate-600">
-                Company (single scope)
-                <select name="company_key" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
-                    <option value="">Select company</option>
-                    {% for company in companies %}
-                    <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <label class="text-xs text-slate-600">
-                Date Mode
-                <select name="date_mode" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
-                    <option value="yesterday">Yesterday</option>
-                    <option value="target_date">Target Date</option>
-                    <option value="range">Range</option>
-                </select>
-            </label>
-            <div class="flex items-end">
-                <button type="submit" class="w-full inline-flex justify-center items-center px-3 py-2 bg-slate-900 rounded-md text-sm font-medium text-white hover:bg-slate-800">
-                    Trigger
-                </button>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <label class="text-xs text-slate-600">
+                    Scope
+                    <select name="scope" x-model="scope" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                        <option value="all_companies">All Companies</option>
+                        <option value="single_company">Single Company</option>
+                    </select>
+                </label>
+                <label class="text-xs text-slate-600" x-show="scope === 'single_company'" x-cloak>
+                    Company
+                    <select name="company_key" :required="scope === 'single_company'" :disabled="scope !== 'single_company'" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                        <option value="">Select company</option>
+                        {% for company in companies %}
+                        <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="text-xs text-slate-600">
+                    Date Mode
+                    <select name="date_mode" x-model="dateMode" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                        <option value="yesterday">Yesterday</option>
+                        <option value="target_date">Target Date</option>
+                        <option value="range">Range</option>
+                    </select>
+                </label>
+                <div class="flex items-end">
+                    <button type="submit" class="btn btn-primary w-full justify-center">
+                        Trigger
+                    </button>
+                </div>
             </div>
-            <label class="text-xs text-slate-600">
-                Target Date
-                <input type="date" name="target_date" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
-            </label>
-            <label class="text-xs text-slate-600">
-                From Date
-                <input type="date" name="from_date" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
-            </label>
-            <label class="text-xs text-slate-600">
-                To Date
-                <input type="date" name="to_date" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
-            </label>
-            <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">
-                <input type="checkbox" name="skip_download">
-                Skip download (range only)
-            </label>
+
+            <p class="text-xs text-slate-500" x-text="summaryText"></p>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="dateMode === 'target_date'" x-cloak>
+                <label class="text-xs text-slate-600">
+                    Target Date
+                    <input type="date" name="target_date" :required="dateMode === 'target_date'" :disabled="dateMode !== 'target_date'"
+                        class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                </label>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="dateMode === 'range'" x-cloak>
+                <label class="text-xs text-slate-600">
+                    From Date
+                    <input type="date" name="from_date" :required="dateMode === 'range'" :disabled="dateMode !== 'range'"
+                        class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                </label>
+                <label class="text-xs text-slate-600">
+                    To Date
+                    <input type="date" name="to_date" :required="dateMode === 'range'" :disabled="dateMode !== 'range'"
+                        class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                </label>
+                <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">
+                    <input type="checkbox" name="skip_download" :disabled="dateMode !== 'range'">
+                    Skip download
+                </label>
+            </div>
+
+            <details class="border border-slate-200 rounded-lg p-3" x-show="scope === 'all_companies'" x-cloak>
+                <summary class="cursor-pointer text-sm font-medium text-slate-700">Advanced options (all companies)</summary>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
+                    <label class="text-xs text-slate-600">
+                        Parallel workers
+                        <input type="number" name="parallel" min="1" value="2" :disabled="scope !== 'all_companies'"
+                            class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    </label>
+                    <label class="text-xs text-slate-600">
+                        Stagger seconds
+                        <input type="number" name="stagger_seconds" min="0" value="2" :disabled="scope !== 'all_companies'"
+                            class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    </label>
+                    <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">
+                        <input type="checkbox" name="continue_on_failure" :disabled="scope !== 'all_companies'">
+                        Continue on failure
+                    </label>
+                </div>
+            </details>
         </form>
     </section>
     {% endif %}
@@ -84,7 +120,8 @@
                     <td class="px-4 py-3">{{ job.status }}</td>
                     <td class="px-4 py-3">{{ job.exit_code|default:"-" }}</td>
                     <td class="px-4 py-3">
-                        <a href="{% url 'epos_qbo:run-detail' job_id=job.id %}" class="text-blue-600 hover:underline">View</a>
+                        <a href="{% url 'epos_qbo:run-detail' job_id=job.id %}"
+                            class="text-blue-600 hover:underline">View</a>
                     </td>
                 </tr>
                 {% empty %}
@@ -96,4 +133,25 @@
         </table>
     </section>
 </div>
+{% endblock %}
+
+{% block body_extra %}
+<script>
+    function runTriggerForm() {
+        return {
+            scope: "all_companies",
+            dateMode: "yesterday",
+            get summaryText() {
+                const scopeText = this.scope === "all_companies" ? "all active companies" : "one selected company";
+                if (this.dateMode === "yesterday") {
+                    return `This will run for ${scopeText} using yesterday's business date.`;
+                }
+                if (this.dateMode === "target_date") {
+                    return `This will run for ${scopeText} using one specific target date.`;
+                }
+                return `This will run for ${scopeText} across a date range.`;
+            },
+        };
+    }
+</script>
 {% endblock %}
