@@ -68,6 +68,7 @@ Uploaded/
 reports/
 
 # IDE
+.cursor/
 .vscode/
 .idea/
 *.swp
