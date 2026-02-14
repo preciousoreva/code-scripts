@@ -30,10 +30,31 @@ from .services.job_runner import dispatch_next_queued_job, read_log_chunk
 
 ACCESS_REFRESH_MARGIN_SECONDS = 60
 REFRESH_EXPIRING_DAYS = 7
+REVENUE_PERIOD_DAYS = {
+    "yesterday": 1,
+    "7d": 7,
+    "30d": 30,
+    "90d": 90,
+}
+REVENUE_PERIOD_OPTIONS = [
+    ("yesterday", "Yesterday"),
+    ("7d", "Last 7d"),
+    ("30d", "Last 30d"),
+    ("90d", "Last 90d"),
+]
 REAUTH_GUIDANCE = (
     "QBO re-authentication required. Run OAuth flow and store tokens using "
     "/Volumes/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/code_scripts/store_tokens.py."
 )
+EXIT_CODE_REFERENCE = [
+    {"code": "0", "message": "Success."},
+    {"code": "1", "message": "Pipeline failed during execution. Check Live Log for root cause."},
+    {"code": "2", "message": "Run blocked by active lock or invalid CLI usage."},
+    {"code": "3", "message": "Dashboard failed to start the subprocess."},
+    {"code": "-1", "message": "Run reconciler marked stale process as failed (PID not alive)."},
+    {"code": "126", "message": "Subprocess command invoked but not executable."},
+    {"code": "127", "message": "Subprocess command/dependency not found."},
+]
 
 
 def _ensure_company_records() -> None:
@@ -79,6 +100,57 @@ def _format_duration(seconds: int | None) -> str:
 
 def _format_day_count(seconds: int) -> int:
     return max(1, ceil(seconds / 86400))
+
+
+def _normalize_revenue_period(value: str | None) -> str:
+    selected = (value or "").strip().lower()
+    return selected if selected in REVENUE_PERIOD_DAYS else "30d"
+
+
+def _exit_code_info(exit_code: int | None) -> dict | None:
+    if exit_code is None:
+        return None
+    mapping = {
+        0: {
+            "label": "Success",
+            "description": "Process completed normally.",
+        },
+        1: {
+            "label": "Pipeline failure",
+            "description": "The pipeline reported an execution error. Check Live Log for the underlying phase error.",
+        },
+        2: {
+            "label": "Blocked or invalid invocation",
+            "description": "Usually means a run lock blocked execution or CLI arguments were invalid.",
+        },
+        3: {
+            "label": "Subprocess start failure",
+            "description": "Dashboard could not start the runner subprocess.",
+        },
+        -1: {
+            "label": "Reconciled stale run",
+            "description": "Reaper marked a stuck running job as failed because the PID was no longer alive.",
+        },
+        126: {
+            "label": "Not executable",
+            "description": "Command exists but is not executable in current environment.",
+        },
+        127: {
+            "label": "Command missing",
+            "description": "Command or required runtime dependency could not be found.",
+        },
+    }
+    if exit_code in mapping:
+        return mapping[exit_code]
+    if exit_code < 0:
+        return {
+            "label": "Terminated by signal",
+            "description": f"Process ended from OS signal {-exit_code}.",
+        }
+    return {
+        "label": "Unhandled non-zero exit",
+        "description": "Process returned a non-zero code. Check Live Log and failure reason for details.",
+    }
 
 
 def _company_token_health(company: CompanyConfigRecord) -> dict:
@@ -273,6 +345,21 @@ def _job_failure_source(job: RunJob) -> str:
     return "other"
 
 
+def _overview_live_log_message(job: RunJob, company_display: str) -> str:
+    run_label = job.display_label
+    if job.status == RunJob.STATUS_SUCCEEDED:
+        return f"{company_display}: Run {run_label} succeeded"
+    if job.status == RunJob.STATUS_FAILED:
+        if job.failure_reason:
+            return f"{company_display}: Run {run_label} failed ({job.failure_reason})"
+        return f"{company_display}: Run {run_label} failed"
+    if job.status == RunJob.STATUS_RUNNING:
+        return f"{company_display}: Run {run_label} is running"
+    if job.status == RunJob.STATUS_CANCELLED:
+        return f"{company_display}: Run {run_label} was cancelled"
+    return f"{company_display}: Run {run_label} queued"
+
+
 def _status_for_company(
     company: CompanyConfigRecord,
     latest_artifact: RunArtifact | None,
@@ -308,11 +395,12 @@ def _status_for_company(
     return "healthy", "Last run succeeded."
 
 
-def _overview_context() -> dict:
+def _overview_context(revenue_period: str = "30d") -> dict:
     now = timezone.now()
     since_24h = now - timedelta(hours=24)
     since_7d = now - timedelta(days=7)
     since_60d = now - timedelta(days=60)
+    revenue_period = _normalize_revenue_period(revenue_period)
 
     artifacts_24h = RunArtifact.objects.filter(imported_at__gte=since_24h)
     records_synced_24h = sum(int(a.rows_kept or 0) for a in artifacts_24h)
@@ -361,29 +449,44 @@ def _overview_context() -> dict:
 
     recent_jobs = RunJob.objects.order_by("-created_at")[:20]
     live_log = []
+    company_map = {c.company_key: c.display_name for c in CompanyConfigRecord.objects.all()}
     for job in recent_jobs:
+        company_display = company_map.get(job.company_key, job.company_key or "All Companies")
         if job.status == RunJob.STATUS_SUCCEEDED:
             level = "success"
-            message = f"{job.scope.replace('_', ' ')} run {job.id} succeeded"
         elif job.status == RunJob.STATUS_FAILED:
             level = "error"
-            message = f"{job.scope.replace('_', ' ')} run {job.id} failed ({job.failure_reason or 'see logs'})"
         elif job.status == RunJob.STATUS_RUNNING:
             level = "info"
-            message = f"{job.scope.replace('_', ' ')} run {job.id} is running"
+        elif job.status == RunJob.STATUS_CANCELLED:
+            level = "warning"
         else:
             level = "warning"
-            message = f"{job.scope.replace('_', ' ')} run {job.id} queued"
+        message = _overview_live_log_message(job, company_display)
         live_log.append({"timestamp": job.created_at, "level": level, "message": message})
 
     daily_success = []
+    reliability_7d_total_runs = 0
+    reliability_7d_success_runs = 0
+    reliability_7d_failed_runs = 0
     for day_index in range(7):
         day = (now - timedelta(days=6 - day_index)).date()
         day_jobs = RunJob.objects.filter(created_at__date=day)
         total = day_jobs.count()
         succeeded = day_jobs.filter(status=RunJob.STATUS_SUCCEEDED).count()
-        rate = round((succeeded * 100 / total), 1) if total else 100.0
-        daily_success.append({"label": day.strftime("%a"), "rate": rate})
+        failed = day_jobs.filter(status=RunJob.STATUS_FAILED).count()
+        rate = round((succeeded * 100 / total), 1) if total else None
+        daily_success.append(
+            {
+                "label": day.strftime("%a"),
+                "runs_total": total,
+                "runs_succeeded": succeeded,
+                "rate": rate,
+            }
+        )
+        reliability_7d_total_runs += total
+        reliability_7d_success_runs += succeeded
+        reliability_7d_failed_runs += failed
 
     failure_jobs = RunJob.objects.filter(status=RunJob.STATUS_FAILED, created_at__gte=since_60d)
     source_counts = Counter(_job_failure_source(job) for job in failure_jobs)
@@ -399,6 +502,69 @@ def _overview_context() -> dict:
         count = source_counts.get(key, 0)
         percentage = round((count * 100 / total_sources), 1) if total_sources else 0.0
         failure_sources.append({"label": label, "count": count, "percentage": percentage})
+    failure_sources_nonzero = [source for source in failure_sources if source["count"] > 0]
+
+    revenue_days = REVENUE_PERIOD_DAYS[revenue_period]
+    revenue_end_date = (now - timedelta(days=1)).date()
+    revenue_start_date = revenue_end_date - timedelta(days=revenue_days - 1)
+    revenue_dates = [revenue_start_date + timedelta(days=i) for i in range(revenue_days)]
+    revenue_labels = [d.strftime("%b %d") for d in revenue_dates]
+    revenue_index_by_date = {date: idx for idx, date in enumerate(revenue_dates)}
+    revenue_series_map = {company.company_key: [0.0] * revenue_days for company in companies}
+    revenue_totals_by_company = {company.company_key: 0.0 for company in companies}
+    latest_reconciled_artifacts: dict[tuple[str, object], RunArtifact] = {}
+
+    if company_keys and revenue_days > 0:
+        reconciled_qs = RunArtifact.objects.filter(
+            company_key__in=company_keys,
+            target_date__isnull=False,
+            target_date__gte=revenue_start_date,
+            target_date__lte=revenue_end_date,
+            reconcile_status="MATCH",
+            reconcile_epos_total__isnull=False,
+        ).order_by("company_key", "target_date", "-processed_at", "-imported_at")
+        for artifact in reconciled_qs:
+            key = (artifact.company_key, artifact.target_date)
+            if key not in latest_reconciled_artifacts:
+                latest_reconciled_artifacts[key] = artifact
+
+    matched_dates = set()
+    for (company_key, target_date), artifact in latest_reconciled_artifacts.items():
+        if target_date not in revenue_index_by_date:
+            continue
+        value = float(artifact.reconcile_epos_total or 0.0)
+        idx = revenue_index_by_date[target_date]
+        revenue_series_map[company_key][idx] += value
+        revenue_totals_by_company[company_key] = revenue_totals_by_company.get(company_key, 0.0) + value
+        matched_dates.add(target_date)
+
+    revenue_series = [
+        {
+            "company_key": company.company_key,
+            "name": company.display_name,
+            "data": [round(v, 2) for v in revenue_series_map.get(company.company_key, [])],
+        }
+        for company in companies
+    ]
+    revenue_company_totals = sorted(
+        [
+            {
+                "company_key": company.company_key,
+                "name": company.display_name,
+                "total": round(revenue_totals_by_company.get(company.company_key, 0.0), 2),
+            }
+            for company in companies
+            if revenue_totals_by_company.get(company.company_key, 0.0) > 0
+        ],
+        key=lambda item: item["total"],
+        reverse=True,
+    )
+    revenue_total_epos = round(sum(revenue_totals_by_company.values()), 2)
+    has_reconciled_revenue_data = bool(latest_reconciled_artifacts)
+    revenue_chart_payload = {
+        "labels": revenue_labels,
+        "series": revenue_series if has_reconciled_revenue_data else [],
+    }
 
     # Get active run IDs for polling
     active_runs = RunJob.objects.filter(
@@ -421,6 +587,23 @@ def _overview_context() -> dict:
         "company_count": len(companies_context),
         "daily_success": daily_success,
         "failure_sources": failure_sources,
+        "failure_sources_nonzero": failure_sources_nonzero,
+        "failure_sources_total_60d": total_sources,
+        "reliability_7d_total_runs": reliability_7d_total_runs,
+        "reliability_7d_success_runs": reliability_7d_success_runs,
+        "reliability_7d_failed_runs": reliability_7d_failed_runs,
+        "revenue_period": revenue_period,
+        "revenue_period_options": [
+            {"value": value, "label": label, "selected": value == revenue_period}
+            for value, label in REVENUE_PERIOD_OPTIONS
+        ],
+        "revenue_labels": revenue_labels,
+        "revenue_series": revenue_series,
+        "revenue_total_epos": revenue_total_epos,
+        "revenue_company_totals": revenue_company_totals,
+        "revenue_matched_days": len(matched_dates),
+        "has_reconciled_revenue_data": has_reconciled_revenue_data,
+        "revenue_chart_payload": revenue_chart_payload,
         "active_run_ids": [str(id) for id in active_runs],
         "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
     }
@@ -429,7 +612,8 @@ def _overview_context() -> dict:
 @login_required
 def overview(request):
     _ensure_company_records()
-    context = _overview_context()
+    revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
+    context = _overview_context(revenue_period)
     context.update(_nav_context())
     context.update(
         _breadcrumb_context(
@@ -633,10 +817,12 @@ def run_detail(request, job_id):
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
     active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
     context = {
-        "job": job, 
+        "job": job,
         "artifacts": artifacts,
         "active_run_ids": active_run_ids_list,
         "active_run_ids_json": json.dumps(active_run_ids_list),
+        "exit_code_info": _exit_code_info(job.exit_code),
+        "exit_code_reference": EXIT_CODE_REFERENCE,
     }
     context.update(_nav_context())
     context.update(

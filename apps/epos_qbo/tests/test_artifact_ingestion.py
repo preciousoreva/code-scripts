@@ -21,7 +21,14 @@ class ArtifactIngestionTests(TestCase):
             "rows_kept": 200,
             "rows_non_target": 50,
             "upload_stats": {"created": 200, "failed": 0},
-            "reconcile": {"status": "OK", "difference": 0},
+            "reconcile": {
+                "status": "MATCH",
+                "difference": 0.0,
+                "epos_total": 145000.5,
+                "epos_count": 200,
+                "qbo_total": 145000.5,
+                "qbo_count": 200,
+            },
             "raw_file": "raw.csv",
             "processed_files": ["processed.csv"],
         }
@@ -39,6 +46,11 @@ class ArtifactIngestionTests(TestCase):
         self.assertEqual(parsed.company_key, "company_a")
         self.assertEqual(parsed.rows_kept, 200)
         self.assertEqual(parsed.reliability_status, RunArtifact.RELIABILITY_WARNING)
+        self.assertEqual(parsed.reconcile_status, "MATCH")
+        self.assertEqual(parsed.reconcile_epos_total, 145000.5)
+        self.assertEqual(parsed.reconcile_qbo_total, 145000.5)
+        self.assertEqual(parsed.reconcile_epos_count, 200)
+        self.assertEqual(parsed.reconcile_qbo_count, 200)
 
     def test_ingest_deduplicates_by_source_hash(self):
         job = RunJob.objects.create(scope=RunJob.SCOPE_SINGLE, company_key="company_a")
@@ -56,3 +68,24 @@ class ArtifactIngestionTests(TestCase):
         self.assertTrue(created_1)
         self.assertFalse(created_2)
         self.assertEqual(RunArtifact.objects.count(), 1)
+        self.assertEqual(artifact_2.reconcile_epos_total, 145000.5)
+        self.assertEqual(artifact_2.reconcile_qbo_total, 145000.5)
+        self.assertEqual(artifact_2.reconcile_epos_count, 200)
+        self.assertEqual(artifact_2.reconcile_qbo_count, 200)
+
+    def test_parse_metadata_file_without_reconcile_totals(self):
+        payload = self._metadata_payload()
+        payload["reconcile"] = {"status": "NOT RUN", "reason": "not available"}
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "last_company_a_transform.json"
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            parsed = parse_metadata_file(path)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.reconcile_status, "NOT RUN")
+        self.assertIsNone(parsed.reconcile_epos_total)
+        self.assertIsNone(parsed.reconcile_qbo_total)
+        self.assertIsNone(parsed.reconcile_epos_count)
+        self.assertIsNone(parsed.reconcile_qbo_count)

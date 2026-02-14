@@ -89,14 +89,6 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
     job.status = RunJob.STATUS_SUCCEEDED if exit_code == 0 else RunJob.STATUS_FAILED
     if exit_code != 0 and not job.failure_reason:
         job.failure_reason = f"Subprocess exited with code {exit_code}"
-    # #region agent log
-    try:
-        import json
-        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
-            f.write(json.dumps({"location": "job_runner._monitor_process:exit", "message": "Subprocess exited", "data": {"job_id": str(job_id), "exit_code": exit_code, "status": job.status, "failure_reason": (job.failure_reason or "")[:200]}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H10"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
 
     attach_recent_artifacts_to_job(job)
@@ -113,15 +105,6 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
     # Ensure code_scripts package is importable when running run_pipeline.py
     pythonpath = str(BASE_DIR)
     env["PYTHONPATH"] = pythonpath + os.pathsep + env.get("PYTHONPATH", "")
-    
-    # #region agent log
-    try:
-        import json
-        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
-            f.write(json.dumps({"location": "job_runner.start_run_job:before_popen", "message": "Starting subprocess", "data": {"command": command, "sys_executable": sys.executable, "cwd": str(BASE_DIR), "pythonpath": pythonpath}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H9"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
     # Keep the log file handle open for the lifetime of the subprocess.
     # The monitor thread closes it after the process exits.

@@ -1,7 +1,7 @@
 {% for company_data in companies_data %}
 <div class="bg-white rounded-xl border border-slate-200 shadow-sm mb-4 overflow-hidden hover:shadow-md transition-shadow" x-data="{ expanded: false }">
     <div class="p-6 cursor-pointer hover:bg-slate-50 transition-colors" @click="expanded = !expanded">
-        <div class="flex items-start justify-between gap-4">
+        <div class="flex items-center justify-between gap-4">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-3 mb-2">
                     <h3 class="text-lg font-semibold text-slate-900 truncate">{{ company_data.company.display_name }}</h3>
@@ -31,19 +31,21 @@
                 </div>
                 {% endif %}
             </div>
-            <div class="flex items-center gap-2 flex-shrink-0">
+            <div class="flex items-center self-center gap-1 flex-shrink-0">
                 {% if perms.epos_qbo.can_trigger_runs %}
                 <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="inline" @click.stop>
                     {% csrf_token %}
                     <input type="hidden" name="scope" value="single_company">
                     <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
                     <input type="hidden" name="date_mode" value="yesterday">
-                    <button type="submit" class="btn-icon group" title="Trigger sync">
+                    <button type="submit" class="btn-icon group inline-flex h-9 w-9 items-center justify-center" title="Trigger sync">
                         <iconify-icon icon="solar:play-circle-linear" width="20" class="text-slate-400 group-hover:text-blue-600"></iconify-icon>
                     </button>
                 </form>
                 {% endif %}
-                <iconify-icon :icon="expanded ? 'solar:alt-arrow-up-linear' : 'solar:alt-arrow-down-linear'" width="20" class="text-slate-400"></iconify-icon>
+                <span class="inline-flex h-9 w-9 items-center justify-center text-slate-400">
+                    <iconify-icon :icon="expanded ? 'solar:alt-arrow-up-linear' : 'solar:alt-arrow-down-linear'" width="20"></iconify-icon>
+                </span>
             </div>
         </div>
     </div>

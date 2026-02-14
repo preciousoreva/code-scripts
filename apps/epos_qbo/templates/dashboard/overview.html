@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Overview • EPOS → QBO Automation{% endblock %}
 
@@ -32,4 +33,8 @@
     {% include "components/company_list.html" %}
     {% include "components/live_log.html" %}
 </div>
+{% endblock %}
+
+{% block body_extra %}
+<script src="{% static 'js/overview.js' %}"></script>
 {% endblock %}

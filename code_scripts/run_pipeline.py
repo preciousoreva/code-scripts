@@ -6,7 +6,7 @@ import argparse
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 import logging
 from datetime import datetime, timedelta
 
@@ -22,7 +22,6 @@ from code_scripts.company_config import load_company_config, get_available_compa
 from code_scripts.token_manager import verify_realm_match
 from code_scripts.run_lock import hold_global_lock
 import pandas as pd
-from typing import List
 
 # Load .env file to make environment variables available (shared secrets only)
 load_env_file()
@@ -214,6 +213,72 @@ def _log_raw_vs_processed_totals(raw_file_path: str, config, repo_root: Path) ->
             )
     except Exception as e:
         logging.warning(f"Totals check failed: {e}")
+
+
+def _coerce_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_reconcile_payload(reconcile_result: dict | None) -> dict | None:
+    """Normalize reconciliation payload written to metadata."""
+    if not isinstance(reconcile_result, dict):
+        return None
+
+    status = str(reconcile_result.get("status") or "").strip()
+    if not status:
+        return None
+
+    payload: dict[str, Any] = {"status": status}
+    reason = reconcile_result.get("reason")
+    if reason:
+        payload["reason"] = str(reason)
+    payload["epos_total"] = _coerce_optional_float(reconcile_result.get("epos_total"))
+    payload["epos_count"] = _coerce_optional_int(reconcile_result.get("epos_count"))
+    payload["qbo_total"] = _coerce_optional_float(reconcile_result.get("qbo_total"))
+    payload["qbo_count"] = _coerce_optional_int(reconcile_result.get("qbo_count"))
+    payload["difference"] = _coerce_optional_float(reconcile_result.get("difference"))
+    return payload
+
+
+def persist_reconcile_to_metadata(repo_root: Path, metadata_file: str, reconcile_result: dict | None) -> bool:
+    """
+    Persist normalized reconciliation payload into metadata JSON.
+    Returns True when metadata was updated, False otherwise.
+    """
+    payload = build_reconcile_payload(reconcile_result)
+    if payload is None:
+        return False
+
+    metadata_path = repo_root / metadata_file
+    if not metadata_path.exists():
+        return False
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["reconcile"] = payload
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        return True
+    except Exception as e:
+        logging.warning(f"Failed to persist reconcile payload to metadata: {e}")
+        return False
 
 
 repo_root = Path(__file__).resolve().parent
@@ -1456,6 +1521,10 @@ def main(
                     logging.warning("Continuing despite reconciliation failure (upload was successful)")
                     reconcile_result = {"status": "NOT RUN", "reason": str(e)[:100]}
                     warnings.append(f"{day_date}: Reconciliation failed ({str(e)[:50]})")
+
+                # Persist reconcile payload into metadata before archive.
+                if persist_reconcile_to_metadata(repo_root, config.metadata_file, reconcile_result):
+                    logging.info(f"Persisted reconciliation payload to metadata for {day_date}")
                 
                 # Phase 5: Archive files
                 logging.info(f"\n=== Phase 5: Archive Files - {day_date} ===")
@@ -1769,6 +1838,10 @@ def main(
                 logging.error(f"[ERROR] Phase 4: Reconciliation failed: {e}")
                 logging.warning("Continuing despite reconciliation failure (upload was successful)")
                 reconcile_result = {"status": "NOT RUN", "reason": str(e)[:100]}
+
+            # Persist reconcile payload into metadata before archive.
+            if persist_reconcile_to_metadata(repo_root, config.metadata_file, reconcile_result):
+                logging.info("Persisted reconciliation payload to metadata")
 
             # Phase 5: Archive files after successful upload and reconciliation
             logging.info("\n=== Phase 5: Archive Files ===")

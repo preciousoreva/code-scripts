@@ -1,34 +1,100 @@
-# EPOS → QBO Solution App (`apps.epos_qbo`)
+# EPOS -> QBO Solution App (`apps/epos_qbo`)
 
-This app is the EPOS→QBO solution module inside the OIAT portal.
+This Django app provides the operator UI and orchestration layer for EPOS -> QBO sync.
+It does not replace the pipeline scripts in `code_scripts/`; it wraps and monitors them.
 
-## Routes
+## Route map
 
-- `/epos-qbo/` and `/epos-qbo/dashboard/`: overview and KPIs
-- `/epos-qbo/runs/`: run history + manual trigger form
-- `/epos-qbo/runs/<uuid>/`: run detail page
-- `/epos-qbo/runs/<uuid>/logs?offset=<int>`: polling log tail endpoint
-- `/epos-qbo/companies/new`: onboarding step 1
-- `/epos-qbo/companies/<company_key>/advanced`: onboarding step 2
-- `/epos-qbo/companies/<company_key>/sync-json`: force DB→JSON sync
+- `GET /epos-qbo/` and `GET /epos-qbo/dashboard/`: system overview (KPIs, company status, live log, run reliability)
+- `GET /epos-qbo/runs/`: run list + manual trigger form
+- `POST /epos-qbo/runs/trigger`: trigger a run job
+- `GET /epos-qbo/runs/<uuid:job_id>/`: run detail
+- `GET /epos-qbo/runs/<uuid:job_id>/logs?offset=<int>`: log tail polling endpoint
+- `GET /epos-qbo/api/runs/status?job_ids=<uuid,...>`: run status polling for toasts/live state
+- `GET /epos-qbo/logs/`: structured log/events page with filters
+- `GET /epos-qbo/companies/`: company management page (search/filter/sort)
+- `GET /epos-qbo/companies/new`: company onboarding (basic form)
+- `GET|POST /epos-qbo/companies/<company_key>/advanced`: advanced company settings
+- `POST /epos-qbo/companies/<company_key>/sync-json`: force DB -> JSON config sync
+- `GET /epos-qbo/companies/<company_key>/`: company detail page
+- `POST /epos-qbo/companies/<company_key>/toggle-active/`: activate/deactivate company
 
-## Models
+All routes require authentication.
 
-- `CompanyConfigRecord`: DB-canonical company configuration
-- `RunJob`: run request + execution lifecycle
-- `RunArtifact`: ingested pipeline artifacts/metadata
-- `RunLock`: dashboard lock row for atomic trigger gating
+## Permissions
+
+- `epos_qbo.can_trigger_runs`: required for triggering runs.
+- `epos_qbo.can_edit_companies`: required for creating/editing companies, syncing JSON, and toggling active state.
+
+## Core models
+
+- `CompanyConfigRecord`: canonical company configuration in DB.
+- `RunJob`: requested/queued/running/completed run lifecycle record.
+- `RunArtifact`: ingested metadata artifacts linked to runs and companies.
+- `RunLock`: DB lock row used to serialize run dispatch.
+
+## Current behavior highlights
+
+- Overview company search is client-side and matches `display_name + company_key` via `static/js/overview.js`.
+- Overview live log messages use company + run label format (not raw UUID in message text).
+- Overview reliability panel:
+  - Success trend uses last 7 days and shows `No runs` when a day has zero runs.
+  - Failure sources use last 60 days and display non-zero categories only.
+- Overview reconciled revenue chart (under Company Status):
+  - Shows EPOS money trend per company for `Yesterday`, `Last 7d`, `Last 30d`, `Last 90d`.
+  - Uses strict `MATCH` reconciliation data only (`RunArtifact.reconcile_status == "MATCH"` and `reconcile_epos_total` present).
+  - Dedupe rule per point: latest artifact by `(company_key, target_date)` using `processed_at/imported_at`.
+  - Uses completed-day windows ending at yesterday (future-only strict; older runs without stored reconcile totals may not appear).
+- Failure source classification buckets are keyword-based from `RunJob.failure_reason`:
+  - `Mapping`, `Inventory`, `Auth/Token`, `Network`, `Other`.
+- Exit codes are now explained in Run Detail with this reference:
+  - `0`: success
+  - `1`: pipeline execution failure (generic; inspect Live Log for root cause)
+  - `2`: blocked by active lock or invalid CLI usage
+  - `3`: dashboard failed to start subprocess
+  - `-1`: reconciler marked stale PID as failed
+  - `126`: command exists but is not executable
+  - `127`: command/dependency not found
+- Token health is read-only in page render and based on canonical states from `views._company_token_health`:
+  - `connected`, `missing_tokens`, `missing_refresh_token`, `refresh_expired`, `refresh_expiring`
+  - Access token state is informational; critical auth state is driven by refresh-token availability/expiry.
+  - Re-auth guidance points operators to `code_scripts/store_tokens.py`.
+
+## Run execution and locking
+
+- `services/job_runner.py` builds subprocess commands for:
+  - `code_scripts/run_pipeline.py` (single company)
+  - `code_scripts/run_all_companies.py` (all companies)
+- `code_scripts/run_pipeline.py` now persists reconciliation payload (`status`, totals, counts, difference) into metadata before archive move.
+- Dispatch is serialized through `RunLock` and post-exit reconciliation releases lock and attaches artifacts.
+- Polling helpers:
+  - `run_logs` streams log chunks by byte offset.
+  - `run_status_check` returns compact JSON status for active runs.
 
 ## Management commands
 
 - `python manage.py reconcile_run_jobs`
+  - marks stuck running jobs as failed when PID is no longer alive.
 - `python manage.py ingest_run_history --days 60`
+  - ingests artifact history from uploaded metadata files.
 - `python manage.py sync_companies_from_json`
+  - imports `code_scripts/companies/*.json` into DB.
 - `python manage.py sync_companies_to_json --company <key>`
+  - writes DB company config back to JSON files.
 - `python manage.py check_company_config_drift`
+  - compares DB payloads vs JSON files and exits non-zero when drift exists.
 
-## Notes
+## Tests
 
-- Dashboard uses DB lock (`RunLock`) and scripts use shared global file lock (`code_scripts/run_lock.py`) for cross-trigger exclusion.
-- Scheduled automation remains external; this app observes and safely triggers existing scripts.
-- Template formatting rule: keep each Django variable tag on one line, for example `{{ value|default:"-" }}`. Do not wrap text inside `{{ ... }}` across lines.
+- App tests live under `apps/epos_qbo/tests/`.
+- These are automated checks for view logic, auth/permissions, token-health mapping, run orchestration behavior, and rendered UI contracts.
+- They are not runtime page scripts and are not loaded by the browser.
+
+## UI notes
+
+- Sidebar entries `Mappings`, `Settings`, and `API Tokens` are currently placeholders (`href="#"`) and are not backed by routes yet.
+
+## Template formatting rule
+
+Keep each Django variable tag on one line, for example `{{ value|default:"-" }}`.
+Do not wrap text inside `{{ ... }}` across lines.

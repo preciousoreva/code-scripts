@@ -18,7 +18,13 @@
         <div><span class="text-slate-500 block">Status</span><span class="font-medium">{{ job.status }}</span></div>
         <div><span class="text-slate-500 block">Scope</span><span class="font-medium">{{ job.scope }}</span></div>
         <div><span class="text-slate-500 block">Company</span><span class="font-medium">{{ job.company_key|default:"all" }}</span></div>
-        <div><span class="text-slate-500 block">Exit Code</span><span class="font-medium">{{ job.exit_code|default:"-" }}</span></div>
+        <div>
+            <span class="text-slate-500 block">Exit Code</span>
+            <span class="font-medium">{{ job.exit_code|default:"-" }}</span>
+            {% if exit_code_info %}
+            <p class="text-xs text-slate-500 mt-1">{{ exit_code_info.label }}: {{ exit_code_info.description }}</p>
+            {% endif %}
+        </div>
         <div><span class="text-slate-500 block">Started</span><span class="font-medium">{{ job.started_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
         <div><span class="text-slate-500 block">Finished</span><span class="font-medium">{{ job.finished_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
         <div class="md:col-span-2 lg:col-span-2">
@@ -28,6 +34,16 @@
         {% if job.failure_reason %}
         <div class="md:col-span-2 lg:col-span-4 text-red-700 bg-red-50 border border-red-100 rounded-md p-3">
             {{ job.failure_reason }}
+        </div>
+        {% endif %}
+        {% if job.exit_code != None and job.exit_code != 0 %}
+        <div class="md:col-span-2 lg:col-span-4 text-slate-700 bg-slate-50 border border-slate-200 rounded-md p-3">
+            <p class="text-xs font-semibold uppercase tracking-wide text-slate-600 mb-2">Exit Code Guide</p>
+            <ul class="text-xs space-y-1">
+                {% for item in exit_code_reference %}
+                <li><span class="font-mono text-slate-900">{{ item.code }}</span>: {{ item.message }}</li>
+                {% endfor %}
+            </ul>
         </div>
         {% endif %}
     </section>

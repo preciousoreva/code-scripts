@@ -227,10 +227,15 @@ def import_json_file(path: Path, user: User | None = None) -> CompanyConfigRecor
         record.display_name = display_name
         record.config_json = payload
         record.checksum = checksum(payload)
-        record.last_synced_from_json_at = timezone.now()
+        now = timezone.now()
+        record.last_synced_from_json_at = now
+        record.updated_at = now
         if user:
             record.updated_by = user
-        record.save()
+        update_fields = ["display_name", "config_json", "checksum", "last_synced_from_json_at", "updated_at"]
+        if user:
+            update_fields.append("updated_by")
+        record.save(update_fields=update_fields)
     else:
         record.last_synced_from_json_at = timezone.now()
         record.save(update_fields=["last_synced_from_json_at"]) 

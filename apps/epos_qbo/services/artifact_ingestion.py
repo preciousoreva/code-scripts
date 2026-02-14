@@ -28,6 +28,10 @@ class ParsedArtifact:
     upload_stats_json: dict[str, Any]
     reconcile_status: str
     reconcile_difference: float | None
+    reconcile_epos_total: float | None
+    reconcile_qbo_total: float | None
+    reconcile_epos_count: int | None
+    reconcile_qbo_count: int | None
     raw_file: str
     processed_files_json: list[str]
     nearest_log_file: str
@@ -149,6 +153,10 @@ def parse_metadata_file(path: Path) -> ParsedArtifact | None:
         upload_stats_json=data.get("upload_stats") if isinstance(data.get("upload_stats"), dict) else {},
         reconcile_status=str(reconcile.get("status") or ""),
         reconcile_difference=_safe_float(reconcile.get("difference")),
+        reconcile_epos_total=_safe_float(reconcile.get("epos_total")),
+        reconcile_qbo_total=_safe_float(reconcile.get("qbo_total")),
+        reconcile_epos_count=_safe_int(reconcile.get("epos_count")),
+        reconcile_qbo_count=_safe_int(reconcile.get("qbo_count")),
         raw_file=str(data.get("raw_file") or ""),
         processed_files_json=data.get("processed_files")
         if isinstance(data.get("processed_files"), list)
@@ -177,6 +185,10 @@ def ingest_metadata_file(path: Path, run_job: RunJob | None = None) -> tuple[Run
             "upload_stats_json": parsed.upload_stats_json,
             "reconcile_status": parsed.reconcile_status,
             "reconcile_difference": parsed.reconcile_difference,
+            "reconcile_epos_total": parsed.reconcile_epos_total,
+            "reconcile_qbo_total": parsed.reconcile_qbo_total,
+            "reconcile_epos_count": parsed.reconcile_epos_count,
+            "reconcile_qbo_count": parsed.reconcile_qbo_count,
             "raw_file": parsed.raw_file,
             "processed_files_json": parsed.processed_files_json,
             "nearest_log_file": parsed.nearest_log_file,
@@ -193,6 +205,17 @@ def ingest_metadata_file(path: Path, run_job: RunJob | None = None) -> tuple[Run
     if artifact.reliability_status != parsed.reliability_status:
         artifact.reliability_status = parsed.reliability_status
         updated_fields.append("reliability_status")
+    for field_name in (
+        "reconcile_epos_total",
+        "reconcile_qbo_total",
+        "reconcile_epos_count",
+        "reconcile_qbo_count",
+    ):
+        current_value = getattr(artifact, field_name, None)
+        parsed_value = getattr(parsed, field_name, None)
+        if current_value is None and parsed_value is not None:
+            setattr(artifact, field_name, parsed_value)
+            updated_fields.append(field_name)
     if updated_fields:
         artifact.save(update_fields=updated_fields)
 
