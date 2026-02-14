@@ -1,6 +1,6 @@
 from django.contrib.auth import logout
 from django.contrib.auth.decorators import login_required
-from django.shortcuts import redirect
+from django.shortcuts import redirect, render
 from django.urls import reverse
 
 
@@ -12,5 +12,12 @@ def logout_view(request):
 
 @login_required
 def home(request):
-    """Redirect logged-in users to the dashboard."""
-    return redirect("epos_qbo:overview")
+    """Show available solution workspaces."""
+    solutions = [
+        {
+            "name": "EPOS -> QBO",
+            "description": "Monitor runs, manage companies, and trigger sync jobs.",
+            "href": reverse("epos_qbo:overview"),
+        }
+    ]
+    return render(request, "core/home.html", {"solutions": solutions})

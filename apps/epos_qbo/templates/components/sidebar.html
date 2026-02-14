@@ -1,11 +1,19 @@
 <aside class="w-64 bg-white border-r border-slate-200 flex flex-col fixed inset-y-0 left-0 z-50">
     <!-- Logo Area -->
     <div class="h-16 flex items-center px-6 border-b border-slate-100">
-        <div class="flex items-center gap-2 text-slate-900">
-            <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900 text-white font-bold tracking-tight text-sm">
+        <div class="flex items-center gap-2 w-full text-slate-900">
+            <a href="{% url 'epos_qbo:overview' %}" class="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900 text-white font-bold tracking-tight text-sm">
                 EQ
-            </div>
+            </a>
             <span class="font-semibold tracking-tight text-sm">EPOS → QBO</span>
+            <a
+                href="{% url 'core-home' %}"
+                class="ml-auto inline-flex items-center justify-center w-8 h-8 rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+                title="Switch workspace"
+                aria-label="Switch workspace"
+            >
+                <iconify-icon icon="solar:widget-linear" width="18"></iconify-icon>
+            </a>
         </div>
     </div>
 
