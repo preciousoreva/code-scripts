@@ -37,6 +37,7 @@ All routes require authentication.
 
 - Overview company search is client-side and matches `display_name + company_key` via `static/js/overview.js`.
 - Overview **"Today" KPIs** (Run Success, Avg Runtime, Sales Synced) use **calendar day** in server local time (midnight to now). "Yesterday" means the previous full calendar day. All three cards share this definition.
+- Company list **"Receipts uploaded (Today)"** uses the same **calendar day** (midnight to now, server local time) so it aligns with the overview Today KPIs and does not accumulate across days.
 - Overview **Live Log** shows the last **10** run events (by `created_at`), one entry per run.
 - Overview live log messages use company + run label format (not raw UUID in message text).
 - Overview reconciled revenue chart (under Company Status):
@@ -90,7 +91,7 @@ All routes require authentication.
 
 ## UI notes
 
-- Sidebar entries `Mappings`, `Settings`, and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
+- Sidebar entries `Tools`, `Settings`, and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
 
 ## Dashboard tuning (settings/env)
 

@@ -46,6 +46,7 @@ def home(request):
 @login_required
 def coming_soon(request, feature: str):
     feature_titles = {
+        "tools": "Tools",
         "mappings": "Mappings",
         "settings": "Settings",
         "api-tokens": "API Tokens",

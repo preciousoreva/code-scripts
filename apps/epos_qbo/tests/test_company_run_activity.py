@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from unittest import mock
 
@@ -38,11 +39,13 @@ class CompanyRunActivityTests(TestCase):
             "environment": "production",
         }
 
+    @contextmanager
     def _patch_time_and_tokens(self):
-        return (
+        with (
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
-        )
+        ):
+            yield
 
     def test_companies_list_uses_run_linked_via_artifact(self):
         run = RunJob.objects.create(
@@ -72,7 +75,8 @@ class CompanyRunActivityTests(TestCase):
         self.assertEqual(company_data["latest_run"].id, run.id)
         self.assertNotEqual(company_data["last_run_display"], "Never run")
 
-    def test_companies_list_records_24h_uses_uploaded_counts_with_day_dedupe(self):
+    def test_companies_list_records_today_uses_uploaded_counts_with_day_dedupe(self):
+        """Receipts uploaded (Today) uses calendar day (midnight to now); only today's artifacts count."""
         same_day = self.fixed_now.date()
         prev_day = (self.fixed_now - timedelta(days=1)).date()
         old_day = (self.fixed_now - timedelta(days=2)).date()
@@ -157,7 +161,7 @@ class CompanyRunActivityTests(TestCase):
             upload_stats_json={"created": 5},
         )
 
-        # Outside 24h: ignored.
+        # Outside today: ignored.
         run_old_success = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
@@ -181,8 +185,8 @@ class CompanyRunActivityTests(TestCase):
         company_data = next(
             item for item in response.context["companies_data"] if item["company"].company_key == self.company.company_key
         )
-        # Day totals: 10 (latest succeeded same day) + 5 (legacy unlinked fallback) = 15.
-        self.assertEqual(company_data["records_24h"], 15)
+        # Today only: same-day bucket; latest succeeded artifact has uploaded=10.
+        self.assertEqual(company_data["records_24h"], 10)
 
     def test_company_detail_recent_runs_includes_all_companies_run_when_linked(self):
         run = RunJob.objects.create(

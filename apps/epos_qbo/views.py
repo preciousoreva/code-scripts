@@ -1401,12 +1401,18 @@ def _enrich_company_data(
         .order_by("-processed_at", "-imported_at")
         .first()
     )
-    since_24h = timezone.now() - timedelta(hours=24)
-    artifacts_24h = (
+    # Receipts uploaded (Today): calendar day (midnight to now), same definition as overview KPIs
+    now = timezone.now()
+    today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    artifacts_today = (
         RunArtifact.objects.filter(company_key=company.company_key)
         .filter(
-            Q(processed_at__gte=since_24h)
-            | Q(processed_at__isnull=True, imported_at__gte=since_24h)
+            Q(processed_at__gte=today_start, processed_at__lt=now)
+            | Q(
+                processed_at__isnull=True,
+                imported_at__gte=today_start,
+                imported_at__lt=now,
+            )
         )
         .select_related("run_job")
         .order_by("-processed_at", "-imported_at")
@@ -1418,7 +1424,7 @@ def _enrich_company_data(
     issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
     config_display = _parse_config_for_display(company.config_json)
     artifacts_by_day: dict[object, list[RunArtifact]] = {}
-    for artifact in artifacts_24h:
+    for artifact in artifacts_today:
         bucket = _artifact_day_bucket(artifact)
         if bucket is None:
             continue

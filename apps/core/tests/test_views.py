@@ -30,9 +30,9 @@ class CoreViewsTests(TestCase):
 
     def test_coming_soon_known_feature(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.get(reverse("core-coming-soon", kwargs={"feature": "mappings"}))
+        response = self.client.get(reverse("core-coming-soon", kwargs={"feature": "tools"}))
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Mappings")
+        self.assertContains(response, "Tools")
         self.assertContains(response, "Coming Soon")
 
     def test_account_requires_login(self):
