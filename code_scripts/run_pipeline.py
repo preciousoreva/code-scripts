@@ -49,23 +49,27 @@ def company_dir_name(display_name: str) -> str:
 
 def run_step(label: str, script_name: str, args: list = None) -> None:
     """
-    Run a Python script in this repo using the current interpreter.
+    Run a Python script in this repo as a module so that code_scripts imports work.
+    Uses repo root (parent of code_scripts) as cwd and runs python -m code_scripts.<script>.
     Raises SystemExit if the script exits with a non-zero status.
-    
+
     Args:
         label: Human-readable label for logging
-        script_name: Name of the script file to run
+        script_name: Name of the script file to run (e.g. epos_playwright.py)
         args: Optional list of command-line arguments to pass to the script
     """
-    repo_root = Path(__file__).resolve().parent
-    script_path = repo_root / script_name
+    code_scripts_dir = Path(__file__).resolve().parent
+    script_path = code_scripts_dir / script_name
 
     if not script_path.exists():
         error_msg = f"[ERROR] {label}: script not found at {script_path}"
         logging.error(error_msg)
         raise SystemExit(error_msg)
 
-    cmd = [sys.executable, str(script_path)]
+    # Run as module so that "code_scripts" is importable (requires cwd = repo root).
+    actual_repo_root = code_scripts_dir.parent
+    module_name = "code_scripts." + script_name.replace(".py", "")
+    cmd = [sys.executable, "-m", module_name]
     if args:
         cmd.extend(args)
 
@@ -74,7 +78,7 @@ def run_step(label: str, script_name: str, args: list = None) -> None:
 
     process = subprocess.Popen(
         cmd,
-        cwd=str(repo_root),
+        cwd=str(actual_repo_root),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1009,22 +1013,22 @@ def reconcile_company(company_key: str, target_date: str, config, repo_root: Pat
 
         epos_count = df["*SalesReceiptNo"].nunique() if "*SalesReceiptNo" in df.columns else 0
 
-        # Get QBO total using scripts/qbo_queries/qbo_query.py
+        # Get QBO total using scripts/qbo_queries/qbo_query.py (run as module so code_scripts is importable)
         query_script = repo_root / "scripts" / "qbo_queries" / "qbo_query.py"
         if not query_script.exists():
             reconcile_result["reason"] = "scripts/qbo_queries/qbo_query.py not found"
             return reconcile_result
 
-        # Query QBO for receipts on target_date (get Id and TotalAmt)
+        actual_repo_root = repo_root.parent
         cmd = [
             sys.executable,
-            str(query_script),
+            "-m", "code_scripts.scripts.qbo_queries.qbo_query",
             "--company", company_key,
             "query",
             f"SELECT Id, TotalAmt FROM SalesReceipt WHERE TxnDate = '{target_date}'"
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(repo_root))
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(actual_repo_root))
 
         if result.returncode != 0:
             reconcile_result["reason"] = f"QBO query failed: {result.stderr[:100]}"
