@@ -35,6 +35,20 @@ class CoreViewsTests(TestCase):
         self.assertContains(response, "Mappings")
         self.assertContains(response, "Coming Soon")
 
+    def test_core_pages_do_not_leak_template_tokens(self):
+        self.client.login(username="operator", password="pw12345")
+        urls = [
+            reverse("core-home"),
+            reverse("core-coming-soon", kwargs={"feature": "settings"}),
+        ]
+        for url in urls:
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            html = response.content.decode("utf-8")
+            self.assertNotIn("{{", html)
+            self.assertNotIn("{%", html)
+            self.assertNotIn("{#", html)
+
     def test_coming_soon_unknown_feature_returns_404(self):
         self.client.login(username="operator", password="pw12345")
         response = self.client.get(reverse("core-coming-soon", kwargs={"feature": "not-real"}))

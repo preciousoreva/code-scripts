@@ -104,7 +104,129 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(str(kpis["sales_24h_total"]), "200.0")
         self.assertEqual(str(kpis["sales_prev_24h_total"]), "100.0")
         self.assertEqual(kpis["sales_24h_trend_dir"], "up")
-        self.assertIn("vs yesterday", kpis["sales_24h_trend_text"])
+        self.assertEqual(kpis["sales_24h_trend_text"], "↑ 100.0% increase vs yesterday")
+
+    def test_overview_context_includes_avg_runtime_24h(self):
+        completed = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=30),
+            finished_at=self.fixed_now - timedelta(minutes=10),
+        )
+        RunJob.objects.filter(id=completed.id).update(created_at=self.fixed_now - timedelta(hours=1))
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+        self.assertGreaterEqual(context["kpis"]["avg_runtime_24h_seconds"], 0)
+        display = context["kpis"]["avg_runtime_24h_display"]
+        self.assertTrue(any(unit in display for unit in ("s", "m", "h", "d")))
+        self.assertIn("vs yesterday", context["kpis"]["avg_runtime_today_trend_text"])
+
+    def test_overview_sales_24h_shows_no_monetary_totals_when_artifacts_have_no_amount(self):
+        RunArtifact.objects.create(
+            company_key=self.company.company_key,
+            target_date=self.fixed_now.date(),
+            processed_at=self.fixed_now - timedelta(hours=3),
+            source_path="/tmp/company_a_no_amount.json",
+            source_hash="hash-no-amount",
+            upload_stats_json={"uploaded": 5},
+        )
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+        self.assertEqual(context["kpis"]["sales_24h_trend_text"], "No monetary totals found")
+
+    def test_overview_avg_runtime_today_uses_faster_slower_wording(self):
+        y_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(days=1, minutes=40),
+            finished_at=self.fixed_now - timedelta(days=1, minutes=10),
+        )
+        RunJob.objects.filter(id=y_run.id).update(created_at=self.fixed_now - timedelta(days=1, minutes=41))
+        t_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=20),
+            finished_at=self.fixed_now - timedelta(minutes=10),
+        )
+        RunJob.objects.filter(id=t_run.id).update(created_at=self.fixed_now - timedelta(minutes=21))
+
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+        self.assertIn("faster vs yesterday", context["kpis"]["avg_runtime_today_trend_text"])
+
+    def test_overview_avg_runtime_today_uses_successful_runs_only(self):
+        succeeded = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=20),
+            finished_at=self.fixed_now - timedelta(minutes=10),
+        )
+        RunJob.objects.filter(id=succeeded.id).update(created_at=self.fixed_now - timedelta(minutes=21))
+        failed = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_FAILED,
+            started_at=self.fixed_now - timedelta(minutes=90),
+            finished_at=self.fixed_now - timedelta(minutes=10),
+        )
+        RunJob.objects.filter(id=failed.id).update(created_at=self.fixed_now - timedelta(minutes=91))
+
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+        # 10 minutes from the succeeded run only.
+        self.assertEqual(context["kpis"]["avg_runtime_today_seconds"], 600)
+
+    def test_overview_sales_24h_uses_decrease_wording_for_negative_delta(self):
+        prev_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=prev_run,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(hours=30),
+            source_path="/tmp/company_a_prev_drop.json",
+            source_hash="hash-prev-drop",
+            reconcile_epos_total=200.0,
+        )
+        current_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=current_run,
+            company_key=self.company.company_key,
+            target_date=self.fixed_now.date(),
+            processed_at=self.fixed_now - timedelta(hours=2),
+            source_path="/tmp/company_a_curr_drop.json",
+            source_hash="hash-curr-drop",
+            reconcile_epos_total=100.0,
+        )
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+        self.assertEqual(context["kpis"]["sales_24h_trend_text"], "↓ 50.0% decrease vs yesterday")
 
 
 class OverviewUITemplateTests(TestCase):
@@ -253,8 +375,10 @@ class OverviewUITemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("System Health", html)
-        self.assertIn("Sales Synced (24H)", html)
-        self.assertIn("Run Success (24H)", html)
+        self.assertIn("Sales Synced (Today)", html)
+        self.assertIn("Run Success (Today)", html)
+        self.assertIn("Avg Runtime (Today)", html)
         self.assertNotIn("Healthy Companies", html)
         self.assertNotIn("Critical Errors", html)
         self.assertNotIn("Records Synced (24h)", html)
+        self.assertNotIn("Active Runs", html)

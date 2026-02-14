@@ -27,7 +27,7 @@
 
     <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-blue-200 transition-colors">
         <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Run Success (24H)</span>
+            <span class="text-sm font-medium text-slate-500">Run Success (Today)</span>
             <div class="p-1.5 rounded-md bg-blue-50 text-blue-600">
                 <iconify-icon icon="solar:checklist-minimalistic-linear" width="20"></iconify-icon>
             </div>
@@ -41,27 +41,29 @@
 
     <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-indigo-200 transition-colors">
         <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Active Runs</span>
+            <span class="text-sm font-medium text-slate-500">Avg Runtime (Today)</span>
             <div class="p-1.5 rounded-md bg-indigo-50 text-indigo-600">
-                <iconify-icon icon="solar:refresh-circle-linear" width="20"></iconify-icon>
+                <iconify-icon icon="solar:stopwatch-linear" width="20"></iconify-icon>
             </div>
         </div>
         <div>
-            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.queued_or_running }}</span>
-            <p class="text-xs text-slate-500 mt-1">{{ kpis.runs_7d }} run{{ kpis.runs_7d|pluralize }} in last 7 days</p>
+            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.avg_runtime_today_display|default:kpis.avg_runtime_24h_display|default:"0s" }}</span>
+            <p class="text-xs mt-1 {% if kpis.avg_runtime_today_trend_color == 'emerald' %}text-emerald-600{% elif kpis.avg_runtime_today_trend_color == 'red' %}text-red-600{% else %}text-slate-500{% endif %}">
+                {{ kpis.avg_runtime_today_trend_text|default:"— 0.0% change vs yesterday" }}
+            </p>
         </div>
         <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-indigo-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
     </div>
 
     <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-emerald-200 transition-colors">
         <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Sales Synced (24H)</span>
+            <span class="text-sm font-medium text-slate-500">Sales Synced (Today)</span>
             <div class="p-1.5 rounded-md bg-emerald-50 text-emerald-600">
                 <iconify-icon icon="solar:wallet-money-linear" width="20"></iconify-icon>
             </div>
         </div>
         <div>
-            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.sales_24h_total_display|default:"₦0" }}</span>
+            <span class="block text-2xl xl:text-3xl font-semibold tracking-tight text-slate-900 truncate" title="{{ kpis.sales_24h_total_display|default:'₦0' }}">{{ kpis.sales_24h_total_display|default:"₦0" }}</span>
             <p class="text-xs mt-1 {% if kpis.sales_24h_trend_color == 'emerald' %}text-emerald-600{% elif kpis.sales_24h_trend_color == 'red' %}text-red-600{% else %}text-slate-500{% endif %}">
                 {{ kpis.sales_24h_trend_text|default:"— 0.0% vs yesterday" }}
             </p>

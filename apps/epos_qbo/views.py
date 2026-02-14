@@ -130,6 +130,21 @@ def _format_duration(seconds: int | None) -> str:
     return f"{days} day{'s' if days != 1 else ''}"
 
 
+def _format_runtime_compact(seconds: int | None) -> str:
+    if seconds is None or seconds <= 0:
+        return "0s"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        minutes = max(1, round(seconds / 60))
+        return f"{minutes}m"
+    if seconds < 86400:
+        hours = seconds / 3600
+        return f"{hours:.1f}h".replace(".0h", "h")
+    days = seconds / 86400
+    return f"{days:.1f}d".replace(".0d", "d")
+
+
 def _format_day_count(seconds: int) -> int:
     return max(1, ceil(seconds / 86400))
 
@@ -441,6 +456,8 @@ def _classify_system_health(healthy_count: int, warning_count: int, critical_cou
 def _overview_context(revenue_period: str = "7d") -> dict:
     now = timezone.now()
     since_24h = now - timedelta(hours=24)
+    today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
     since_7d = now - timedelta(days=7)
     revenue_period = _normalize_revenue_period(revenue_period)
 
@@ -504,6 +521,23 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         comparison_label="vs yesterday",
         flat_symbol="—",
     )
+    sales_artifact_count_24h = RunArtifact.objects.filter(
+        company_key__in=company_keys,
+    ).filter(
+        Q(processed_at__gte=since_24h, processed_at__lt=now)
+        | Q(processed_at__isnull=True, imported_at__gte=since_24h, imported_at__lt=now)
+    ).count()
+    if sales_artifact_count_24h > 0 and sales_trend["total"] <= 0:
+        sales_trend["trend_color"] = "slate"
+        sales_trend["trend_text"] = "No monetary totals found"
+    else:
+        pct = abs(float(sales_trend.get("pct_change", 0.0)))
+        if sales_trend.get("trend_dir") == "up":
+            sales_trend["trend_text"] = f"↑ {pct:.1f}% increase vs yesterday"
+        elif sales_trend.get("trend_dir") == "down":
+            sales_trend["trend_text"] = f"↓ {pct:.1f}% decrease vs yesterday"
+        else:
+            sales_trend["trend_text"] = f"— {pct:.1f}% change vs yesterday"
 
     completed_runs_24h = RunJob.objects.filter(
         created_at__gte=since_24h,
@@ -521,6 +555,65 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         if total_completed_runs_24h > 0
         else "0/0"
     )
+    duration_runs_today = list(
+        RunJob.objects.filter(
+            finished_at__gte=today_start,
+            finished_at__lt=now,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at__isnull=False,
+            finished_at__isnull=False,
+        )
+    )
+    duration_seconds = [
+        int((job.finished_at - job.started_at).total_seconds())
+        for job in duration_runs_today
+        if job.finished_at and job.started_at and job.finished_at >= job.started_at
+    ]
+    avg_runtime_today_seconds = int(sum(duration_seconds) / len(duration_seconds)) if duration_seconds else 0
+    avg_runtime_today_display = _format_runtime_compact(avg_runtime_today_seconds)
+    duration_runs_yesterday = list(
+        RunJob.objects.filter(
+            finished_at__gte=yesterday_start,
+            finished_at__lt=today_start,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at__isnull=False,
+            finished_at__isnull=False,
+        )
+    )
+    duration_seconds_yesterday = [
+        int((job.finished_at - job.started_at).total_seconds())
+        for job in duration_runs_yesterday
+        if job.finished_at and job.started_at and job.finished_at >= job.started_at
+    ]
+    avg_runtime_yesterday_seconds = (
+        int(sum(duration_seconds_yesterday) / len(duration_seconds_yesterday))
+        if duration_seconds_yesterday
+        else 0
+    )
+    if avg_runtime_yesterday_seconds > 0:
+        runtime_delta = avg_runtime_today_seconds - avg_runtime_yesterday_seconds
+        runtime_pct_change = (runtime_delta / avg_runtime_yesterday_seconds) * 100
+        runtime_pct_abs = abs(runtime_pct_change)
+        if runtime_pct_abs < 1.0:
+            avg_runtime_today_trend_dir = "flat"
+            avg_runtime_today_trend_color = "slate"
+            avg_runtime_today_trend_text = f"— {runtime_pct_abs:.1f}% change vs yesterday"
+        elif runtime_delta > 0:
+            avg_runtime_today_trend_dir = "up"
+            avg_runtime_today_trend_color = "red"
+            avg_runtime_today_trend_text = f"↑ {runtime_pct_abs:.1f}% slower vs yesterday"
+        else:
+            avg_runtime_today_trend_dir = "down"
+            avg_runtime_today_trend_color = "emerald"
+            avg_runtime_today_trend_text = f"↓ {runtime_pct_abs:.1f}% faster vs yesterday"
+    elif avg_runtime_today_seconds > 0:
+        avg_runtime_today_trend_dir = "up"
+        avg_runtime_today_trend_color = "slate"
+        avg_runtime_today_trend_text = "↑ New runtime vs yesterday"
+    else:
+        avg_runtime_today_trend_dir = "flat"
+        avg_runtime_today_trend_color = "slate"
+        avg_runtime_today_trend_text = "— 0.0% change vs yesterday"
 
     recent_jobs = RunJob.objects.order_by("-created_at")[:20]
     live_log = []
@@ -629,6 +722,17 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             "total_completed_runs_24h": total_completed_runs_24h,
             "run_success_pct_24h": run_success_pct_24h,
             "run_success_ratio_24h": run_success_ratio_24h,
+            "avg_runtime_today_seconds": avg_runtime_today_seconds,
+            "avg_runtime_today_display": avg_runtime_today_display,
+            "avg_runtime_today_samples": len(duration_seconds),
+            "avg_runtime_yesterday_seconds": avg_runtime_yesterday_seconds,
+            "avg_runtime_today_trend_dir": avg_runtime_today_trend_dir,
+            "avg_runtime_today_trend_color": avg_runtime_today_trend_color,
+            "avg_runtime_today_trend_text": avg_runtime_today_trend_text,
+            # Backward-compatible keys for existing templates/tests.
+            "avg_runtime_24h_seconds": avg_runtime_today_seconds,
+            "avg_runtime_24h_display": avg_runtime_today_display,
+            "avg_runtime_24h_samples": len(duration_seconds),
             "queued_or_running": RunJob.objects.filter(
                 status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
             ).count(),
