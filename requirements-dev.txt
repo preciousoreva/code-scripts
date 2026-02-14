@@ -1,8 +1,0 @@
-# Development dependencies (optional)
-# Install with: pip install -r requirements-dev.txt
-#
-# These are not required for running the pipeline, but are useful for development.
-
-# Pre-commit hooks for secret scanning
-pre-commit>=4.0.0
-
