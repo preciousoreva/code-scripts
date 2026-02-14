@@ -68,10 +68,11 @@ class OverviewUIContextTests(TestCase):
             company_key=self.company.company_key,
             status=RunJob.STATUS_SUCCEEDED,
         )
+        # Prev target date (Feb 11): total 100
         RunArtifact.objects.create(
             run_job=prev_run,
             company_key=self.company.company_key,
-            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            target_date=(self.fixed_now - timedelta(days=2)).date(),
             processed_at=self.fixed_now - timedelta(hours=30),
             source_path="/tmp/company_a_prev_24h.json",
             source_hash="hash-prev-24h",
@@ -83,10 +84,11 @@ class OverviewUIContextTests(TestCase):
             company_key=self.company.company_key,
             status=RunJob.STATUS_SUCCEEDED,
         )
+        # This target date (Feb 12 / yesterday): total 200
         RunArtifact.objects.create(
             run_job=current_run,
             company_key=self.company.company_key,
-            target_date=self.fixed_now.date(),
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
             processed_at=self.fixed_now - timedelta(hours=2),
             source_path="/tmp/company_a_curr_24h.json",
             source_hash="hash-curr-24h",
@@ -104,7 +106,7 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(str(kpis["sales_24h_total"]), "200.0")
         self.assertEqual(str(kpis["sales_prev_24h_total"]), "100.0")
         self.assertEqual(kpis["sales_24h_trend_dir"], "up")
-        self.assertEqual(kpis["sales_24h_trend_text"], "↑ 100.0% increase vs yesterday")
+        self.assertEqual(kpis["sales_24h_trend_text"], "↑ 100.0% increase vs Feb 11")
 
     def test_overview_context_includes_avg_runtime_24h(self):
         completed = RunJob.objects.create(
@@ -115,6 +117,15 @@ class OverviewUIContextTests(TestCase):
             finished_at=self.fixed_now - timedelta(minutes=10),
         )
         RunJob.objects.filter(id=completed.id).update(created_at=self.fixed_now - timedelta(hours=1))
+        RunArtifact.objects.create(
+            run_job=completed,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(minutes=5),
+            source_path="/tmp/company_a_runtime.json",
+            source_hash="hash-runtime",
+            reconcile_epos_total=100.0,
+        )
         with (
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
@@ -123,12 +134,12 @@ class OverviewUIContextTests(TestCase):
         self.assertGreaterEqual(context["kpis"]["avg_runtime_24h_seconds"], 0)
         display = context["kpis"]["avg_runtime_24h_display"]
         self.assertTrue(any(unit in display for unit in ("s", "m", "h", "d")))
-        self.assertIn("vs yesterday", context["kpis"]["avg_runtime_today_trend_text"])
+        self.assertIn("vs Feb 11", context["kpis"]["avg_runtime_today_trend_text"])
 
     def test_overview_sales_24h_shows_no_monetary_totals_when_artifacts_have_no_amount(self):
         RunArtifact.objects.create(
             company_key=self.company.company_key,
-            target_date=self.fixed_now.date(),
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
             processed_at=self.fixed_now - timedelta(hours=3),
             source_path="/tmp/company_a_no_amount.json",
             source_hash="hash-no-amount",
@@ -142,6 +153,8 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(context["kpis"]["sales_24h_trend_text"], "No monetary totals found")
 
     def test_overview_avg_runtime_today_uses_faster_slower_wording(self):
+        yesterday_date = (self.fixed_now - timedelta(days=1)).date()
+        prev_date = (self.fixed_now - timedelta(days=2)).date()
         y_run = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
@@ -150,6 +163,15 @@ class OverviewUIContextTests(TestCase):
             finished_at=self.fixed_now - timedelta(days=1, minutes=10),
         )
         RunJob.objects.filter(id=y_run.id).update(created_at=self.fixed_now - timedelta(days=1, minutes=41))
+        RunArtifact.objects.create(
+            run_job=y_run,
+            company_key=self.company.company_key,
+            target_date=prev_date,
+            processed_at=self.fixed_now - timedelta(days=1, minutes=5),
+            source_path="/tmp/y_run.json",
+            source_hash="hash-y",
+            reconcile_epos_total=50.0,
+        )
         t_run = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
@@ -158,16 +180,25 @@ class OverviewUIContextTests(TestCase):
             finished_at=self.fixed_now - timedelta(minutes=10),
         )
         RunJob.objects.filter(id=t_run.id).update(created_at=self.fixed_now - timedelta(minutes=21))
+        RunArtifact.objects.create(
+            run_job=t_run,
+            company_key=self.company.company_key,
+            target_date=yesterday_date,
+            processed_at=self.fixed_now - timedelta(minutes=5),
+            source_path="/tmp/t_run.json",
+            source_hash="hash-t",
+            reconcile_epos_total=50.0,
+        )
 
         with (
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             context = views._overview_context()
-        self.assertIn("faster vs yesterday", context["kpis"]["avg_runtime_today_trend_text"])
+        self.assertIn("faster vs Feb 11", context["kpis"]["avg_runtime_today_trend_text"])
 
     def test_overview_run_success_today_uses_calendar_day(self):
-        """Run Success (Today) counts only runs that finished today (finished_at), not rolling 24h."""
+        """Run Success counts only runs that finished today (finished_at), not rolling 24h."""
         # fixed_now = 2026-02-13 12:00 -> today_start = 2026-02-13 00:00 (server local)
         run_today_success = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
@@ -213,6 +244,7 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(context["kpis"]["run_success_ratio_24h"], "1/2")
 
     def test_overview_avg_runtime_today_uses_successful_runs_only(self):
+        yesterday_date = (self.fixed_now - timedelta(days=1)).date()
         succeeded = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
@@ -221,6 +253,15 @@ class OverviewUIContextTests(TestCase):
             finished_at=self.fixed_now - timedelta(minutes=10),
         )
         RunJob.objects.filter(id=succeeded.id).update(created_at=self.fixed_now - timedelta(minutes=21))
+        RunArtifact.objects.create(
+            run_job=succeeded,
+            company_key=self.company.company_key,
+            target_date=yesterday_date,
+            processed_at=self.fixed_now - timedelta(minutes=5),
+            source_path="/tmp/succeeded.json",
+            source_hash="hash-succeeded",
+            reconcile_epos_total=100.0,
+        )
         failed = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
@@ -235,10 +276,12 @@ class OverviewUIContextTests(TestCase):
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             context = views._overview_context()
-        # 10 minutes from the succeeded run only.
+        # 10 minutes from the succeeded run only (target-date logic).
         self.assertEqual(context["kpis"]["avg_runtime_today_seconds"], 600)
 
     def test_overview_sales_24h_uses_decrease_wording_for_negative_delta(self):
+        prev_date = (self.fixed_now - timedelta(days=2)).date()
+        this_date = (self.fixed_now - timedelta(days=1)).date()
         prev_run = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
@@ -247,7 +290,7 @@ class OverviewUIContextTests(TestCase):
         RunArtifact.objects.create(
             run_job=prev_run,
             company_key=self.company.company_key,
-            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            target_date=prev_date,
             processed_at=self.fixed_now - timedelta(hours=30),
             source_path="/tmp/company_a_prev_drop.json",
             source_hash="hash-prev-drop",
@@ -261,7 +304,7 @@ class OverviewUIContextTests(TestCase):
         RunArtifact.objects.create(
             run_job=current_run,
             company_key=self.company.company_key,
-            target_date=self.fixed_now.date(),
+            target_date=this_date,
             processed_at=self.fixed_now - timedelta(hours=2),
             source_path="/tmp/company_a_curr_drop.json",
             source_hash="hash-curr-drop",
@@ -272,7 +315,7 @@ class OverviewUIContextTests(TestCase):
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             context = views._overview_context()
-        self.assertEqual(context["kpis"]["sales_24h_trend_text"], "↓ 50.0% decrease vs yesterday")
+        self.assertEqual(context["kpis"]["sales_24h_trend_text"], "↓ 50.0% decrease vs Feb 11")
 
     def test_overview_sales_today_uses_latest_successful_artifact_per_company(self):
         CompanyConfigRecord.objects.create(
@@ -285,7 +328,8 @@ class OverviewUIContextTests(TestCase):
                 "epos": {"username_env_key": "EPOS_USERNAME_B", "password_env_key": "EPOS_PASSWORD_B"},
             },
         )
-        # Company A: older day amount, then corrected rerun amount (latest should win).
+        # Target date Feb 12 (yesterday): company_a 3,995,250, company_b 9,505,350.
+        # Target date Feb 11 (prev): company_a 2,645,250, company_b 9,374,050.
         run_a_old = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key="company_a",
@@ -314,7 +358,6 @@ class OverviewUIContextTests(TestCase):
             source_hash="company-a-new",
             reconcile_epos_total=2645250.0,
         )
-        # Company B: older day amount, then corrected rerun amount (latest should win).
         run_b_old = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key="company_b",
@@ -350,8 +393,9 @@ class OverviewUIContextTests(TestCase):
         ):
             context = views._overview_context()
 
-        # 2,645,250 + 9,374,050 = 12,019,300 (latest successful snapshot per company for today).
-        self.assertEqual(str(context["kpis"]["sales_24h_total"]), "12019300.0")
+        # By target date: Feb 12 total = 3,995,250 + 9,505,350 = 13,500,600.
+        self.assertEqual(str(context["kpis"]["sales_24h_total"]), "13500600.0")
+        self.assertEqual(str(context["kpis"]["sales_prev_24h_total"]), "12019300.0")
 
 
 class OverviewUITemplateTests(TestCase):
@@ -503,9 +547,10 @@ class OverviewUITemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("System Health", html)
-        self.assertIn("Sales Synced (Today)", html)
-        self.assertIn("Run Success (Today)", html)
-        self.assertIn("Avg Runtime (Today)", html)
+        self.assertIn("Sales Synced", html)
+        self.assertIn("Run Success", html)
+        self.assertIn("Avg Runtime", html)
+        self.assertIn("Target Date: Yesterday", html)
         self.assertNotIn("Healthy Companies", html)
         self.assertNotIn("Critical Errors", html)
         self.assertNotIn("Records Synced (24h)", html)

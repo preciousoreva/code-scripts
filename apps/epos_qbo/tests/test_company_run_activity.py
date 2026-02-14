@@ -76,7 +76,7 @@ class CompanyRunActivityTests(TestCase):
         self.assertNotEqual(company_data["last_run_display"], "Never run")
 
     def test_companies_list_records_today_uses_uploaded_counts_with_day_dedupe(self):
-        """Receipts uploaded (Today) uses calendar day (midnight to now); only today's artifacts count."""
+        """Receipts uploaded (runs completed today) uses calendar day (midnight to now); only today's artifacts count."""
         same_day = self.fixed_now.date()
         prev_day = (self.fixed_now - timedelta(days=1)).date()
         old_day = (self.fixed_now - timedelta(days=2)).date()

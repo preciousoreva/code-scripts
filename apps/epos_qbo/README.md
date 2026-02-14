@@ -36,8 +36,8 @@ All routes require authentication.
 ## Current behavior highlights
 
 - Overview company search is client-side and matches `display_name + company_key` via `static/js/overview.js`.
-- Overview **"Today" KPIs** (Run Success, Avg Runtime, Sales Synced) use **calendar day** in server local time (midnight to now). "Yesterday" means the previous full calendar day. All three cards share this definition.
-- Company list **"Receipts uploaded (Today)"** uses the same **calendar day** (midnight to now, server local time) so it aligns with the overview Today KPIs and does not accumulate across days.
+- Overview **"runs completed today" KPIs** (Run Success, Avg Runtime, Sales Synced) use **calendar day** in server local time (midnight to now)—i.e. when the run finished, not the data’s target date. "Yesterday" means the previous full calendar day. Data target is typically yesterday’s business date.
+- Company list **"receipts uploaded (runs completed today)"** uses the same **calendar day** (midnight to now, server local time) so it aligns with the overview KPIs and does not accumulate across days.
 - Overview **Live Log** shows the last **10** run events (by `created_at`), one entry per run.
 - Overview live log messages use company + run label format (not raw UUID in message text).
 - Overview reconciled revenue chart (under Company Status):

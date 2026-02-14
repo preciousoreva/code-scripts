@@ -7,6 +7,7 @@ so runs are visible in the Django dashboard (RunJob record when available).
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -14,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+
+logger = logging.getLogger(__name__)
 
 
 def get_repo_root() -> Path:
@@ -174,6 +177,7 @@ class Command(BaseCommand):
 
             if run_job is not None:
                 self._update_run_job(run_job, exit_code)
+                self._attach_artifacts_to_run_job(run_job)
 
             sys.exit(exit_code)
         finally:
@@ -211,3 +215,17 @@ class Command(BaseCommand):
         run_job.finished_at = timezone.now()
         run_job.exit_code = exit_code
         run_job.save(update_fields=["status", "finished_at", "exit_code"])
+
+    def _attach_artifacts_to_run_job(self, run_job) -> None:
+        """
+        Link recent metadata artifacts to this RunJob so the dashboard shows
+        company artifacts, last-run times, and KPIs from this scheduled run.
+        No-op if the artifact ingestion service is not available; logs and continues on error.
+        """
+        try:
+            from apps.epos_qbo.services.artifact_ingestion import attach_recent_artifacts_to_job
+            attach_recent_artifacts_to_job(run_job)
+        except ImportError:
+            logger.debug("Artifact ingestion not available; skipping artifact attach for run_job %s", run_job.id)
+        except Exception as e:
+            logger.warning("Could not attach artifacts to run_job %s: %s", run_job.id, e, exc_info=True)

@@ -2,6 +2,7 @@
     'use strict';
     const OVERVIEW_PANELS_URL = '/epos-qbo/dashboard/panels/';
     const OVERVIEW_REFRESH_DEBOUNCE_MS = 800;
+    const OVERVIEW_REFRESH_AFTER_COMPLETION_MS = 2000;
     let revenueChart = null;
     let refreshTimerId = null;
     let completionListenerBound = false;
@@ -70,10 +71,6 @@
     }
 
     function updateRevenueSummary(totalAmount, matchedDays) {
-        const totalEl = document.getElementById('overview-revenue-total');
-        if (totalEl) {
-            totalEl.textContent = formatCurrency(totalAmount || 0);
-        }
         const matchedDaysEl = document.getElementById('overview-revenue-matched-days');
         if (matchedDaysEl) {
             matchedDaysEl.textContent = `Matched days in period: ${matchedDays || 0}`;
@@ -248,25 +245,44 @@
             });
     }
 
-    function scheduleOverviewRefresh() {
+    function scheduleOverviewRefresh(delayMs) {
+        const delay = delayMs !== undefined ? delayMs : OVERVIEW_REFRESH_DEBOUNCE_MS;
         if (refreshTimerId) {
             clearTimeout(refreshTimerId);
         }
         refreshTimerId = window.setTimeout(() => {
             refreshOverviewPanels();
             refreshTimerId = null;
-        }, OVERVIEW_REFRESH_DEBOUNCE_MS);
+        }, delay);
     }
 
     function bindCompletionRefresh() {
         if (completionListenerBound) return;
-        window.addEventListener('oiat:run-completed', scheduleOverviewRefresh);
+        window.addEventListener('oiat:run-completed', () => {
+            scheduleOverviewRefresh(OVERVIEW_REFRESH_AFTER_COMPLETION_MS);
+        });
+        window.addEventListener('oiat:run-started', () => {
+            scheduleOverviewRefresh(OVERVIEW_REFRESH_DEBOUNCE_MS);
+        });
         completionListenerBound = true;
+    }
+
+    function bindRevenuePeriodChange() {
+        const select = document.getElementById('overview-revenue-period');
+        if (!select) return;
+        select.onchange = () => {
+            const period = currentRevenuePeriod();
+            const url = new URL(window.location.href);
+            url.searchParams.set('revenue_period', period);
+            history.replaceState(null, '', url.pathname + (url.search || ''));
+            refreshOverviewPanels();
+        };
     }
 
     function initOverview(options = {}) {
         initCompanyFilter(options.filterQuery || '');
         initRevenueChart(options.revenueCompany || 'all');
+        bindRevenuePeriodChange();
         bindCompletionRefresh();
     }
 

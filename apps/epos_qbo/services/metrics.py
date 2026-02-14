@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
@@ -200,7 +200,7 @@ def compute_sales_day_snapshot_for_companies(
     currency_symbol: str = "₦",
 ) -> dict[str, Any]:
     """
-    Today vs yesterday snapshot for the overview "Sales Synced (Today)" KPI.
+    Today vs previous target day snapshot for the overview "Sales Synced" KPI.
 
     Uses calendar-day windows by processed_at (when the run completed), not target_date.
     One artifact per company per window (latest successful). Totals are from reconcile_epos_total
@@ -343,6 +343,189 @@ def compute_sales_trend_for_companies(
         "total_display": _format_currency(this_total, symbol=currency_symbol),
         "trend_text": trend_text,
         "trend_color": trend_color,
+    }
+
+
+def _latest_artifact_per_company_for_target_date(
+    company_keys: list[str] | None,
+    target_date: date,
+    *,
+    prefer_reconcile: bool = True,
+) -> tuple[Decimal, int]:
+    """
+    Sum reconcile_epos_total (or fallback) for the latest artifact per company
+    for the given target_date. Returns (total, company_count).
+    """
+    qs = RunArtifact.objects.filter(target_date=target_date).select_related("run_job")
+    if company_keys is not None:
+        qs = qs.filter(company_key__in=company_keys)
+    qs = qs.order_by("company_key", "-processed_at", "-imported_at")
+
+    grouped: dict[str, list[RunArtifact]] = defaultdict(list)
+    for artifact in qs:
+        grouped[artifact.company_key].append(artifact)
+
+    total = Decimal("0")
+    count = 0
+    for company_artifacts in grouped.values():
+        chosen = _choose_day_artifact(company_artifacts)
+        if chosen is None:
+            continue
+        total += extract_amount_hybrid(chosen, prefer_reconcile=prefer_reconcile)
+        count += 1
+    return total, count
+
+
+def compute_sales_snapshot_by_target_date(
+    company_keys: list[str] | None,
+    target_date: date,
+    prev_target_date: date,
+    *,
+    prefer_reconcile: bool = True,
+    comparison_label: str = "vs previous day",
+    flat_symbol: str = "—",
+    currency_symbol: str = "₦",
+) -> dict[str, Any]:
+    """
+    Sales Synced KPI by data target date: compare latest run totals for target_date
+    vs prev_target_date (e.g. yesterday vs day before yesterday), not by run completion calendar day.
+    """
+    this_total, this_samples = _latest_artifact_per_company_for_target_date(
+        company_keys, target_date, prefer_reconcile=prefer_reconcile
+    )
+    prev_total, prev_samples = _latest_artifact_per_company_for_target_date(
+        company_keys, prev_target_date, prefer_reconcile=prefer_reconcile
+    )
+    delta = this_total - prev_total
+
+    is_new = False
+    if prev_total > 0:
+        pct_change = float((delta / prev_total) * Decimal("100"))
+    elif this_total > 0:
+        pct_change = 100.0
+        is_new = True
+    else:
+        pct_change = 0.0
+
+    if abs(pct_change) < 1.0:
+        trend_dir = "flat"
+    elif pct_change > 0:
+        trend_dir = "up"
+    else:
+        trend_dir = "down"
+
+    trend_color = {"up": "emerald", "down": "red", "flat": "slate"}[trend_dir]
+    trend_arrow = {"up": "↑", "down": "↓", "flat": flat_symbol}[trend_dir]
+    if is_new:
+        trend_text = f"↑ New {comparison_label}"
+    else:
+        trend_text = f"{trend_arrow} {abs(pct_change):.1f}% {comparison_label}"
+
+    return {
+        "total": this_total,
+        "prev_total": prev_total,
+        "pct_change": pct_change,
+        "trend_dir": trend_dir,
+        "is_new": is_new,
+        "total_display": _format_currency(this_total, symbol=currency_symbol),
+        "trend_text": trend_text,
+        "trend_color": trend_color,
+        "sample_count": this_samples,
+        "prev_sample_count": prev_samples,
+    }
+
+
+def compute_avg_runtime_by_target_date(
+    company_keys: list[str] | None,
+    target_date: date,
+    prev_target_date: date,
+    *,
+    prev_date_display: str,
+) -> dict[str, Any]:
+    """
+    Avg Runtime KPI by data target date: average duration of runs that produced
+    artifacts for target_date vs prev_target_date (same comparison logic as Sales Synced).
+    """
+    # RunJob IDs that have at least one artifact for this target_date (optionally for given companies)
+    artifact_qs = RunArtifact.objects.filter(
+        target_date=target_date,
+        run_job_id__isnull=False,
+    )
+    if company_keys is not None:
+        artifact_qs = artifact_qs.filter(company_key__in=company_keys)
+    job_ids_this = list(artifact_qs.values_list("run_job_id", flat=True).distinct())
+    prev_qs = RunArtifact.objects.filter(
+        target_date=prev_target_date,
+        run_job_id__isnull=False,
+    )
+    if company_keys is not None:
+        prev_qs = prev_qs.filter(company_key__in=company_keys)
+    job_ids_prev = list(prev_qs.values_list("run_job_id", flat=True).distinct())
+
+    jobs_this = list(
+        RunJob.objects.filter(
+            id__in=job_ids_this,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at__isnull=False,
+            finished_at__isnull=False,
+        )
+    )
+    jobs_prev = list(
+        RunJob.objects.filter(
+            id__in=job_ids_prev,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at__isnull=False,
+            finished_at__isnull=False,
+        )
+    )
+
+    duration_this = [
+        int((j.finished_at - j.started_at).total_seconds())
+        for j in jobs_this
+        if j.finished_at and j.started_at and j.finished_at >= j.started_at
+    ]
+    duration_prev = [
+        int((j.finished_at - j.started_at).total_seconds())
+        for j in jobs_prev
+        if j.finished_at and j.started_at and j.finished_at >= j.started_at
+    ]
+
+    avg_this = int(sum(duration_this) / len(duration_this)) if duration_this else 0
+    avg_prev = int(sum(duration_prev) / len(duration_prev)) if duration_prev else 0
+
+    if avg_prev > 0:
+        runtime_delta = avg_this - avg_prev
+        runtime_pct = (runtime_delta / avg_prev) * 100
+        pct_abs = abs(runtime_pct)
+        if pct_abs < 1.0:
+            trend_dir = "flat"
+            trend_color = "slate"
+            trend_text = f"— {pct_abs:.1f}% change vs {prev_date_display}"
+        elif runtime_delta > 0:
+            trend_dir = "up"
+            trend_color = "red"
+            trend_text = f"↑ {pct_abs:.1f}% slower vs {prev_date_display}"
+        else:
+            trend_dir = "down"
+            trend_color = "emerald"
+            trend_text = f"↓ {pct_abs:.1f}% faster vs {prev_date_display}"
+    elif avg_this > 0:
+        trend_dir = "up"
+        trend_color = "slate"
+        trend_text = f"↑ New runtime vs {prev_date_display}"
+    else:
+        trend_dir = "flat"
+        trend_color = "slate"
+        trend_text = f"— 0.0% change vs {prev_date_display}"
+
+    return {
+        "avg_seconds": avg_this,
+        "prev_avg_seconds": avg_prev,
+        "samples": len(duration_this),
+        "prev_samples": len(duration_prev),
+        "trend_dir": trend_dir,
+        "trend_color": trend_color,
+        "trend_text": trend_text,
     }
 
 

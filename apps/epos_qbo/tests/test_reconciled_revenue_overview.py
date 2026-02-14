@@ -128,7 +128,8 @@ class ReconciledRevenueOverviewContextTests(TestCase):
 
         self.assertEqual(context["revenue_period"], "7d")
         self.assertTrue(context["has_reconciled_revenue_data"])
-        self.assertEqual(context["revenue_total_epos"], 400.0)
+        self.assertEqual(context["revenue_start_date_display"], "Feb 07")
+        self.assertEqual(context["revenue_end_date_display"], "Feb 13")
         self.assertEqual(context["revenue_matched_days"], 2)
 
         series_map = {series["company_key"]: series for series in context["revenue_series"]}

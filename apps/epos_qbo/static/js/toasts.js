@@ -4,6 +4,7 @@
 
     const TOAST_DURATION = 5000; // 5 seconds
     const POLL_INTERVAL = 3000; // 3 seconds
+    const ACTIVE_DISCOVERY_INTERVAL = 12000; // 12 seconds — discover runs that started after page load
     const ACTIVE_RUNS_URL = '/epos-qbo/api/runs/active';
     const RUN_STATUS_URL_BASE = '/epos-qbo/api/runs/status?job_ids=';
 
@@ -12,6 +13,7 @@
         container: null,
         shownToasts: new Set(),
         pollingInterval: null,
+        discoveryIntervalId: null,
         activeRunIds: [],
         previousStatuses: new Map(),
 
@@ -23,6 +25,8 @@
             }
             // Initialize run status polling if active runs exist
             this.initRunStatusPolling();
+            // Periodically discover new active runs (e.g. scheduled .cmd started after page load)
+            this.startActiveRunDiscovery();
         },
 
         show(type, title, message, options = {}) {
@@ -233,12 +237,41 @@
             if (!Array.isArray(ids) || ids.length === 0) {
                 return;
             }
+            const before = this.activeRunIds.length;
             ids.forEach((id) => {
                 if (!this.activeRunIds.includes(id)) {
                     this.activeRunIds.push(id);
                 }
                 if (!this.previousStatuses.has(id)) {
                     this.previousStatuses.set(id, null);
+                }
+            });
+            return before < this.activeRunIds.length;
+        },
+
+        startActiveRunDiscovery() {
+            if (this.discoveryIntervalId) return;
+            this.discoveryIntervalId = setInterval(() => {
+                this.fetchGlobalActiveRunIds()
+                    .then((ids) => {
+                        if (ids.length === 0) return;
+                        const hadNew = this.mergeActiveRunIds(ids);
+                        if (hadNew) {
+                            this.show('info', 'Run started', 'A pipeline run has started and is now visible in the log.', {
+                                duration: TOAST_DURATION,
+                            });
+                            window.dispatchEvent(new CustomEvent('oiat:run-started', { detail: { jobIds: ids } }));
+                            if (!this.pollingInterval && this.activeRunIds.length > 0) {
+                                this.startPollingLoop();
+                            }
+                        }
+                    })
+                    .catch(() => {});
+            }, ACTIVE_DISCOVERY_INTERVAL);
+            window.addEventListener('beforeunload', () => {
+                if (this.discoveryIntervalId) {
+                    clearInterval(this.discoveryIntervalId);
+                    this.discoveryIntervalId = null;
                 }
             });
         },

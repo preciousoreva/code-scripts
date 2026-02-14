@@ -16,6 +16,7 @@
         </p>
     </div>
     <div class="flex items-center gap-3">
+        <span class="text-xs text-slate-500 border border-slate-200 rounded-full px-2.5 py-1 bg-slate-50" title="Business date that overview KPIs typically refer to">Target Date: Yesterday ({{ target_date_display|default:"" }})</span>
         <a href="{% url 'epos_qbo:company-new' %}" class="btn btn-primary">
             <iconify-icon icon="solar:add-circle-linear" width="16"></iconify-icon>
             Add Company

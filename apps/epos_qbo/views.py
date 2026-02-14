@@ -28,7 +28,9 @@ from .services.config_sync import (
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
 from .services.metrics import (
+    compute_avg_runtime_by_target_date,
     compute_sales_day_snapshot_for_companies,
+    compute_sales_snapshot_by_target_date,
     compute_sales_trend,
 )
 
@@ -469,6 +471,11 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
     since_7d = now - timedelta(days=7)
+    # Target business date for overview KPIs (typically "yesterday")
+    target_date = timezone.localtime(now).date() - timedelta(days=1)
+    prev_target_date = target_date - timedelta(days=1)
+    target_date_display = target_date.strftime("%b %d")
+    prev_target_date_display = prev_target_date.strftime("%b %d")
     revenue_period = _normalize_revenue_period(revenue_period)
 
     companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
@@ -523,11 +530,12 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     system_health = _classify_system_health(healthy_count, warning_count, critical_count)
     system_health_breakdown = f"{healthy_count} healthy • {warning_count} warning • {critical_count} critical"
 
-    sales_trend = compute_sales_day_snapshot_for_companies(
+    sales_trend = compute_sales_snapshot_by_target_date(
         company_keys,
-        now=now,
+        target_date,
+        prev_target_date,
         prefer_reconcile=True,
-        comparison_label="vs yesterday",
+        comparison_label=f"vs {prev_target_date_display}",
         flat_symbol="—",
     )
     if sales_trend.get("sample_count", 0) > 0 and sales_trend["total"] <= 0:
@@ -536,13 +544,13 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     else:
         pct = abs(float(sales_trend.get("pct_change", 0.0)))
         if sales_trend.get("trend_dir") == "up":
-            sales_trend["trend_text"] = f"↑ {pct:.1f}% increase vs yesterday"
+            sales_trend["trend_text"] = f"↑ {pct:.1f}% increase vs {prev_target_date_display}"
         elif sales_trend.get("trend_dir") == "down":
-            sales_trend["trend_text"] = f"↓ {pct:.1f}% decrease vs yesterday"
+            sales_trend["trend_text"] = f"↓ {pct:.1f}% decrease vs {prev_target_date_display}"
         else:
-            sales_trend["trend_text"] = f"— {pct:.1f}% change vs yesterday"
+            sales_trend["trend_text"] = f"— {pct:.1f}% change vs {prev_target_date_display}"
 
-    # Run Success (Today): calendar day — runs that finished today (same definition as Avg Runtime)
+    # Run Success: calendar day — runs that finished today (same definition as Avg Runtime)
     completed_runs_today = RunJob.objects.filter(
         finished_at__gte=today_start,
         finished_at__lt=now,
@@ -561,65 +569,19 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         if total_completed_runs_24h > 0
         else "0/0"
     )
-    duration_runs_today = list(
-        RunJob.objects.filter(
-            finished_at__gte=today_start,
-            finished_at__lt=now,
-            status=RunJob.STATUS_SUCCEEDED,
-            started_at__isnull=False,
-            finished_at__isnull=False,
-        )
+    runtime_trend = compute_avg_runtime_by_target_date(
+        company_keys,
+        target_date,
+        prev_target_date,
+        prev_date_display=prev_target_date_display,
     )
-    duration_seconds = [
-        int((job.finished_at - job.started_at).total_seconds())
-        for job in duration_runs_today
-        if job.finished_at and job.started_at and job.finished_at >= job.started_at
-    ]
-    avg_runtime_today_seconds = int(sum(duration_seconds) / len(duration_seconds)) if duration_seconds else 0
+    avg_runtime_today_seconds = runtime_trend["avg_seconds"]
     avg_runtime_today_display = _format_runtime_compact(avg_runtime_today_seconds)
-    duration_runs_yesterday = list(
-        RunJob.objects.filter(
-            finished_at__gte=yesterday_start,
-            finished_at__lt=today_start,
-            status=RunJob.STATUS_SUCCEEDED,
-            started_at__isnull=False,
-            finished_at__isnull=False,
-        )
-    )
-    duration_seconds_yesterday = [
-        int((job.finished_at - job.started_at).total_seconds())
-        for job in duration_runs_yesterday
-        if job.finished_at and job.started_at and job.finished_at >= job.started_at
-    ]
-    avg_runtime_yesterday_seconds = (
-        int(sum(duration_seconds_yesterday) / len(duration_seconds_yesterday))
-        if duration_seconds_yesterday
-        else 0
-    )
-    if avg_runtime_yesterday_seconds > 0:
-        runtime_delta = avg_runtime_today_seconds - avg_runtime_yesterday_seconds
-        runtime_pct_change = (runtime_delta / avg_runtime_yesterday_seconds) * 100
-        runtime_pct_abs = abs(runtime_pct_change)
-        if runtime_pct_abs < 1.0:
-            avg_runtime_today_trend_dir = "flat"
-            avg_runtime_today_trend_color = "slate"
-            avg_runtime_today_trend_text = f"— {runtime_pct_abs:.1f}% change vs yesterday"
-        elif runtime_delta > 0:
-            avg_runtime_today_trend_dir = "up"
-            avg_runtime_today_trend_color = "red"
-            avg_runtime_today_trend_text = f"↑ {runtime_pct_abs:.1f}% slower vs yesterday"
-        else:
-            avg_runtime_today_trend_dir = "down"
-            avg_runtime_today_trend_color = "emerald"
-            avg_runtime_today_trend_text = f"↓ {runtime_pct_abs:.1f}% faster vs yesterday"
-    elif avg_runtime_today_seconds > 0:
-        avg_runtime_today_trend_dir = "up"
-        avg_runtime_today_trend_color = "slate"
-        avg_runtime_today_trend_text = "↑ New runtime vs yesterday"
-    else:
-        avg_runtime_today_trend_dir = "flat"
-        avg_runtime_today_trend_color = "slate"
-        avg_runtime_today_trend_text = "— 0.0% change vs yesterday"
+    avg_runtime_yesterday_seconds = runtime_trend["prev_avg_seconds"]
+    avg_runtime_today_trend_dir = runtime_trend["trend_dir"]
+    avg_runtime_today_trend_color = runtime_trend["trend_color"]
+    avg_runtime_today_trend_text = runtime_trend["trend_text"]
+    duration_seconds = [avg_runtime_today_seconds] * max(1, runtime_trend["samples"])
 
     recent_jobs = RunJob.objects.order_by("-created_at")[:10]
     live_log = []
@@ -694,8 +656,9 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         key=lambda item: item["total"],
         reverse=True,
     )
-    revenue_total_epos = round(sum(revenue_totals_by_company.values()), 2)
     has_reconciled_revenue_data = bool(latest_reconciled_artifacts)
+    revenue_start_date_display = revenue_start_date.strftime("%b %d")
+    revenue_end_date_display = revenue_end_date.strftime("%b %d")
     revenue_chart_payload = {
         "labels": revenue_labels,
         "series": revenue_series if has_reconciled_revenue_data else [],
@@ -707,6 +670,8 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
     
     return {
+        "target_date_display": target_date_display,
+        "target_date_iso": target_date.isoformat(),
         "kpis": {
             "healthy_count": healthy_count,
             "warning_count": warning_count,
@@ -754,7 +719,8 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         ],
         "revenue_labels": revenue_labels,
         "revenue_series": revenue_series,
-        "revenue_total_epos": revenue_total_epos,
+        "revenue_start_date_display": revenue_start_date_display,
+        "revenue_end_date_display": revenue_end_date_display,
         "revenue_company_totals": revenue_company_totals,
         "revenue_matched_days": len(matched_dates),
         "has_reconciled_revenue_data": has_reconciled_revenue_data,
