@@ -27,7 +27,10 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
-from .services.metrics import compute_sales_trend, compute_sales_trend_for_companies
+from .services.metrics import (
+    compute_sales_day_snapshot_for_companies,
+    compute_sales_trend,
+)
 
 ACCESS_REFRESH_MARGIN_SECONDS = 60
 REVENUE_PERIOD_DAYS = {
@@ -152,6 +155,14 @@ def _format_day_count(seconds: int) -> int:
 def _normalize_revenue_period(value: str | None) -> str:
     selected = (value or "").strip().lower()
     return selected if selected in REVENUE_PERIOD_DAYS else "7d"
+
+
+def _quick_sync_default_target_date(*, now: datetime | None = None) -> str:
+    current = now or timezone.now()
+    if timezone.is_naive(current):
+        current = timezone.make_aware(current)
+    local_now = timezone.localtime(current)
+    return (local_now.date() - timedelta(days=1)).isoformat()
 
 
 def _exit_code_info(exit_code: int | None) -> dict | None:
@@ -455,7 +466,6 @@ def _classify_system_health(healthy_count: int, warning_count: int, critical_cou
 
 def _overview_context(revenue_period: str = "7d") -> dict:
     now = timezone.now()
-    since_24h = now - timedelta(hours=24)
     today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
     since_7d = now - timedelta(days=7)
@@ -513,21 +523,14 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     system_health = _classify_system_health(healthy_count, warning_count, critical_count)
     system_health_breakdown = f"{healthy_count} healthy • {warning_count} warning • {critical_count} critical"
 
-    sales_trend = compute_sales_trend_for_companies(
+    sales_trend = compute_sales_day_snapshot_for_companies(
         company_keys,
         now=now,
-        window_hours=24,
         prefer_reconcile=True,
         comparison_label="vs yesterday",
         flat_symbol="—",
     )
-    sales_artifact_count_24h = RunArtifact.objects.filter(
-        company_key__in=company_keys,
-    ).filter(
-        Q(processed_at__gte=since_24h, processed_at__lt=now)
-        | Q(processed_at__isnull=True, imported_at__gte=since_24h, imported_at__lt=now)
-    ).count()
-    if sales_artifact_count_24h > 0 and sales_trend["total"] <= 0:
+    if sales_trend.get("sample_count", 0) > 0 and sales_trend["total"] <= 0:
         sales_trend["trend_color"] = "slate"
         sales_trend["trend_text"] = "No monetary totals found"
     else:
@@ -539,12 +542,15 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         else:
             sales_trend["trend_text"] = f"— {pct:.1f}% change vs yesterday"
 
-    completed_runs_24h = RunJob.objects.filter(
-        created_at__gte=since_24h,
+    # Run Success (Today): calendar day — runs that finished today (same definition as Avg Runtime)
+    completed_runs_today = RunJob.objects.filter(
+        finished_at__gte=today_start,
+        finished_at__lt=now,
+        finished_at__isnull=False,
         status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
     )
-    successful_runs_24h = completed_runs_24h.filter(status=RunJob.STATUS_SUCCEEDED).count()
-    total_completed_runs_24h = completed_runs_24h.count()
+    successful_runs_24h = completed_runs_today.filter(status=RunJob.STATUS_SUCCEEDED).count()
+    total_completed_runs_24h = completed_runs_today.count()
     run_success_pct_24h = (
         round((successful_runs_24h / total_completed_runs_24h) * 100, 1)
         if total_completed_runs_24h > 0
@@ -615,7 +621,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         avg_runtime_today_trend_color = "slate"
         avg_runtime_today_trend_text = "— 0.0% change vs yesterday"
 
-    recent_jobs = RunJob.objects.order_by("-created_at")[:20]
+    recent_jobs = RunJob.objects.order_by("-created_at")[:10]
     live_log = []
     company_map = {c.company_key: c.display_name for c in CompanyConfigRecord.objects.all()}
     for job in recent_jobs:
@@ -763,6 +769,8 @@ def overview(request):
     _ensure_company_records()
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
     context = _overview_context(revenue_period)
+    context["quick_sync_target_date"] = _quick_sync_default_target_date()
+    context["quick_sync_timezone"] = timezone.get_current_timezone_name()
     context.update(_nav_context())
     context.update(
         _breadcrumb_context(
@@ -782,7 +790,7 @@ def overview_panels(request):
     _ensure_company_records()
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
     context = _overview_context(revenue_period)
-    return render(request, "components/overview_panels.html", context)
+    return render(request, "components/overview_refresh.html", context)
 
 
 @login_required
@@ -1058,14 +1066,7 @@ def run_status_check(request):
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_POST
 def trigger_run(request):
-    # #region agent log
-    try:
-        import json
-        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
-            f.write(json.dumps({"location": "views.trigger_run:entry", "message": "trigger_run called", "data": {"POST_scope": request.POST.get("scope"), "POST_company_key": request.POST.get("company_key")}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H1"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    """Create a queued run from the trigger form. target_date/from_date/to_date come from the form (Quick Sync submits date_mode=target_date and target_date)."""
     form = RunTriggerForm(request.POST)
     if not form.is_valid():
         messages.error(request, f"Invalid trigger payload: {form.errors.as_text()}")
@@ -1091,25 +1092,8 @@ def trigger_run(request):
         requested_by=request.user,
         status=RunJob.STATUS_QUEUED,
     )
-
-    # #region agent log
-    try:
-        import json
-        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
-            f.write(json.dumps({"location": "views.trigger_run:job_created", "message": "RunJob created", "data": {"job_id": str(job.id), "scope": job.scope, "company_key": str(job.company_key)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H2"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     dispatch_next_queued_job()
 
-    # #region agent log
-    try:
-        import json
-        with open("/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log", "a") as f:
-            f.write(json.dumps({"location": "views.trigger_run:redirect", "message": "Redirecting to run detail", "data": {"job_id": str(job.id)}, "timestamp": __import__("time").time() * 1000, "hypothesisId": "H4"}) + "\n")
-    except Exception:
-        pass
-    # #endregion
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
         messages.success(request, f"Run started: {job.display_label}")
@@ -1260,6 +1244,62 @@ def _artifact_activity_time(artifact: RunArtifact | None):
     return artifact.processed_at or artifact.imported_at
 
 
+def _artifact_order_key(artifact: RunArtifact):
+    floor = timezone.make_aware(datetime(1970, 1, 1))
+    anchor = artifact.processed_at or artifact.imported_at or floor
+    imported = artifact.imported_at or floor
+    return anchor, imported
+
+
+def _artifact_day_bucket(artifact: RunArtifact):
+    if artifact.target_date:
+        return artifact.target_date
+    anchor = artifact.processed_at or artifact.imported_at
+    return anchor.date() if anchor else None
+
+
+def _artifact_uploaded_count(artifact: RunArtifact) -> int:
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    # Prefer explicit uploaded receipt count; support legacy metadata that used "created".
+    for key in ("uploaded", "created"):
+        raw = stats.get(key)
+        try:
+            count = int(raw)
+        except (TypeError, ValueError):
+            continue
+        return max(0, count)
+    return 0
+
+
+def _select_day_artifact_for_uploaded_count(artifacts: list[RunArtifact]) -> RunArtifact | None:
+    by_hash: dict[str, RunArtifact] = {}
+    no_hash: list[RunArtifact] = []
+    for artifact in artifacts:
+        if artifact.source_hash:
+            current = by_hash.get(artifact.source_hash)
+            if current is None or _artifact_order_key(artifact) > _artifact_order_key(current):
+                by_hash[artifact.source_hash] = artifact
+        else:
+            no_hash.append(artifact)
+    candidates = list(by_hash.values()) + no_hash
+    if not candidates:
+        return None
+
+    succeeded = [
+        artifact
+        for artifact in candidates
+        if artifact.run_job_id and artifact.run_job and artifact.run_job.status == RunJob.STATUS_SUCCEEDED
+    ]
+    if succeeded:
+        return max(succeeded, key=_artifact_order_key)
+
+    unlinked = [artifact for artifact in candidates if artifact.run_job_id is None]
+    if unlinked:
+        return max(unlinked, key=_artifact_order_key)
+
+    return None
+
+
 def _format_last_run_time(last_activity_at) -> str:
     if not last_activity_at:
         return "Never run"
@@ -1361,9 +1401,15 @@ def _enrich_company_data(
         .order_by("-processed_at", "-imported_at")
         .first()
     )
-    artifacts_24h = RunArtifact.objects.filter(
-        company_key=company.company_key,
-        imported_at__gte=timezone.now() - timedelta(hours=24),
+    since_24h = timezone.now() - timedelta(hours=24)
+    artifacts_24h = (
+        RunArtifact.objects.filter(company_key=company.company_key)
+        .filter(
+            Q(processed_at__gte=since_24h)
+            | Q(processed_at__isnull=True, imported_at__gte=since_24h)
+        )
+        .select_related("run_job")
+        .order_by("-processed_at", "-imported_at")
     )
     # Use canonical status from Overview so counts and labels match
     token_info = _get_token_info_for_display(company)
@@ -1371,7 +1417,18 @@ def _enrich_company_data(
     status = _status_display_from_canonical(status_str, latest_run, latest_artifact)
     issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
     config_display = _parse_config_for_display(company.config_json)
-    records_24h = sum(int(a.rows_kept or 0) for a in artifacts_24h)
+    artifacts_by_day: dict[object, list[RunArtifact]] = {}
+    for artifact in artifacts_24h:
+        bucket = _artifact_day_bucket(artifact)
+        if bucket is None:
+            continue
+        artifacts_by_day.setdefault(bucket, []).append(artifact)
+    records_24h = 0
+    for day_artifacts in artifacts_by_day.values():
+        selected = _select_day_artifact_for_uploaded_count(day_artifacts)
+        if selected is None:
+            continue
+        records_24h += _artifact_uploaded_count(selected)
     latest_run_time = _run_activity_time(latest_run)
     latest_artifact_time = _artifact_activity_time(latest_artifact)
     if latest_run_time and latest_artifact_time:

@@ -36,6 +36,8 @@ All routes require authentication.
 ## Current behavior highlights
 
 - Overview company search is client-side and matches `display_name + company_key` via `static/js/overview.js`.
+- Overview **"Today" KPIs** (Run Success, Avg Runtime, Sales Synced) use **calendar day** in server local time (midnight to now). "Yesterday" means the previous full calendar day. All three cards share this definition.
+- Overview **Live Log** shows the last **10** run events (by `created_at`), one entry per run.
 - Overview live log messages use company + run label format (not raw UUID in message text).
 - Overview reconciled revenue chart (under Company Status):
   - Shows EPOS money trend per company for `Yesterday`, `Last 7D`, `Last 30D`, `Last 90D` (default `Last 7D`).
