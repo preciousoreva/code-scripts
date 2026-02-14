@@ -103,3 +103,6 @@ repomix-output.xml
 
 # Local debug / env trees (e.g. debugpy, ad-hoc venvs)
 dataPandasLib/
+
+# Scheduled run lock (runtime/ created by run_scheduled_all_companies; lock file removed on exit)
+runtime/
