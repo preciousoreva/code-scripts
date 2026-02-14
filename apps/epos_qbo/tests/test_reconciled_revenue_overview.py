@@ -144,7 +144,7 @@ class ReconciledRevenueOverviewContextTests(TestCase):
         ):
             context = views._overview_context("bad-value")
 
-        self.assertEqual(context["revenue_period"], "30d")
+        self.assertEqual(context["revenue_period"], "7d")
 
 
 class ReconciledRevenueOverviewTemplateTests(TestCase):
@@ -197,7 +197,7 @@ class ReconciledRevenueOverviewTemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Reconciled EPOS Revenue", html)
-        self.assertIn("Last 90d", html)
+        self.assertIn("Last 90D", html)
         self.assertIn('id="overview-revenue-chart"', html)
         self.assertIn("overview-revenue-chart-data", html)
 

@@ -37,16 +37,12 @@ All routes require authentication.
 
 - Overview company search is client-side and matches `display_name + company_key` via `static/js/overview.js`.
 - Overview live log messages use company + run label format (not raw UUID in message text).
-- Overview reliability panel:
-  - Success trend uses last 7 days and shows `No runs` when a day has zero runs.
-  - Failure sources use last 60 days and display non-zero categories only.
 - Overview reconciled revenue chart (under Company Status):
-  - Shows EPOS money trend per company for `Yesterday`, `Last 7d`, `Last 30d`, `Last 90d`.
+  - Shows EPOS money trend per company for `Yesterday`, `Last 7D`, `Last 30D`, `Last 90D` (default `Last 7D`).
+  - Supports chart-level filter for `All Companies` or a single company.
   - Uses strict `MATCH` reconciliation data only (`RunArtifact.reconcile_status == "MATCH"` and `reconcile_epos_total` present).
   - Dedupe rule per point: latest artifact by `(company_key, target_date)` using `processed_at/imported_at`.
   - Uses completed-day windows ending at yesterday (future-only strict; older runs without stored reconcile totals may not appear).
-- Failure source classification buckets are keyword-based from `RunJob.failure_reason`:
-  - `Mapping`, `Inventory`, `Auth/Token`, `Network`, `Other`.
 - Exit codes are now explained in Run Detail with this reference:
   - `0`: success
   - `1`: pipeline execution failure (generic; inspect Live Log for root cause)

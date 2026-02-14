@@ -4,6 +4,8 @@
 
     const TOAST_DURATION = 5000; // 5 seconds
     const POLL_INTERVAL = 3000; // 3 seconds
+    const ACTIVE_RUNS_URL = '/epos-qbo/api/runs/active';
+    const RUN_STATUS_URL_BASE = '/epos-qbo/api/runs/status?job_ids=';
 
     // Toast management
     const ToastManager = {
@@ -97,11 +99,27 @@
         initRunStatusPolling() {
             // Get active run IDs from page
             this.activeRunIds = this.getActiveRunIds();
-            if (this.activeRunIds.length === 0) return;
+            if (this.activeRunIds.length === 0) {
+                this.fetchGlobalActiveRunIds()
+                    .then((ids) => {
+                        this.mergeActiveRunIds(ids);
+                    })
+                    .finally(() => {
+                        this.startPollingLoop();
+                    });
+                return;
+            }
+            this.startPollingLoop();
+        },
 
-            // Initialize previous statuses
-            this.activeRunIds.forEach(id => {
-                this.previousStatuses.set(id, null);
+        startPollingLoop() {
+            if (this.activeRunIds.length === 0) {
+                return;
+            }
+            this.activeRunIds.forEach((id) => {
+                if (!this.previousStatuses.has(id)) {
+                    this.previousStatuses.set(id, null);
+                }
             });
 
             const poll = () => {
@@ -114,7 +132,7 @@
                 }
 
                 const jobIdsParam = this.activeRunIds.join(',');
-                const statusUrl = '/epos-qbo/api/runs/status?job_ids=' + jobIdsParam;
+                const statusUrl = RUN_STATUS_URL_BASE + encodeURIComponent(jobIdsParam);
                 fetch(statusUrl, {
                     credentials: 'same-origin',
                     headers: {
@@ -154,6 +172,13 @@
                                             link: '/epos-qbo/runs/' + jobId + '/'
                                         });
                                 }
+                                window.dispatchEvent(new CustomEvent('oiat:run-completed', {
+                                    detail: {
+                                        jobId: jobId,
+                                        status: currentStatus,
+                                        failureReason: statusInfo.failure_reason || null,
+                                    }
+                                }));
 
                                 // Remove from polling list
                                 const index = this.activeRunIds.indexOf(jobId);
@@ -182,24 +207,61 @@
             });
         },
 
+        fetchGlobalActiveRunIds() {
+            return fetch(ACTIVE_RUNS_URL, {
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                }
+            })
+                .then((res) => {
+                    if (!res.ok) {
+                        return [];
+                    }
+                    return res.json();
+                })
+                .then((payload) => {
+                    if (!payload || !Array.isArray(payload.job_ids)) {
+                        return [];
+                    }
+                    return payload.job_ids.filter((value) => typeof value === 'string' && value.length > 0);
+                })
+                .catch(() => []);
+        },
+
+        mergeActiveRunIds(ids) {
+            if (!Array.isArray(ids) || ids.length === 0) {
+                return;
+            }
+            ids.forEach((id) => {
+                if (!this.activeRunIds.includes(id)) {
+                    this.activeRunIds.push(id);
+                }
+                if (!this.previousStatuses.has(id)) {
+                    this.previousStatuses.set(id, null);
+                }
+            });
+        },
+
         getActiveRunIds() {
             const runIds = [];
 
-            // Check for data attribute on body or main element
-            const bodyData = document.body.dataset.activeRuns;
-            const mainData = document.querySelector('main')?.dataset.activeRuns;
-            const activeRunsData = bodyData || mainData;
-
-            if (activeRunsData) {
+            // Check all data-active-runs sources on page
+            const sources = Array.from(document.querySelectorAll('[data-active-runs]'));
+            sources.forEach((node) => {
+                const value = node.getAttribute('data-active-runs');
+                if (!value) {
+                    return;
+                }
                 try {
-                    const ids = JSON.parse(activeRunsData);
+                    const ids = JSON.parse(value);
                     if (Array.isArray(ids)) {
                         runIds.push(...ids);
                     }
                 } catch (e) {
                     console.error('Error parsing active runs:', e);
                 }
-            }
+            });
 
             // Also check for run detail page
             const runDetailId = document.querySelector('[data-run-id]')?.dataset.runId;

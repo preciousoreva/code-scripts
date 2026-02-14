@@ -1,7 +1,12 @@
 (function () {
     'use strict';
+    const OVERVIEW_PANELS_URL = '/epos-qbo/dashboard/panels/';
+    const OVERVIEW_REFRESH_DEBOUNCE_MS = 800;
+    let revenueChart = null;
+    let refreshTimerId = null;
+    let completionListenerBound = false;
 
-    function initCompanyFilter() {
+    function initCompanyFilter(initialQuery) {
         const input = document.getElementById('overview-company-filter');
         if (!input) return;
 
@@ -25,6 +30,9 @@
             }
         };
 
+        if (typeof initialQuery === 'string') {
+            input.value = initialQuery;
+        }
         input.addEventListener('input', applyFilter);
         applyFilter();
     }
@@ -61,10 +69,45 @@
         }
     }
 
-    function initRevenueChart() {
+    function updateRevenueSummary(totalAmount, matchedDays) {
+        const totalEl = document.getElementById('overview-revenue-total');
+        if (totalEl) {
+            totalEl.textContent = formatCurrency(totalAmount || 0);
+        }
+        const matchedDaysEl = document.getElementById('overview-revenue-matched-days');
+        if (matchedDaysEl) {
+            matchedDaysEl.textContent = `Matched days in period: ${matchedDays || 0}`;
+        }
+    }
+
+    function bindRevenueCompanyFilter(selectedCompanyKey) {
+        const select = document.getElementById('overview-revenue-company');
+        if (!select) return 'all';
+        const available = Array.from(select.options).map((opt) => opt.value);
+        const normalized = selectedCompanyKey && available.includes(selectedCompanyKey) ? selectedCompanyKey : 'all';
+        select.value = normalized;
+        select.onchange = () => {
+            initRevenueChart(select.value);
+        };
+        return select.value;
+    }
+
+    function initRevenueChart(selectedCompanyKey) {
         const canvas = document.getElementById('overview-revenue-chart');
         const dataScript = document.getElementById('overview-revenue-chart-data');
-        if (!canvas || !dataScript || typeof Chart === 'undefined') return;
+        const companyKey = bindRevenueCompanyFilter(selectedCompanyKey);
+        if (!canvas || !dataScript || typeof Chart === 'undefined') {
+            if (revenueChart) {
+                revenueChart.destroy();
+                revenueChart = null;
+            }
+            return;
+        }
+
+        if (revenueChart) {
+            revenueChart.destroy();
+            revenueChart = null;
+        }
 
         let payload = null;
         try {
@@ -74,9 +117,20 @@
         }
         const labels = Array.isArray(payload.labels) ? payload.labels : [];
         const series = Array.isArray(payload.series) ? payload.series : [];
-        if (!labels.length || !series.length) return;
+        if (!labels.length || !series.length) {
+            updateRevenueSummary(0, 0);
+            return;
+        }
 
-        const datasets = series.map((item) => {
+        const filteredSeries = companyKey === 'all'
+            ? series
+            : series.filter((item) => item.company_key === companyKey);
+        if (!filteredSeries.length) {
+            updateRevenueSummary(0, 0);
+            return;
+        }
+
+        const datasets = filteredSeries.map((item) => {
             const stroke = colorForCompany(item.company_key || item.name);
             return {
                 label: item.name || item.company_key || 'Company',
@@ -91,9 +145,24 @@
             };
         });
 
+        let totalAmount = 0;
+        const dayTotals = Array(labels.length).fill(0);
+        filteredSeries.forEach((item) => {
+            const data = Array.isArray(item.data) ? item.data : [];
+            data.forEach((value, idx) => {
+                const amount = Number(value || 0);
+                totalAmount += amount;
+                if (idx < dayTotals.length) {
+                    dayTotals[idx] += amount;
+                }
+            });
+        });
+        const matchedDays = dayTotals.reduce((count, amount) => (amount > 0 ? count + 1 : count), 0);
+        updateRevenueSummary(totalAmount, matchedDays);
+
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        new Chart(ctx, {
+        revenueChart = new Chart(ctx, {
             type: 'line',
             data: { labels, datasets },
             options: {
@@ -138,9 +207,67 @@
         });
     }
 
-    function initOverview() {
-        initCompanyFilter();
-        initRevenueChart();
+    function currentRevenuePeriod() {
+        const select = document.getElementById('overview-revenue-period');
+        if (!select) return '7d';
+        const value = (select.value || '').trim().toLowerCase();
+        if (['yesterday', '7d', '30d', '90d'].includes(value)) {
+            return value;
+        }
+        return '7d';
+    }
+
+    function refreshOverviewPanels() {
+        const root = document.getElementById('overview-panels-root');
+        if (!root) return;
+        const existingFilter = document.getElementById('overview-company-filter');
+        const filterQuery = existingFilter ? existingFilter.value : '';
+        const existingCompany = document.getElementById('overview-revenue-company');
+        const revenueCompany = existingCompany ? existingCompany.value : 'all';
+        const period = currentRevenuePeriod();
+        const requestUrl = `${OVERVIEW_PANELS_URL}?revenue_period=${encodeURIComponent(period)}`;
+
+        fetch(requestUrl, {
+            credentials: 'same-origin',
+            headers: {
+                Accept: 'text/html',
+            },
+        })
+            .then((response) => {
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                return response.text();
+            })
+            .then((html) => {
+                root.innerHTML = html;
+                initOverview({ filterQuery, revenueCompany });
+            })
+            .catch(() => {
+                // Best-effort refresh: keep current panel content when request fails.
+            });
+    }
+
+    function scheduleOverviewRefresh() {
+        if (refreshTimerId) {
+            clearTimeout(refreshTimerId);
+        }
+        refreshTimerId = window.setTimeout(() => {
+            refreshOverviewPanels();
+            refreshTimerId = null;
+        }, OVERVIEW_REFRESH_DEBOUNCE_MS);
+    }
+
+    function bindCompletionRefresh() {
+        if (completionListenerBound) return;
+        window.addEventListener('oiat:run-completed', scheduleOverviewRefresh);
+        completionListenerBound = true;
+    }
+
+    function initOverview(options = {}) {
+        initCompanyFilter(options.filterQuery || '');
+        initRevenueChart(options.revenueCompany || 'all');
+        bindCompletionRefresh();
     }
 
     if (document.readyState === 'loading') {

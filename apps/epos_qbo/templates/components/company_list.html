@@ -24,10 +24,7 @@
                         </div>
                         <div>
                             <h4 class="text-sm font-medium text-slate-900">{{ company.name }}</h4>
-                            <p class="text-xs text-slate-500">
-                                Last run:
-                                {{ company.last_run|date:"M j, Y H:i" }}
-                            </p>
+                            <p class="text-xs text-slate-500">Last run: {% if company.last_run %}{{ company.last_run|date:"M j, Y H:i" }}{% else %}Never run{% endif %}</p>
                         </div>
                     </div>
 
@@ -49,7 +46,7 @@
                     {% endif %}
                 </div>
 
-                <div class="grid grid-cols-3 gap-4 pl-11">
+                <div class="grid grid-cols-3 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100">
                     <div>
                         <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-medium">Records</span>
                         <span class="text-xs font-medium text-slate-700">
@@ -92,27 +89,39 @@
             <div>
                 <h3 class="text-sm font-semibold text-slate-900">Reconciled EPOS Revenue</h3>
                 <p class="text-xs text-slate-500 mt-1">
-                    MATCH-only reconciliations. Total for selected period: <span class="font-medium text-slate-700">NGN {{ revenue_total_epos|floatformat:2 }}</span>
+                    MATCH-only reconciliations. Total for selected period: <span id="overview-revenue-total" class="font-medium text-slate-700">NGN {{ revenue_total_epos|floatformat:2 }}</span>
                 </p>
             </div>
-            <form method="get" class="shrink-0">
-                {% for key, value in request.GET.items %}
-                    {% if key != "revenue_period" %}
-                    <input type="hidden" name="{{ key }}" value="{{ value }}">
-                    {% endif %}
-                {% endfor %}
-                <label class="sr-only" for="overview-revenue-period">Revenue period</label>
+            <div class="flex items-center gap-2 shrink-0">
+                <label class="sr-only" for="overview-revenue-company">Company filter</label>
                 <select
-                    id="overview-revenue-period"
-                    name="revenue_period"
-                    onchange="this.form.submit()"
+                    id="overview-revenue-company"
                     class="px-2.5 py-1.5 bg-white border border-slate-200 rounded-md text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-100"
                 >
-                    {% for option in revenue_period_options %}
-                    <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                    <option value="all">All Companies</option>
+                    {% for company in companies %}
+                    <option value="{{ company.company_key }}">{{ company.name }}</option>
                     {% endfor %}
                 </select>
-            </form>
+                <form method="get" class="shrink-0">
+                    {% for key, value in request.GET.items %}
+                        {% if key != "revenue_period" %}
+                        <input type="hidden" name="{{ key }}" value="{{ value }}">
+                        {% endif %}
+                    {% endfor %}
+                    <label class="sr-only" for="overview-revenue-period">Revenue period</label>
+                    <select
+                        id="overview-revenue-period"
+                        name="revenue_period"
+                        onchange="this.form.submit()"
+                        class="px-2.5 py-1.5 bg-white border border-slate-200 rounded-md text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-100"
+                    >
+                        {% for option in revenue_period_options %}
+                        <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                        {% endfor %}
+                    </select>
+                </form>
+            </div>
         </div>
 
         {% if has_reconciled_revenue_data %}
@@ -125,7 +134,7 @@
             Data will populate automatically as new reconciled runs complete.
         </div>
         {% endif %}
-        <p class="text-[11px] text-slate-400">Matched days in period: {{ revenue_matched_days }}</p>
+        <p id="overview-revenue-matched-days" class="text-[11px] text-slate-400">Matched days in period: {{ revenue_matched_days }}</p>
     </div>
 
     {{ revenue_chart_payload|json_script:"overview-revenue-chart-data" }}

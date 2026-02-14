@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections import Counter
 from datetime import datetime, timedelta
 from math import ceil
 
@@ -38,9 +37,9 @@ REVENUE_PERIOD_DAYS = {
 }
 REVENUE_PERIOD_OPTIONS = [
     ("yesterday", "Yesterday"),
-    ("7d", "Last 7d"),
-    ("30d", "Last 30d"),
-    ("90d", "Last 90d"),
+    ("7d", "Last 7D"),
+    ("30d", "Last 30D"),
+    ("90d", "Last 90D"),
 ]
 REAUTH_GUIDANCE = (
     "QBO re-authentication required. Run OAuth flow and store tokens using "
@@ -104,7 +103,7 @@ def _format_day_count(seconds: int) -> int:
 
 def _normalize_revenue_period(value: str | None) -> str:
     selected = (value or "").strip().lower()
-    return selected if selected in REVENUE_PERIOD_DAYS else "30d"
+    return selected if selected in REVENUE_PERIOD_DAYS else "7d"
 
 
 def _exit_code_info(exit_code: int | None) -> dict | None:
@@ -332,19 +331,6 @@ def _company_token_health(company: CompanyConfigRecord) -> dict:
     }
 
 
-def _job_failure_source(job: RunJob) -> str:
-    text = (job.failure_reason or "").lower()
-    if "mapping" in text:
-        return "mapping"
-    if "inventory" in text:
-        return "inventory"
-    if "token" in text or "auth" in text:
-        return "auth"
-    if "network" in text or "timeout" in text:
-        return "network"
-    return "other"
-
-
 def _overview_live_log_message(job: RunJob, company_display: str) -> str:
     run_label = job.display_label
     if job.status == RunJob.STATUS_SUCCEEDED:
@@ -395,11 +381,10 @@ def _status_for_company(
     return "healthy", "Last run succeeded."
 
 
-def _overview_context(revenue_period: str = "30d") -> dict:
+def _overview_context(revenue_period: str = "7d") -> dict:
     now = timezone.now()
     since_24h = now - timedelta(hours=24)
     since_7d = now - timedelta(days=7)
-    since_60d = now - timedelta(days=60)
     revenue_period = _normalize_revenue_period(revenue_period)
 
     artifacts_24h = RunArtifact.objects.filter(imported_at__gte=since_24h)
@@ -427,6 +412,13 @@ def _overview_context(revenue_period: str = "30d") -> dict:
         latest_job = latest_jobs.get(company.company_key)
         token_info = _company_token_health(company)
         status, summary = _status_for_company(company, latest_artifact, latest_job, token_info)
+        latest_job_time = None
+        if latest_job:
+            latest_job_time = latest_job.finished_at or latest_job.started_at or latest_job.created_at
+        latest_artifact_time = None
+        if latest_artifact:
+            latest_artifact_time = latest_artifact.processed_at or latest_artifact.imported_at
+        last_run_time = latest_job_time or latest_artifact_time
 
         if status == "healthy":
             healthy_count += 1
@@ -439,7 +431,7 @@ def _overview_context(revenue_period: str = "30d") -> dict:
             {
                 "name": company.display_name,
                 "company_key": company.company_key,
-                "last_run": latest_job.finished_at if latest_job else None,
+                "last_run": last_run_time,
                 "status": status,
                 "token_info": token_info,
                 "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
@@ -464,45 +456,6 @@ def _overview_context(revenue_period: str = "30d") -> dict:
             level = "warning"
         message = _overview_live_log_message(job, company_display)
         live_log.append({"timestamp": job.created_at, "level": level, "message": message})
-
-    daily_success = []
-    reliability_7d_total_runs = 0
-    reliability_7d_success_runs = 0
-    reliability_7d_failed_runs = 0
-    for day_index in range(7):
-        day = (now - timedelta(days=6 - day_index)).date()
-        day_jobs = RunJob.objects.filter(created_at__date=day)
-        total = day_jobs.count()
-        succeeded = day_jobs.filter(status=RunJob.STATUS_SUCCEEDED).count()
-        failed = day_jobs.filter(status=RunJob.STATUS_FAILED).count()
-        rate = round((succeeded * 100 / total), 1) if total else None
-        daily_success.append(
-            {
-                "label": day.strftime("%a"),
-                "runs_total": total,
-                "runs_succeeded": succeeded,
-                "rate": rate,
-            }
-        )
-        reliability_7d_total_runs += total
-        reliability_7d_success_runs += succeeded
-        reliability_7d_failed_runs += failed
-
-    failure_jobs = RunJob.objects.filter(status=RunJob.STATUS_FAILED, created_at__gte=since_60d)
-    source_counts = Counter(_job_failure_source(job) for job in failure_jobs)
-    total_sources = sum(source_counts.values())
-    failure_sources = []
-    for label, key in [
-        ("Mapping", "mapping"),
-        ("Inventory", "inventory"),
-        ("Auth/Token", "auth"),
-        ("Network", "network"),
-        ("Other", "other"),
-    ]:
-        count = source_counts.get(key, 0)
-        percentage = round((count * 100 / total_sources), 1) if total_sources else 0.0
-        failure_sources.append({"label": label, "count": count, "percentage": percentage})
-    failure_sources_nonzero = [source for source in failure_sources if source["count"] > 0]
 
     revenue_days = REVENUE_PERIOD_DAYS[revenue_period]
     revenue_end_date = (now - timedelta(days=1)).date()
@@ -585,13 +538,6 @@ def _overview_context(revenue_period: str = "30d") -> dict:
         "companies": companies_context,
         "live_log": live_log,
         "company_count": len(companies_context),
-        "daily_success": daily_success,
-        "failure_sources": failure_sources,
-        "failure_sources_nonzero": failure_sources_nonzero,
-        "failure_sources_total_60d": total_sources,
-        "reliability_7d_total_runs": reliability_7d_total_runs,
-        "reliability_7d_success_runs": reliability_7d_success_runs,
-        "reliability_7d_failed_runs": reliability_7d_failed_runs,
         "revenue_period": revenue_period,
         "revenue_period_options": [
             {"value": value, "label": label, "selected": value == revenue_period}
@@ -625,6 +571,15 @@ def overview(request):
         )
     )
     return render(request, "dashboard/overview.html", context)
+
+
+@login_required
+@require_GET
+def overview_panels(request):
+    _ensure_company_records()
+    revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
+    context = _overview_context(revenue_period)
+    return render(request, "components/overview_panels.html", context)
 
 
 @login_required
@@ -851,6 +806,17 @@ def run_logs(request, job_id):
         raise Http404("Invalid offset")
     chunk, next_offset = read_log_chunk(job, offset)
     return JsonResponse({"chunk": chunk, "next_offset": next_offset, "status": job.status})
+
+
+@login_required
+@require_GET
+def run_active_ids(request):
+    active_runs = (
+        RunJob.objects.filter(status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING])
+        .order_by("-created_at")
+        .values_list("id", flat=True)[:25]
+    )
+    return JsonResponse({"job_ids": [str(job_id) for job_id in active_runs]})
 
 
 @login_required

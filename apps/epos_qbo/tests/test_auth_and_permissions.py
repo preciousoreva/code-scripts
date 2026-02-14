@@ -39,6 +39,15 @@ class AuthAndPermissionsTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertIn("/login/", response.url)
 
+    def test_new_overview_and_run_status_endpoints_require_login(self):
+        response_panels = self.client.get(reverse("epos_qbo:overview-panels"))
+        self.assertEqual(response_panels.status_code, 302)
+        self.assertIn("/login/", response_panels.url)
+
+        response_active = self.client.get(reverse("epos_qbo:run-active-ids"))
+        self.assertEqual(response_active.status_code, 302)
+        self.assertIn("/login/", response_active.url)
+
     def test_trigger_requires_permission(self):
         self.client.login(username="operator", password="pw12345")
         response = self.client.post(
