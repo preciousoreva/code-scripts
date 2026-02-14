@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from apps.epos_qbo.models import RunArtifact, RunJob
 from apps.epos_qbo.services.metrics import (
+    compute_sales_day_snapshot_for_companies,
     compute_sales_trend,
     compute_sales_trend_for_companies,
     extract_amount,
@@ -312,3 +313,77 @@ class SalesTrendMetricsTests(TestCase):
         )
         self.assertEqual(trend_flat["trend_dir"], "flat")
         self.assertIn("—", trend_flat["trend_text"])
+
+    def test_compute_sales_day_snapshot_uses_latest_succeeded_per_company(self):
+        self._create_artifact(
+            source_hash="today-company-a-old",
+            processed_at=self.fixed_now - timedelta(hours=10),
+            target_date=date(2026, 2, 13),
+            reconcile_total=3995250.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_a",
+        )
+        self._create_artifact(
+            source_hash="today-company-a-new",
+            processed_at=self.fixed_now - timedelta(hours=6),
+            target_date=date(2026, 2, 12),
+            reconcile_total=2645250.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_a",
+        )
+        self._create_artifact(
+            source_hash="today-company-b-old",
+            processed_at=self.fixed_now - timedelta(hours=9),
+            target_date=date(2026, 2, 13),
+            reconcile_total=9505350.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_b",
+        )
+        self._create_artifact(
+            source_hash="today-company-b-new",
+            processed_at=self.fixed_now - timedelta(hours=5),
+            target_date=date(2026, 2, 12),
+            reconcile_total=9374050.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_b",
+        )
+
+        trend = compute_sales_day_snapshot_for_companies(
+            ["company_a", "company_b"],
+            now=self.fixed_now,
+            prefer_reconcile=True,
+            comparison_label="vs yesterday",
+            flat_symbol="—",
+        )
+
+        self.assertEqual(trend["total"], Decimal("12019300.0"))
+        self.assertEqual(trend["sample_count"], 2)
+
+    def test_compute_sales_day_snapshot_uses_previous_day_for_comparison(self):
+        self._create_artifact(
+            source_hash="yesterday",
+            processed_at=self.fixed_now - timedelta(days=1, hours=2),
+            target_date=date(2026, 2, 13),
+            reconcile_total=100.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_a",
+        )
+        self._create_artifact(
+            source_hash="today",
+            processed_at=self.fixed_now - timedelta(hours=2),
+            target_date=date(2026, 2, 12),
+            reconcile_total=200.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_a",
+        )
+
+        trend = compute_sales_day_snapshot_for_companies(
+            ["company_a"],
+            now=self.fixed_now,
+            prefer_reconcile=True,
+            comparison_label="vs yesterday",
+            flat_symbol="—",
+        )
+        self.assertEqual(trend["total"], Decimal("200.0"))
+        self.assertEqual(trend["prev_total"], Decimal("100.0"))
+        self.assertEqual(trend["trend_dir"], "up")

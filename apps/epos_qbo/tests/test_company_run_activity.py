@@ -72,6 +72,118 @@ class CompanyRunActivityTests(TestCase):
         self.assertEqual(company_data["latest_run"].id, run.id)
         self.assertNotEqual(company_data["last_run_display"], "Never run")
 
+    def test_companies_list_records_24h_uses_uploaded_counts_with_day_dedupe(self):
+        same_day = self.fixed_now.date()
+        prev_day = (self.fixed_now - timedelta(days=1)).date()
+        old_day = (self.fixed_now - timedelta(days=2)).date()
+
+        # Same day: keep latest succeeded artifact only.
+        run_success_old = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(hours=4),
+        )
+        RunArtifact.objects.create(
+            run_job=run_success_old,
+            company_key=self.company.company_key,
+            target_date=same_day,
+            processed_at=self.fixed_now - timedelta(hours=4),
+            source_path="/tmp/company_a_day_old_success.json",
+            source_hash="hash-day-old-success",
+            upload_stats_json={"uploaded": 8},
+        )
+        run_success_new = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(hours=2),
+        )
+        RunArtifact.objects.create(
+            run_job=run_success_new,
+            company_key=self.company.company_key,
+            target_date=same_day,
+            processed_at=self.fixed_now - timedelta(hours=2),
+            source_path="/tmp/company_a_day_new_success.json",
+            source_hash="hash-day-new-success",
+            upload_stats_json={"uploaded": 10},
+        )
+        run_failed = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_FAILED,
+            started_at=self.fixed_now - timedelta(hours=1),
+        )
+        RunArtifact.objects.create(
+            run_job=run_failed,
+            company_key=self.company.company_key,
+            target_date=same_day,
+            processed_at=self.fixed_now - timedelta(hours=1),
+            source_path="/tmp/company_a_day_failed.json",
+            source_hash="hash-day-failed",
+            upload_stats_json={"uploaded": 999},
+        )
+        RunArtifact.objects.create(
+            company_key=self.company.company_key,
+            target_date=same_day,
+            processed_at=self.fixed_now - timedelta(minutes=30),
+            source_path="/tmp/company_a_day_unlinked.json",
+            source_hash="hash-day-unlinked",
+            upload_stats_json={"uploaded": 30},
+        )
+
+        # Previous day: no succeeded linked artifact; include latest unlinked fallback.
+        run_prev_failed = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_FAILED,
+            started_at=self.fixed_now - timedelta(hours=20),
+        )
+        RunArtifact.objects.create(
+            run_job=run_prev_failed,
+            company_key=self.company.company_key,
+            target_date=prev_day,
+            processed_at=self.fixed_now - timedelta(hours=20),
+            source_path="/tmp/company_a_prev_failed.json",
+            source_hash="hash-prev-failed",
+            upload_stats_json={"uploaded": 50},
+        )
+        RunArtifact.objects.create(
+            company_key=self.company.company_key,
+            target_date=prev_day,
+            processed_at=self.fixed_now - timedelta(hours=19),
+            source_path="/tmp/company_a_prev_unlinked.json",
+            source_hash="hash-prev-unlinked",
+            upload_stats_json={"created": 5},
+        )
+
+        # Outside 24h: ignored.
+        run_old_success = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(hours=30),
+        )
+        RunArtifact.objects.create(
+            run_job=run_old_success,
+            company_key=self.company.company_key,
+            target_date=old_day,
+            processed_at=self.fixed_now - timedelta(hours=30),
+            source_path="/tmp/company_a_old_success.json",
+            source_hash="hash-old-success",
+            upload_stats_json={"uploaded": 500},
+        )
+
+        with self._patch_time_and_tokens():
+            response = self.client.get(reverse("epos_qbo:companies-list"))
+
+        self.assertEqual(response.status_code, 200)
+        company_data = next(
+            item for item in response.context["companies_data"] if item["company"].company_key == self.company.company_key
+        )
+        # Day totals: 10 (latest succeeded same day) + 5 (legacy unlinked fallback) = 15.
+        self.assertEqual(company_data["records_24h"], 15)
+
     def test_company_detail_recent_runs_includes_all_companies_run_when_linked(self):
         run = RunJob.objects.create(
             scope=RunJob.SCOPE_ALL,

@@ -153,6 +153,125 @@ def _window_total_for_companies(
     return total
 
 
+def _snapshot_total_for_companies(
+    company_keys: list[str] | None,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    prefer_reconcile: bool = False,
+) -> tuple[Decimal, int]:
+    """
+    Sum monetary totals for a time window using one artifact per company (latest successful).
+
+    Windows are by processed_at (sync completion time), not target_date. For each company,
+    we keep the single best artifact in the window (succeeded preferred, then latest by
+    processed_at/imported_at). Uses one query per window with select_related to avoid N+1.
+    """
+    queryset = RunArtifact.objects.filter(
+        Q(processed_at__gte=start_at, processed_at__lt=end_at)
+        | Q(processed_at__isnull=True, imported_at__gte=start_at, imported_at__lt=end_at)
+    )
+    if company_keys is not None:
+        queryset = queryset.filter(company_key__in=company_keys)
+    queryset = queryset.select_related("run_job").order_by("company_key", "-processed_at", "-imported_at")
+
+    grouped: dict[str, list[RunArtifact]] = defaultdict(list)
+    for artifact in queryset:
+        grouped[artifact.company_key].append(artifact)
+
+    total = Decimal("0")
+    selected_count = 0
+    for company_artifacts in grouped.values():
+        selected = _choose_day_artifact(company_artifacts)
+        if selected is None:
+            continue
+        selected_count += 1
+        total += extract_amount_hybrid(selected, prefer_reconcile=prefer_reconcile)
+    return total, selected_count
+
+
+def compute_sales_day_snapshot_for_companies(
+    company_keys: list[str] | None,
+    *,
+    now: datetime | None = None,
+    prefer_reconcile: bool = False,
+    comparison_label: str = "vs yesterday",
+    flat_symbol: str = "—",
+    currency_symbol: str = "₦",
+) -> dict[str, Any]:
+    """
+    Today vs yesterday snapshot for the overview "Sales Synced (Today)" KPI.
+
+    Uses calendar-day windows by processed_at (when the run completed), not target_date.
+    One artifact per company per window (latest successful). Totals are from reconcile_epos_total
+    when prefer_reconcile=True. Compare to revenue chart which is by target_date over a range.
+    """
+    current = now or timezone.now()
+    if timezone.is_naive(current):
+        current = timezone.make_aware(current)
+    local_now = timezone.localtime(current)
+    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+
+    this_total, this_samples = _snapshot_total_for_companies(
+        company_keys,
+        start_at=today_start,
+        end_at=current,
+        prefer_reconcile=prefer_reconcile,
+    )
+    prev_total, prev_samples = _snapshot_total_for_companies(
+        company_keys,
+        start_at=yesterday_start,
+        end_at=today_start,
+        prefer_reconcile=prefer_reconcile,
+    )
+    delta = this_total - prev_total
+
+    is_new = False
+    if prev_total > 0:
+        pct_change = float((delta / prev_total) * Decimal("100"))
+    elif this_total > 0:
+        pct_change = 100.0
+        is_new = True
+    else:
+        pct_change = 0.0
+
+    if abs(pct_change) < 1.0:
+        trend_dir = "flat"
+    elif pct_change > 0:
+        trend_dir = "up"
+    else:
+        trend_dir = "down"
+
+    trend_color = {
+        "up": "emerald",
+        "down": "red",
+        "flat": "slate",
+    }[trend_dir]
+    trend_arrow = {
+        "up": "↑",
+        "down": "↓",
+        "flat": flat_symbol,
+    }[trend_dir]
+    if is_new:
+        trend_text = f"↑ New {comparison_label}"
+    else:
+        trend_text = f"{trend_arrow} {abs(pct_change):.1f}% {comparison_label}"
+
+    return {
+        "total": this_total,
+        "prev_total": prev_total,
+        "pct_change": pct_change,
+        "trend_dir": trend_dir,
+        "is_new": is_new,
+        "total_display": _format_currency(this_total, symbol=currency_symbol),
+        "trend_text": trend_text,
+        "trend_color": trend_color,
+        "sample_count": this_samples,
+        "prev_sample_count": prev_samples,
+    }
+
+
 def compute_sales_trend_for_companies(
     company_keys: list[str] | None,
     *,

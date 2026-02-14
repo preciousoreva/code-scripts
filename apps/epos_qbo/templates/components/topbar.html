@@ -28,10 +28,20 @@
                 </div>
 
                 {% if perms.epos_qbo.can_trigger_runs %}
-                <form method="post" action="{% url 'epos_qbo:run-trigger' %}">
+                <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="flex items-center gap-2"
+                      onsubmit="return confirm('Quick Sync will run all companies for target date ' + this.target_date.value + ' (timezone: {{ quick_sync_timezone|default:'UTC' }}). Continue?');">
                     {% csrf_token %}
                     <input type="hidden" name="scope" value="all_companies">
-                    <input type="hidden" name="date_mode" value="yesterday">
+                    <input type="hidden" name="date_mode" value="target_date">
+                    <label for="quick-sync-target-date" class="sr-only">Quick Sync target date</label>
+                    <input
+                        id="quick-sync-target-date"
+                        type="date"
+                        name="target_date"
+                        value="{{ quick_sync_target_date|default:'' }}"
+                        class="h-9 px-2.5 bg-white border border-slate-200 rounded-md text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-100"
+                        required
+                    >
                     <button type="submit" class="btn btn-primary">
                         <iconify-icon icon="solar:play-linear" width="16"></iconify-icon>
                         Quick Sync
