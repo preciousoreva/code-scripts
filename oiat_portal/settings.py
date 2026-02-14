@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "apps.core",
     "apps.epos_qbo",
+    "apps.dashboard",
 ]
 
 MIDDLEWARE = [

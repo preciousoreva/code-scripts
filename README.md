@@ -152,6 +152,14 @@ python run_all_companies.py --from-date 2025-01-29 --to-date 2025-01-31 --skip-d
 
 This script is intentionally thin — all business logic remains in `run_pipeline.py`. This makes it suitable for cron / Task Scheduler / daily automation where you want a single entry point that processes all companies sequentially.
 
+### Scheduled runs via Task Scheduler
+
+Scheduled runs should call `run_all_companies.cmd` at the repo root. That script activates the virtual environment and runs the Django management command `run_scheduled_all_companies`, which acquires the global lock, writes logs to `%TEMP%\epos_to_qbo_automation\run_all_companies.log`, and creates/updates a **RunJob** record so the run is visible in the Django dashboard. Do not call `code_scripts.run_all_companies` directly from the scheduler; use:
+
+```batch
+python manage.py run_scheduled_all_companies --parallel 2
+```
+
 ---
 
 ## OIAT Portal (Django Dashboard)
@@ -203,6 +211,7 @@ Assign these to users via Django Admin (`/admin/`). Superusers have all permissi
 | `python manage.py check_company_config_drift` | Detect mismatches between DB and JSON configs |
 | `python manage.py ingest_run_history --days 60` | Import historical run metadata from Uploaded/ |
 | `python manage.py reconcile_run_jobs` | Mark stuck running jobs as failed (reaper) |
+| `python manage.py run_scheduled_all_companies --parallel 2` | Run all companies under global lock and log to %TEMP%; creates RunJob for dashboard (used by Task Scheduler) |
 
 ### Portal Dashboard Tuning (Environment Variables)
 
