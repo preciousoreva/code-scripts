@@ -8,7 +8,12 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.epos_qbo.models import RunArtifact, RunJob
-from apps.epos_qbo.services.metrics import compute_sales_trend, extract_amount
+from apps.epos_qbo.services.metrics import (
+    compute_sales_trend,
+    compute_sales_trend_for_companies,
+    extract_amount,
+    extract_amount_hybrid,
+)
 
 
 class SalesTrendMetricsTests(TestCase):
@@ -72,6 +77,19 @@ class SalesTrendMetricsTests(TestCase):
             reconcile_epos_total=145000.75,
         )
         self.assertEqual(extract_amount(artifact), Decimal("145000.75"))
+
+    def test_extract_amount_hybrid_can_prefer_reconcile_first(self):
+        artifact = RunArtifact(
+            company_key=self.company_key,
+            source_path="/tmp/bb.json",
+            source_hash="hash-bb",
+            upload_stats_json={"total_amount": "100"},
+            reconcile_epos_total=250.0,
+        )
+        self.assertEqual(
+            extract_amount_hybrid(artifact, prefer_reconcile=True),
+            Decimal("250.0"),
+        )
 
     def test_extract_amount_missing_sources_returns_zero_and_logs_warning(self):
         artifact = RunArtifact(
@@ -244,3 +262,53 @@ class SalesTrendMetricsTests(TestCase):
 
         trend = compute_sales_trend(self.company_key, now=self.fixed_now)
         self.assertEqual(trend["sales_7d_total"], Decimal("75"))
+
+    def test_compute_sales_trend_for_companies_prev_zero_math_and_label(self):
+        self._create_artifact(
+            source_hash="ov-new",
+            processed_at=self.fixed_now - timedelta(hours=2),
+            target_date=date(2026, 2, 14),
+            reconcile_total=1200.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+        )
+        trend = compute_sales_trend_for_companies(
+            [self.company_key],
+            now=self.fixed_now,
+            window_hours=24,
+            prefer_reconcile=True,
+            comparison_label="vs yesterday",
+            flat_symbol="—",
+        )
+        self.assertEqual(trend["total"], Decimal("1200.0"))
+        self.assertEqual(trend["prev_total"], Decimal("0"))
+        self.assertEqual(trend["pct_change"], 100.0)
+        self.assertTrue(trend["is_new"])
+        self.assertEqual(trend["trend_text"], "↑ New vs yesterday")
+
+    def test_compute_sales_trend_for_companies_trend_dir_classification(self):
+        self._create_artifact(
+            source_hash="ov-flat-prev",
+            processed_at=self.fixed_now - timedelta(hours=30),
+            target_date=date(2026, 2, 13),
+            reconcile_total=100.0,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_flat_ov",
+        )
+        self._create_artifact(
+            source_hash="ov-flat-this",
+            processed_at=self.fixed_now - timedelta(hours=6),
+            target_date=date(2026, 2, 14),
+            reconcile_total=100.5,
+            run_status=RunJob.STATUS_SUCCEEDED,
+            company_key="company_flat_ov",
+        )
+        trend_flat = compute_sales_trend_for_companies(
+            ["company_flat_ov"],
+            now=self.fixed_now,
+            window_hours=24,
+            prefer_reconcile=True,
+            comparison_label="vs yesterday",
+            flat_symbol="—",
+        )
+        self.assertEqual(trend_flat["trend_dir"], "flat")
+        self.assertIn("—", trend_flat["trend_text"])

@@ -65,15 +65,18 @@ def _format_currency(value: Decimal, symbol: str = "₦") -> str:
     return f"{symbol}{int(rounded):,}"
 
 
-def extract_amount(artifact: RunArtifact) -> Decimal:
+def extract_amount_hybrid(artifact: RunArtifact, *, prefer_reconcile: bool = False) -> Decimal:
     stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    reconcile_total = _to_decimal(artifact.reconcile_epos_total)
+    if prefer_reconcile and reconcile_total is not None:
+        return reconcile_total
+
     for key in AMOUNT_KEYS:
         parsed = _to_decimal(stats.get(key))
         if parsed is not None:
             return parsed
 
-    reconcile_total = _to_decimal(artifact.reconcile_epos_total)
-    if reconcile_total is not None:
+    if not prefer_reconcile and reconcile_total is not None:
         return reconcile_total
 
     anchor = _artifact_anchor(artifact)
@@ -84,6 +87,10 @@ def extract_amount(artifact: RunArtifact) -> Decimal:
         anchor.isoformat() if anchor else None,
     )
     return Decimal("0")
+
+
+def extract_amount(artifact: RunArtifact) -> Decimal:
+    return extract_amount_hybrid(artifact, prefer_reconcile=False)
 
 
 def _choose_day_artifact(artifacts: list[RunArtifact]) -> RunArtifact | None:
@@ -115,49 +122,72 @@ def _choose_day_artifact(artifacts: list[RunArtifact]) -> RunArtifact | None:
     return None
 
 
-def _window_total(company_key: str, *, start_at: datetime, end_at: datetime) -> Decimal:
-    queryset = (
-        RunArtifact.objects.filter(company_key=company_key)
-        .filter(
-            Q(processed_at__gte=start_at, processed_at__lt=end_at)
-            | Q(processed_at__isnull=True, imported_at__gte=start_at, imported_at__lt=end_at)
-        )
-        .select_related("run_job")
-        .order_by("-processed_at", "-imported_at")
+def _window_total_for_companies(
+    company_keys: list[str] | None,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    prefer_reconcile: bool = False,
+) -> Decimal:
+    queryset = RunArtifact.objects.filter(
+        Q(processed_at__gte=start_at, processed_at__lt=end_at)
+        | Q(processed_at__isnull=True, imported_at__gte=start_at, imported_at__lt=end_at)
     )
+    if company_keys is not None:
+        queryset = queryset.filter(company_key__in=company_keys)
+    queryset = queryset.select_related("run_job").order_by("company_key", "-processed_at", "-imported_at")
 
-    grouped: dict[Any, list[RunArtifact]] = defaultdict(list)
+    grouped: dict[tuple[str, Any], list[RunArtifact]] = defaultdict(list)
     for artifact in queryset:
         day_key = _artifact_day_key(artifact)
         if day_key is None:
             continue
-        grouped[day_key].append(artifact)
+        grouped[(artifact.company_key, day_key)].append(artifact)
 
     total = Decimal("0")
     for day_artifacts in grouped.values():
         selected = _choose_day_artifact(day_artifacts)
         if selected is None:
             continue
-        total += extract_amount(selected)
+        total += extract_amount_hybrid(selected, prefer_reconcile=prefer_reconcile)
     return total
 
 
-def compute_sales_trend(company_key: str, *, now: datetime | None = None) -> dict[str, Any]:
+def compute_sales_trend_for_companies(
+    company_keys: list[str] | None,
+    *,
+    now: datetime | None = None,
+    window_hours: int = 24,
+    prefer_reconcile: bool = False,
+    comparison_label: str = "vs previous period",
+    flat_symbol: str = "→",
+    currency_symbol: str = "₦",
+) -> dict[str, Any]:
     current = now or timezone.now()
     if timezone.is_naive(current):
         current = timezone.make_aware(current)
 
-    this_week_start = current - timedelta(days=7)
-    prev_week_start = current - timedelta(days=14)
+    this_window_start = current - timedelta(hours=window_hours)
+    prev_window_start = current - timedelta(hours=window_hours * 2)
 
-    this_week_total = _window_total(company_key, start_at=this_week_start, end_at=current)
-    prev_week_total = _window_total(company_key, start_at=prev_week_start, end_at=this_week_start)
-    delta = this_week_total - prev_week_total
+    this_total = _window_total_for_companies(
+        company_keys,
+        start_at=this_window_start,
+        end_at=current,
+        prefer_reconcile=prefer_reconcile,
+    )
+    prev_total = _window_total_for_companies(
+        company_keys,
+        start_at=prev_window_start,
+        end_at=this_window_start,
+        prefer_reconcile=prefer_reconcile,
+    )
+    delta = this_total - prev_total
 
     is_new = False
-    if prev_week_total > 0:
-        pct_change = float((delta / prev_week_total) * Decimal("100"))
-    elif this_week_total > 0:
+    if prev_total > 0:
+        pct_change = float((delta / prev_total) * Decimal("100"))
+    elif this_total > 0:
         pct_change = 100.0
         is_new = True
     else:
@@ -178,20 +208,41 @@ def compute_sales_trend(company_key: str, *, now: datetime | None = None) -> dic
     trend_arrow = {
         "up": "↑",
         "down": "↓",
-        "flat": "→",
+        "flat": flat_symbol,
     }[trend_dir]
     if is_new:
-        trend_text = "↑ New vs last week"
+        trend_text = f"↑ New {comparison_label}"
     else:
-        trend_text = f"{trend_arrow} {abs(pct_change):.1f}% vs last week"
+        trend_text = f"{trend_arrow} {abs(pct_change):.1f}% {comparison_label}"
 
     return {
-        "sales_7d_total": this_week_total,
-        "sales_7d_prev_total": prev_week_total,
-        "sales_7d_pct_change": pct_change,
-        "sales_7d_trend_dir": trend_dir,
-        "sales_7d_is_new": is_new,
-        "sales_7d_total_display": _format_currency(this_week_total),
-        "sales_7d_trend_text": trend_text,
-        "sales_7d_trend_color": trend_color,
+        "total": this_total,
+        "prev_total": prev_total,
+        "pct_change": pct_change,
+        "trend_dir": trend_dir,
+        "is_new": is_new,
+        "total_display": _format_currency(this_total, symbol=currency_symbol),
+        "trend_text": trend_text,
+        "trend_color": trend_color,
+    }
+
+
+def compute_sales_trend(company_key: str, *, now: datetime | None = None) -> dict[str, Any]:
+    trend = compute_sales_trend_for_companies(
+        [company_key],
+        now=now,
+        window_hours=24 * 7,
+        prefer_reconcile=False,
+        comparison_label="vs last week",
+        flat_symbol="→",
+    )
+    return {
+        "sales_7d_total": trend["total"],
+        "sales_7d_prev_total": trend["prev_total"],
+        "sales_7d_pct_change": trend["pct_change"],
+        "sales_7d_trend_dir": trend["trend_dir"],
+        "sales_7d_is_new": trend["is_new"],
+        "sales_7d_total_display": trend["total_display"],
+        "sales_7d_trend_text": trend["trend_text"],
+        "sales_7d_trend_color": trend["trend_color"],
     }

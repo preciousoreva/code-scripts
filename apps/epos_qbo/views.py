@@ -27,7 +27,7 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
-from .services.metrics import compute_sales_trend
+from .services.metrics import compute_sales_trend, compute_sales_trend_for_companies
 
 ACCESS_REFRESH_MARGIN_SECONDS = 60
 REVENUE_PERIOD_DAYS = {
@@ -415,14 +415,34 @@ def _status_for_company(
     return "healthy", "Last run succeeded."
 
 
+def _classify_system_health(healthy_count: int, warning_count: int, critical_count: int) -> dict:
+    if critical_count > 0:
+        return {
+            "label": "Degraded",
+            "severity": "critical",
+            "color": "red",
+            "icon": "solar:close-circle-linear",
+        }
+    if warning_count > 0:
+        return {
+            "label": "Warning",
+            "severity": "warning",
+            "color": "amber",
+            "icon": "solar:danger-triangle-linear",
+        }
+    return {
+        "label": "All Operational",
+        "severity": "healthy",
+        "color": "emerald",
+        "icon": "solar:shield-check-linear",
+    }
+
+
 def _overview_context(revenue_period: str = "7d") -> dict:
     now = timezone.now()
     since_24h = now - timedelta(hours=24)
     since_7d = now - timedelta(days=7)
     revenue_period = _normalize_revenue_period(revenue_period)
-
-    artifacts_24h = RunArtifact.objects.filter(imported_at__gte=since_24h)
-    records_synced_24h = sum(int(a.rows_kept or 0) for a in artifacts_24h)
 
     companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
     company_keys = [company.company_key for company in companies]
@@ -472,6 +492,35 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "summary": summary,
             }
         )
+
+    system_health = _classify_system_health(healthy_count, warning_count, critical_count)
+    system_health_breakdown = f"{healthy_count} healthy • {warning_count} warning • {critical_count} critical"
+
+    sales_trend = compute_sales_trend_for_companies(
+        company_keys,
+        now=now,
+        window_hours=24,
+        prefer_reconcile=True,
+        comparison_label="vs yesterday",
+        flat_symbol="—",
+    )
+
+    completed_runs_24h = RunJob.objects.filter(
+        created_at__gte=since_24h,
+        status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
+    )
+    successful_runs_24h = completed_runs_24h.filter(status=RunJob.STATUS_SUCCEEDED).count()
+    total_completed_runs_24h = completed_runs_24h.count()
+    run_success_pct_24h = (
+        round((successful_runs_24h / total_completed_runs_24h) * 100, 1)
+        if total_completed_runs_24h > 0
+        else 0.0
+    )
+    run_success_ratio_24h = (
+        f"{successful_runs_24h}/{total_completed_runs_24h}"
+        if total_completed_runs_24h > 0
+        else "0/0"
+    )
 
     recent_jobs = RunJob.objects.order_by("-created_at")[:20]
     live_log = []
@@ -563,7 +612,23 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             "healthy_count": healthy_count,
             "warning_count": warning_count,
             "critical_count": critical_count,
-            "records_synced_24h": records_synced_24h,
+            "system_health_label": system_health["label"],
+            "system_health_severity": system_health["severity"],
+            "system_health_color": system_health["color"],
+            "system_health_icon": system_health["icon"],
+            "system_health_breakdown": system_health_breakdown,
+            "sales_24h_total": sales_trend["total"],
+            "sales_prev_24h_total": sales_trend["prev_total"],
+            "sales_24h_pct_change": sales_trend["pct_change"],
+            "sales_24h_trend_dir": sales_trend["trend_dir"],
+            "sales_24h_is_new": sales_trend["is_new"],
+            "sales_24h_total_display": sales_trend["total_display"],
+            "sales_24h_trend_text": sales_trend["trend_text"],
+            "sales_24h_trend_color": sales_trend["trend_color"],
+            "successful_runs_24h": successful_runs_24h,
+            "total_completed_runs_24h": total_completed_runs_24h,
+            "run_success_pct_24h": run_success_pct_24h,
+            "run_success_ratio_24h": run_success_ratio_24h,
             "queued_or_running": RunJob.objects.filter(
                 status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
             ).count(),

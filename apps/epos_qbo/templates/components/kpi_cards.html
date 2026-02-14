@@ -1,66 +1,71 @@
 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-    <!-- Healthy Card -->
-    <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-emerald-200 transition-colors">
+    <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group transition-colors {% if kpis.system_health_color == 'red' %}hover:border-red-200{% elif kpis.system_health_color == 'amber' %}hover:border-amber-200{% else %}hover:border-emerald-200{% endif %}">
         <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Healthy Companies</span>
-            <div class="p-1.5 rounded-md bg-emerald-50 text-emerald-600">
-                <iconify-icon icon="solar:shield-check-linear" width="20"></iconify-icon>
-            </div>
-        </div>
-        <div>
-            <span class="text-3xl font-semibold tracking-tight text-slate-900">
-                {{ kpis.healthy_count }}
-            </span>
-        </div>
-        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
-    </div>
-
-    <!-- Warning Card -->
-    <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-amber-200 transition-colors">
-        <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Warnings</span>
-            <div class="p-1.5 rounded-md bg-amber-50 text-amber-600">
-                <iconify-icon icon="solar:danger-triangle-linear" width="20"></iconify-icon>
-            </div>
-        </div>
-        <div>
-            <span class="text-3xl font-semibold tracking-tight text-slate-900">
-                {{ kpis.warning_count }}
-            </span>
-        </div>
-        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
-    </div>
-
-    <!-- Critical Card -->
-    <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-red-200 transition-colors">
-        <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Critical Errors</span>
-            <div class="p-1.5 rounded-md bg-red-50 text-red-600">
+            <span class="text-sm font-medium text-slate-500">System Health</span>
+            <div class="p-1.5 rounded-md {% if kpis.system_health_color == 'red' %}bg-red-50 text-red-600{% elif kpis.system_health_color == 'amber' %}bg-amber-50 text-amber-600{% else %}bg-emerald-50 text-emerald-600{% endif %}">
+                {% if kpis.system_health_severity == "critical" %}
                 <iconify-icon icon="solar:close-circle-linear" width="20"></iconify-icon>
+                {% elif kpis.system_health_severity == "warning" %}
+                <iconify-icon icon="solar:danger-triangle-linear" width="20"></iconify-icon>
+                {% else %}
+                <iconify-icon icon="solar:shield-check-linear" width="20"></iconify-icon>
+                {% endif %}
             </div>
         </div>
         <div>
-            <span class="text-3xl font-semibold tracking-tight text-slate-900">
-                {{ kpis.critical_count }}
-            </span>
+            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.system_health_label|default:"All Operational" }}</span>
+            <p class="text-xs text-slate-500 mt-1">
+                {% if kpis.system_health_breakdown %}
+                    {{ kpis.system_health_breakdown }}
+                {% else %}
+                    {{ kpis.healthy_count|default:0 }} healthy • {{ kpis.warning_count|default:0 }} warning • {{ kpis.critical_count|default:0 }} critical
+                {% endif %}
+            </p>
         </div>
-        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-red-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+        <div class="absolute bottom-0 left-0 right-0 h-1 {% if kpis.system_health_color == 'red' %}bg-gradient-to-r from-red-500 to-transparent{% elif kpis.system_health_color == 'amber' %}bg-gradient-to-r from-amber-500 to-transparent{% else %}bg-gradient-to-r from-emerald-500 to-transparent{% endif %} opacity-0 group-hover:opacity-100 transition-opacity"></div>
     </div>
 
-    <!-- Volume Card -->
     <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-blue-200 transition-colors">
         <div class="flex justify-between items-start">
-            <span class="text-sm font-medium text-slate-500">Records Synced (24h)</span>
+            <span class="text-sm font-medium text-slate-500">Run Success (24H)</span>
             <div class="p-1.5 rounded-md bg-blue-50 text-blue-600">
-                <iconify-icon icon="solar:database-linear" width="20"></iconify-icon>
+                <iconify-icon icon="solar:checklist-minimalistic-linear" width="20"></iconify-icon>
             </div>
         </div>
         <div>
-            <span class="text-3xl font-semibold tracking-tight text-slate-900">
-                {{ kpis.records_synced_24h }}
-            </span>
+            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.run_success_ratio_24h|default:"0/0" }}</span>
+            <p class="text-xs text-slate-500 mt-1">{{ kpis.run_success_pct_24h|default:0|floatformat:1 }}% succeeded</p>
         </div>
         <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
     </div>
-</div>
 
+    <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-indigo-200 transition-colors">
+        <div class="flex justify-between items-start">
+            <span class="text-sm font-medium text-slate-500">Active Runs</span>
+            <div class="p-1.5 rounded-md bg-indigo-50 text-indigo-600">
+                <iconify-icon icon="solar:refresh-circle-linear" width="20"></iconify-icon>
+            </div>
+        </div>
+        <div>
+            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.queued_or_running }}</span>
+            <p class="text-xs text-slate-500 mt-1">{{ kpis.runs_7d }} run{{ kpis.runs_7d|pluralize }} in last 7 days</p>
+        </div>
+        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-indigo-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+    </div>
+
+    <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between h-32 relative overflow-hidden group hover:border-emerald-200 transition-colors">
+        <div class="flex justify-between items-start">
+            <span class="text-sm font-medium text-slate-500">Sales Synced (24H)</span>
+            <div class="p-1.5 rounded-md bg-emerald-50 text-emerald-600">
+                <iconify-icon icon="solar:wallet-money-linear" width="20"></iconify-icon>
+            </div>
+        </div>
+        <div>
+            <span class="text-3xl font-semibold tracking-tight text-slate-900">{{ kpis.sales_24h_total_display|default:"₦0" }}</span>
+            <p class="text-xs mt-1 {% if kpis.sales_24h_trend_color == 'emerald' %}text-emerald-600{% elif kpis.sales_24h_trend_color == 'red' %}text-red-600{% else %}text-slate-500{% endif %}">
+                {{ kpis.sales_24h_trend_text|default:"— 0.0% vs yesterday" }}
+            </p>
+        </div>
+        <div class="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+    </div>
+</div>

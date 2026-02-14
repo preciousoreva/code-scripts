@@ -57,6 +57,55 @@ class OverviewUIContextTests(TestCase):
         company_row = next(item for item in context["companies"] if item["company_key"] == self.company.company_key)
         self.assertIsNotNone(company_row["last_run"])
 
+    def test_system_health_severity_classification(self):
+        self.assertEqual(views._classify_system_health(2, 0, 0)["label"], "All Operational")
+        self.assertEqual(views._classify_system_health(1, 1, 0)["label"], "Warning")
+        self.assertEqual(views._classify_system_health(1, 0, 1)["label"], "Degraded")
+
+    def test_overview_sales_24h_uses_reconcile_first_and_computes_trend(self):
+        prev_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=prev_run,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(hours=30),
+            source_path="/tmp/company_a_prev_24h.json",
+            source_hash="hash-prev-24h",
+            upload_stats_json={"total_amount": 999},
+            reconcile_epos_total=100.0,
+        )
+        current_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=current_run,
+            company_key=self.company.company_key,
+            target_date=self.fixed_now.date(),
+            processed_at=self.fixed_now - timedelta(hours=2),
+            source_path="/tmp/company_a_curr_24h.json",
+            source_hash="hash-curr-24h",
+            upload_stats_json={"total_amount": 500},
+            reconcile_epos_total=200.0,
+        )
+
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+
+        kpis = context["kpis"]
+        self.assertEqual(str(kpis["sales_24h_total"]), "200.0")
+        self.assertEqual(str(kpis["sales_prev_24h_total"]), "100.0")
+        self.assertEqual(kpis["sales_24h_trend_dir"], "up")
+        self.assertIn("vs yesterday", kpis["sales_24h_trend_text"])
+
 
 class OverviewUITemplateTests(TestCase):
     def setUp(self):
@@ -164,3 +213,48 @@ class OverviewUITemplateTests(TestCase):
         html = response.content.decode("utf-8")
         self.assertIn("Quick Sync", html)
         self.assertNotIn("Manual Sync", html)
+
+    def test_overview_renders_consolidated_kpi_row(self):
+        run_prev = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=run_prev,
+            company_key="company_a",
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(hours=30),
+            source_path="/tmp/company_a_prev_kpi.json",
+            source_hash="hash-company-a-prev-kpi",
+            reconcile_epos_total=100.0,
+        )
+        run_now = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=run_now,
+            company_key="company_a",
+            target_date=self.fixed_now.date(),
+            processed_at=self.fixed_now - timedelta(hours=4),
+            source_path="/tmp/company_a_now_kpi.json",
+            source_hash="hash-company-a-now-kpi",
+            reconcile_epos_total=140.0,
+        )
+
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            response = self.client.get(reverse("epos_qbo:overview"))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("System Health", html)
+        self.assertIn("Sales Synced (24H)", html)
+        self.assertIn("Run Success (24H)", html)
+        self.assertNotIn("Healthy Companies", html)
+        self.assertNotIn("Critical Errors", html)
+        self.assertNotIn("Records Synced (24h)", html)
