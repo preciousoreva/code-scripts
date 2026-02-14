@@ -4,15 +4,6 @@
 
     const TOAST_DURATION = 5000; // 5 seconds
     const POLL_INTERVAL = 3000; // 3 seconds
-    const DEBUG_LOG_ENDPOINT = 'http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832';
-    const ENABLE_DEBUG_BEACON = document.body?.dataset?.debugBeacon === '1';
-
-    function debugLog(location, message, data, hypothesisId) {
-        if (!ENABLE_DEBUG_BEACON) return;
-        try {
-            fetch(DEBUG_LOG_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location, message, data: data || {}, timestamp: Date.now(), hypothesisId }) }).catch(function () { });
-        } catch (e) { }
-    }
 
     // Toast management
     const ToastManager = {
@@ -28,10 +19,6 @@
                 console.warn('Toast container not found');
                 return;
             }
-            // #region agent log
-            var runIds = this.getActiveRunIds();
-            debugLog('toasts.js:init', 'ToastManager init', { activeRunIds: runIds, runIdsLength: runIds.length }, 'H6');
-            // #endregion
             // Initialize run status polling if active runs exist
             this.initRunStatusPolling();
         },
@@ -128,9 +115,6 @@
 
                 const jobIdsParam = this.activeRunIds.join(',');
                 const statusUrl = '/epos-qbo/api/runs/status?job_ids=' + jobIdsParam;
-                // #region agent log
-                debugLog('toasts.js:poll_request', 'Polling run status', { url: statusUrl, jobIdsParam: jobIdsParam.substring(0, 100) }, 'H7');
-                // #endregion
                 fetch(statusUrl, {
                     credentials: 'same-origin',
                     headers: {
@@ -139,9 +123,6 @@
                 })
                     .then(res => res.json())
                     .then(data => {
-                        // #region agent log
-                        debugLog('toasts.js:poll_response', 'Poll response', { keys: Object.keys(data || {}), statuses: data ? Object.fromEntries(Object.entries(data).map(function (e) { return [e[0], e[1].status]; })) : {} }, 'H7');
-                        // #endregion
                         this.activeRunIds.forEach(jobId => {
                             const statusInfo = data[jobId];
                             if (!statusInfo) return;
@@ -157,9 +138,6 @@
                                 // Show toast notification
                                 const shortId = jobId.substring(0, 8);
                                 if (currentStatus === 'succeeded') {
-                                    // #region agent log
-                                    debugLog('toasts.js:toast_show', 'Toast: Run completed', { jobId: jobId.substring(0, 8), status: currentStatus }, 'H8');
-                                    // #endregion
                                     this.show('success', 'Run Completed',
                                         `Run ${shortId}... completed successfully`,
                                         {
@@ -167,9 +145,6 @@
                                             link: '/epos-qbo/runs/' + jobId + '/'
                                         });
                                 } else {
-                                    // #region agent log
-                                    debugLog('toasts.js:toast_show', 'Toast: Run failed', { jobId: jobId.substring(0, 8), status: currentStatus }, 'H8');
-                                    // #endregion
                                     const reason = statusInfo.failure_reason || 'Unknown error';
                                     const truncatedReason = reason.length > 50 ? reason.substring(0, 50) + '...' : reason;
                                     this.show('error', 'Run Failed',
@@ -191,9 +166,6 @@
                         });
                     })
                     .catch(err => {
-                        // #region agent log
-                        debugLog('toasts.js:poll_error', 'Poll failed', { err: String(err && err.message || err) }, 'H7');
-                        // #endregion
                         console.error('Error polling run status:', err);
                     });
             };

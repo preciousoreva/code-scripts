@@ -767,11 +767,7 @@ Ensure these are ignored:
 To catch hardcoded secrets before committing, you can enable pre-commit hooks:
 
 ```bash
-# Install pre-commit (or use requirements-dev.txt)
-pip install -r requirements-dev.txt
-# OR: pip install pre-commit
-
-# Install the git hooks
+# Pre-commit is included in requirements.txt. Install the git hooks:
 pre-commit install
 
 # Run on all files (optional, to check existing code)

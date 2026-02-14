@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import date
 
 from django.test import SimpleTestCase, TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from apps.epos_qbo.models import RunJob, RunLock
-from apps.epos_qbo.services.job_runner import build_command, dispatch_next_queued_job
+from apps.epos_qbo.services.job_runner import _monitor_process, build_command, dispatch_next_queued_job
 
 
 class BuildCommandTests(SimpleTestCase):
@@ -104,3 +104,35 @@ class QueueDispatchTests(TestCase):
         start_run_job_mock.assert_not_called()
         queued.refresh_from_db()
         self.assertEqual(queued.status, RunJob.STATUS_QUEUED)
+
+
+class MonitorProcessTests(TestCase):
+    @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
+    @patch("apps.epos_qbo.services.job_runner.release_run_lock")
+    @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
+    def test_monitor_releases_lock_and_dispatches_when_job_missing(
+        self,
+        attach_recent_artifacts_to_job_mock,
+        release_run_lock_mock,
+        dispatch_next_queued_job_mock,
+    ):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_RUNNING,
+        )
+        RunLock.objects.create(active=True, holder=f"dashboard:{job.id}", owner_run_job=job)
+        job_id = job.id
+        job.delete()
+
+        popen = Mock()
+        popen.wait.return_value = 0
+        log_handle = Mock()
+
+        _monitor_process(job_id, popen, log_handle)
+
+        popen.wait.assert_called_once_with()
+        log_handle.close.assert_called_once_with()
+        attach_recent_artifacts_to_job_mock.assert_not_called()
+        release_run_lock_mock.assert_called_once_with(run_job=None, force=True)
+        dispatch_next_queued_job_mock.assert_called_once_with()

@@ -15,3 +15,6 @@ requests>=2.31.0
 
 # SSL certificate bundle (optional but recommended for Slack notifications)
 certifi>=2023.0.0
+
+# Optional: pre-commit hooks (secret scan, Django template guard). Run: pre-commit install
+pre-commit>=4.0.0

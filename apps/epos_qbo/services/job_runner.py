@@ -79,19 +79,21 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
         except OSError:
             pass
 
+    job = None
     try:
         job = RunJob.objects.get(id=job_id)
     except RunJob.DoesNotExist:
-        return
+        pass
 
-    job.exit_code = exit_code
-    job.finished_at = timezone.now()
-    job.status = RunJob.STATUS_SUCCEEDED if exit_code == 0 else RunJob.STATUS_FAILED
-    if exit_code != 0 and not job.failure_reason:
-        job.failure_reason = f"Subprocess exited with code {exit_code}"
-    job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
+    if job is not None:
+        job.exit_code = exit_code
+        job.finished_at = timezone.now()
+        job.status = RunJob.STATUS_SUCCEEDED if exit_code == 0 else RunJob.STATUS_FAILED
+        if exit_code != 0 and not job.failure_reason:
+            job.failure_reason = f"Subprocess exited with code {exit_code}"
+        job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
+        attach_recent_artifacts_to_job(job)
 
-    attach_recent_artifacts_to_job(job)
     release_run_lock(run_job=job, force=True)
     dispatch_next_queued_job()
 
