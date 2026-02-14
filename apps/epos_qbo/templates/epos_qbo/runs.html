@@ -81,12 +81,12 @@
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
                     <label class="text-xs text-slate-600">
                         Parallel workers
-                        <input type="number" name="parallel" min="1" value="2" :disabled="scope !== 'all_companies'"
+                        <input type="number" name="parallel" min="1" value="{{ default_parallel }}" :disabled="scope !== 'all_companies'"
                             class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
                     </label>
                     <label class="text-xs text-slate-600">
                         Stagger seconds
-                        <input type="number" name="stagger_seconds" min="0" value="2" :disabled="scope !== 'all_companies'"
+                        <input type="number" name="stagger_seconds" min="0" value="{{ default_stagger_seconds }}" :disabled="scope !== 'all_companies'"
                             class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
                     </label>
                     <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">

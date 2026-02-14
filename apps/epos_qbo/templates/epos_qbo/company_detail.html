@@ -66,11 +66,13 @@
         </div>
         <div class="bg-white border border-slate-200 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Records (24h)</p>
-                <iconify-icon icon="solar:document-linear" width="20" class="text-slate-400"></iconify-icon>
+                <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">SALES SYNCED (7D)</p>
+                <iconify-icon icon="solar:wallet-money-linear" width="20" class="text-slate-400"></iconify-icon>
             </div>
-            <p class="text-xl font-bold text-slate-900">{{ company_data.records_24h|default:"0" }}</p>
-            <p class="text-xs text-slate-500 mt-1">Synced successfully</p>
+            <p class="text-xl font-bold text-slate-900">{{ company_data.sales_7d_total_display }}</p>
+            <p class="text-xs mt-1 {% if company_data.sales_7d_trend_color == 'emerald' %}text-emerald-600{% elif company_data.sales_7d_trend_color == 'red' %}text-red-600{% else %}text-slate-500{% endif %}">
+                {{ company_data.sales_7d_trend_text }}
+            </p>
         </div>
         <div class="bg-white border border-slate-200 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
@@ -113,7 +115,6 @@
                     <dl class="space-y-2 text-sm">
                         <div class="flex justify-between"><dt class="text-slate-500">Group By:</dt><dd class="text-slate-900 font-medium">{{ company_data.config_display.group_by }}</dd></div>
                         <div class="flex justify-between"><dt class="text-slate-500">Date Format:</dt><dd class="font-mono text-xs text-slate-900">{{ company_data.config_display.date_format }}</dd></div>
-                        <div class="flex justify-between"><dt class="text-slate-500">Schedule:</dt><dd class="text-slate-900 font-medium">{{ company_data.config_display.schedule }}</dd></div>
                     </dl>
                 </div>
             </div>

@@ -204,6 +204,18 @@ Assign these to users via Django Admin (`/admin/`). Superusers have all permissi
 | `python manage.py ingest_run_history --days 60` | Import historical run metadata from Uploaded/ |
 | `python manage.py reconcile_run_jobs` | Mark stuck running jobs as failed (reaper) |
 
+### Portal Dashboard Tuning (Environment Variables)
+
+These optional env vars tune portal defaults/thresholds without code edits:
+
+| Variable | Default | Purpose |
+|---------|---------|---------|
+| `OIAT_DASHBOARD_DEFAULT_PARALLEL` | `2` | Default worker count for all-company run trigger form |
+| `OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS` | `2` | Default stagger interval for all-company run trigger form |
+| `OIAT_DASHBOARD_STALE_HOURS_WARNING` | `48` | Hours since last run before company sync-stale warning appears |
+| `OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS` | `7` | Refresh-token warning threshold (in days) |
+| `OIAT_DASHBOARD_REAUTH_GUIDANCE` | Built-in guidance text | Operator-facing re-auth instructions shown in dashboard token health states |
+
 ---
 
 ## Architecture Overview

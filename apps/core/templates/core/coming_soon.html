@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ feature_title }} • Coming Soon</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-900">
+    <main class="max-w-3xl mx-auto px-6 py-12">
+        <div class="bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
+            <p class="text-xs font-semibold uppercase tracking-wide text-slate-500">Feature Preview</p>
+            <h1 class="text-3xl font-semibold mt-2">{{ feature_title }}</h1>
+            <p class="text-slate-600 mt-3">{{ feature_title }} is coming soon in this dashboard.</p>
+            <div class="mt-6 flex items-center gap-3">
+                <a href="{% url 'epos_qbo:overview' %}" class="inline-flex items-center rounded-md bg-slate-900 text-white px-4 py-2 text-sm hover:bg-slate-800">Back to Overview</a>
+                <a href="{% url 'core-home' %}" class="inline-flex items-center rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Switch Workspace</a>
+            </div>
+        </div>
+    </main>
+</body>
+</html>

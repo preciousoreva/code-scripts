@@ -88,10 +88,6 @@
                     <span class="text-slate-900 font-medium">{{ company_data.config_display.tax_rate|default:"—" }}</span>
                 </div>
                 <div class="flex items-center justify-between">
-                    <span class="text-slate-500">Schedule:</span>
-                    <span class="text-slate-900 font-medium">{{ company_data.config_display.schedule }}</span>
-                </div>
-                <div class="flex items-center justify-between">
                     <span class="text-slate-500">Deposit Account:</span>
                     <span class="text-slate-900 font-medium truncate ml-2" title="{{ company_data.config_display.deposit_account }}">{{ company_data.config_display.deposit_account|truncatechars:20 }}</span>
                 </div>

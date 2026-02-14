@@ -241,11 +241,18 @@ def ingest_history(days: int = 60) -> int:
 def attach_recent_artifacts_to_job(run_job: RunJob) -> int:
     attached = 0
     for path in sorted(OPS_UPLOADED_DIR.rglob("last_*_transform.json")):
-        artifact, _ = ingest_metadata_file(path, run_job=run_job)
+        artifact, _ = ingest_metadata_file(path)
         if artifact is None:
             continue
         if run_job.scope == RunJob.SCOPE_SINGLE and artifact.company_key != run_job.company_key:
+            # Defensive cleanup for legacy bad links from earlier matching behavior.
+            if artifact.run_job_id == run_job.id:
+                artifact.run_job = None
+                artifact.save(update_fields=["run_job"])
             continue
+        if artifact.run_job_id is None:
+            artifact.run_job = run_job
+            artifact.save(update_fields=["run_job"])
         if artifact.run_job_id == run_job.id:
             attached += 1
     return attached

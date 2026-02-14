@@ -8,7 +8,11 @@ from unittest import mock
 from django.test import TestCase
 
 from apps.epos_qbo.models import RunArtifact, RunJob
-from apps.epos_qbo.services.artifact_ingestion import ingest_metadata_file, parse_metadata_file
+from apps.epos_qbo.services.artifact_ingestion import (
+    attach_recent_artifacts_to_job,
+    ingest_metadata_file,
+    parse_metadata_file,
+)
 
 
 class ArtifactIngestionTests(TestCase):
@@ -89,3 +93,30 @@ class ArtifactIngestionTests(TestCase):
         self.assertIsNone(parsed.reconcile_qbo_total)
         self.assertIsNone(parsed.reconcile_epos_count)
         self.assertIsNone(parsed.reconcile_qbo_count)
+
+    def test_attach_recent_artifacts_to_job_does_not_cross_link_single_company(self):
+        job = RunJob.objects.create(scope=RunJob.SCOPE_SINGLE, company_key="company_b")
+
+        payload_a = self._metadata_payload()
+        payload_b = self._metadata_payload()
+        payload_b["company_key"] = "company_b"
+        payload_b["processed_at"] = "2026-02-10T12:00:00Z"
+        payload_b["target_date"] = "2026-02-11"
+
+        with TemporaryDirectory() as temp_dir:
+            uploaded_dir = Path(temp_dir)
+            metadata_a = uploaded_dir / "last_company_a_transform.json"
+            metadata_b = uploaded_dir / "last_company_b_transform.json"
+            with open(metadata_a, "w", encoding="utf-8") as handle:
+                json.dump(payload_a, handle)
+            with open(metadata_b, "w", encoding="utf-8") as handle:
+                json.dump(payload_b, handle)
+
+            with mock.patch("apps.epos_qbo.services.artifact_ingestion.OPS_UPLOADED_DIR", uploaded_dir):
+                attached_count = attach_recent_artifacts_to_job(job)
+
+        self.assertEqual(attached_count, 1)
+        artifact_a = RunArtifact.objects.get(company_key="company_a")
+        artifact_b = RunArtifact.objects.get(company_key="company_b")
+        self.assertIsNone(artifact_a.run_job_id)
+        self.assertEqual(artifact_b.run_job_id, job.id)

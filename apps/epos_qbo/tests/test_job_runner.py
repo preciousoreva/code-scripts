@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from unittest.mock import Mock, patch
 
 from apps.epos_qbo.models import RunJob, RunLock
@@ -67,6 +67,27 @@ class BuildCommandTests(SimpleTestCase):
         self.assertIn("2026-02-05", command)
         self.assertIn("--skip-download", command)
         self.assertIn("--continue-on-failure", command)
+
+    @override_settings(
+        OIAT_DASHBOARD_DEFAULT_PARALLEL=4,
+        OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS=8,
+    )
+    def test_build_command_uses_settings_defaults_when_missing(self):
+        command = build_command(
+            {
+                "scope": RunJob.SCOPE_ALL,
+                "company_key": "",
+                "date_mode": "yesterday",
+                "target_date": None,
+                "from_date": None,
+                "to_date": None,
+                "skip_download": False,
+            }
+        )
+        self.assertIn("--parallel", command)
+        self.assertIn("4", command)
+        self.assertIn("--stagger-seconds", command)
+        self.assertIn("8", command)
 
 
 class QueueDispatchTests(TestCase):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from unittest import mock
 
+from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from django.test import TestCase
 from django.urls import reverse
@@ -149,3 +150,17 @@ class OverviewUITemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn('<option value="90d" selected>', html)
+
+    def test_overview_topbar_uses_quick_sync_label(self):
+        perm = Permission.objects.get(codename="can_trigger_runs")
+        self.user.user_permissions.add(perm)
+        with (
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            response = self.client.get(reverse("epos_qbo:overview"))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Quick Sync", html)
+        self.assertNotIn("Manual Sync", html)

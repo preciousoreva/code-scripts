@@ -88,7 +88,15 @@ All routes require authentication.
 
 ## UI notes
 
-- Sidebar entries `Mappings`, `Settings`, and `API Tokens` are currently placeholders (`href="#"`) and are not backed by routes yet.
+- Sidebar entries `Mappings`, `Settings`, and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
+
+## Dashboard tuning (settings/env)
+
+- `OIAT_DASHBOARD_DEFAULT_PARALLEL` (default `2`)
+- `OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS` (default `2`)
+- `OIAT_DASHBOARD_STALE_HOURS_WARNING` (default `48`)
+- `OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS` (default `7`)
+- `OIAT_DASHBOARD_REAUTH_GUIDANCE` (default points to `code_scripts/store_tokens.py` guidance text)
 
 ## Template formatting rule
 

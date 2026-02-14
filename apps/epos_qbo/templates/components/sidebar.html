@@ -39,9 +39,10 @@
             Runs
         </a>
 
-        <a href="#" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
+        <a href="{% url 'core-coming-soon' feature='mappings' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
             <iconify-icon icon="solar:file-check-linear" class="text-slate-400 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
             Mappings
+            <span class="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.04em] leading-none text-slate-500">Coming Soon</span>
         </a>
 
         <a href="{% url 'epos_qbo:logs' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'logs' %}bg-slate-50 text-slate-900 border border-slate-100{% else %}text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors{% endif %}">
@@ -53,13 +54,15 @@
             <span class="text-xs font-medium text-slate-400 uppercase tracking-wider">Configuration</span>
         </div>
 
-        <a href="#" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
+        <a href="{% url 'core-coming-soon' feature='settings' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
             <iconify-icon icon="solar:settings-linear" class="text-slate-400 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
             Settings
+            <span class="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.04em] leading-none text-slate-500">Coming Soon</span>
         </a>
-        <a href="#" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
+        <a href="{% url 'core-coming-soon' feature='api-tokens' %}" class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors">
             <iconify-icon icon="solar:key-minimalistic-linear" class="text-slate-400 group-hover:text-slate-900 transition-colors" width="20"></iconify-icon>
             API Tokens
+            <span class="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.04em] leading-none text-slate-500">Coming Soon</span>
         </a>
     </nav>
 

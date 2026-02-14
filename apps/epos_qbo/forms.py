@@ -2,7 +2,27 @@ from __future__ import annotations
 
 from datetime import date
 
+from django.conf import settings
 from django import forms
+
+
+def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = getattr(settings, name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return default
+    return value
+
+
+def _default_parallel() -> int:
+    return _int_setting("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
+
+
+def _default_stagger_seconds() -> int:
+    return _int_setting("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
 
 
 class RunTriggerForm(forms.Form):
@@ -13,9 +33,14 @@ class RunTriggerForm(forms.Form):
     from_date = forms.DateField(required=False)
     to_date = forms.DateField(required=False)
     skip_download = forms.BooleanField(required=False)
-    parallel = forms.IntegerField(required=False, min_value=1, initial=2)
-    stagger_seconds = forms.IntegerField(required=False, min_value=0, initial=2)
+    parallel = forms.IntegerField(required=False, min_value=1)
+    stagger_seconds = forms.IntegerField(required=False, min_value=0)
     continue_on_failure = forms.BooleanField(required=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["parallel"].initial = _default_parallel()
+        self.fields["stagger_seconds"].initial = _default_stagger_seconds()
 
     def clean(self):
         cleaned = super().clean()
@@ -34,12 +59,12 @@ class RunTriggerForm(forms.Form):
             self.add_error("company_key", "Company key is required for single-company runs.")
         if scope == "all_companies":
             cleaned["company_key"] = ""
-            cleaned["parallel"] = int(parallel or 2)
-            cleaned["stagger_seconds"] = int(stagger_seconds or 2)
+            cleaned["parallel"] = int(parallel or _default_parallel())
+            cleaned["stagger_seconds"] = int(stagger_seconds or _default_stagger_seconds())
             cleaned["continue_on_failure"] = bool(continue_on_failure)
         else:
             cleaned["parallel"] = 1
-            cleaned["stagger_seconds"] = 2
+            cleaned["stagger_seconds"] = _default_stagger_seconds()
             cleaned["continue_on_failure"] = False
 
         if date_mode == "target_date" and not target_date:

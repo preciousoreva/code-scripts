@@ -4,7 +4,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -78,6 +78,20 @@ class TokenHealthModelTests(TestCase):
             info = views._company_token_health(self.company)
         self.assertEqual(info["connection_state"], "refresh_expired")
         self.assertEqual(info["severity"], "critical")
+
+    @override_settings(OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS=1)
+    def test_refresh_expiring_threshold_is_settings_driven(self):
+        tokens = self._token_payload(access_seconds=3600, refresh_seconds=60 * 60 * 24 * 2)
+        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens):
+            info = views._company_token_health(self.company)
+        self.assertEqual(info["connection_state"], "connected")
+        self.assertEqual(info["severity"], "healthy")
+
+    @override_settings(OIAT_DASHBOARD_REAUTH_GUIDANCE="Use the shared OAuth runbook.")
+    def test_reauth_guidance_is_configurable(self):
+        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=None):
+            info = views._company_token_health(self.company)
+        self.assertEqual(info["display_subtext"], "Use the shared OAuth runbook.")
 
 
 class TokenHealthViewsTests(TestCase):

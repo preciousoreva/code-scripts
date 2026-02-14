@@ -1,8 +1,22 @@
 """Django settings for the OIAT portal."""
 
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
 
 SECRET_KEY = "django-insecure-vb4alzjrj)s)_#stsklynb)iohe)ybs7axx+2=3p!e)cuoc6#3"
 DEBUG = True
@@ -75,3 +89,22 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "/login/"
 LOGIN_REDIRECT_URL = "/epos-qbo/dashboard/"
 LOGOUT_REDIRECT_URL = "/login/"
+
+# Portal workspace selector cards.
+PORTAL_SOLUTIONS = [
+    {
+        "name": "EPOS -> QBO",
+        "description": "Monitor runs, manage companies, and trigger sync jobs.",
+        "url_name": "epos_qbo:overview",
+    }
+]
+
+# Dashboard operational knobs (can be overridden via env vars).
+OIAT_DASHBOARD_DEFAULT_PARALLEL = _env_int("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
+OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS = _env_int("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
+OIAT_DASHBOARD_STALE_HOURS_WARNING = _env_int("OIAT_DASHBOARD_STALE_HOURS_WARNING", 48, minimum=1)
+OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS = _env_int("OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS", 7, minimum=1)
+OIAT_DASHBOARD_REAUTH_GUIDANCE = os.getenv(
+    "OIAT_DASHBOARD_REAUTH_GUIDANCE",
+    "QBO re-authentication required. Run OAuth flow and store tokens using code_scripts/store_tokens.py.",
+)

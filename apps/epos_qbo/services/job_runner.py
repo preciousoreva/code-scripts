@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from shlex import join as shlex_join
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -15,6 +16,25 @@ from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 from ..models import RunJob, RunLock
 from .artifact_ingestion import attach_recent_artifacts_to_job
 from .locking import release_run_lock
+
+
+def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = getattr(settings, name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return default
+    return value
+
+
+def _default_parallel() -> int:
+    return _int_setting("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
+
+
+def _default_stagger_seconds() -> int:
+    return _int_setting("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
 
 
 def build_command(cleaned: dict) -> list[str]:
@@ -32,8 +52,8 @@ def build_command(cleaned: dict) -> list[str]:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_pipeline.py"), "--company", cleaned["company_key"]]
     else:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_all_companies.py")]
-        cmd.extend(["--parallel", str(int(cleaned.get("parallel") or 2))])
-        cmd.extend(["--stagger-seconds", str(int(cleaned.get("stagger_seconds") or 2))])
+        cmd.extend(["--parallel", str(int(cleaned.get("parallel") or _default_parallel()))])
+        cmd.extend(["--stagger-seconds", str(int(cleaned.get("stagger_seconds") or _default_stagger_seconds()))])
         if cleaned.get("continue_on_failure"):
             cmd.append("--continue-on-failure")
 
