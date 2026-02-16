@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta
+from decimal import Decimal
 from math import ceil
 
 from django.conf import settings
@@ -28,8 +29,14 @@ from .services.config_sync import (
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display, get_dashboard_timezone_name
+from .business_date import (
+    get_business_day_cutoff,
+    get_business_timezone_display,
+    get_target_trading_date,
+)
 from .services.metrics import (
     compute_avg_runtime_by_target_date,
+    compute_run_success_by_target_date,
     compute_sales_snapshot_by_target_date,
     compute_sales_trend,
 )
@@ -160,8 +167,7 @@ def _normalize_revenue_period(value: str | None) -> str:
 
 
 def _quick_sync_default_target_date(*, now: datetime | None = None) -> str:
-    bounds = get_dashboard_date_bounds(now=now)
-    return bounds["target_date"].isoformat()
+    return get_target_trading_date(now=now).isoformat()
 
 
 def _exit_code_info(exit_code: int | None) -> dict | None:
@@ -463,19 +469,69 @@ def _classify_system_health(healthy_count: int, warning_count: int, critical_cou
     }
 
 
+def _format_relative_age(delta_seconds: float) -> str:
+    seconds = max(0, int(delta_seconds))
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        minutes = max(1, seconds // 60)
+        return f"{minutes}m"
+    if seconds < 86400:
+        hours = max(1, seconds // 3600)
+        return f"{hours}h"
+    days = max(1, ceil(seconds / 86400))
+    return f"{days}d"
+
+
+def resolve_overview_target_date(company_keys: list[str] | None = None) -> dict:
+    artifacts = RunArtifact.objects.filter(
+        target_date__isnull=False,
+        run_job_id__isnull=False,
+        run_job__status=RunJob.STATUS_SUCCEEDED,
+    )
+    if company_keys is not None:
+        artifacts = artifacts.filter(company_key__in=company_keys)
+    latest = artifacts.select_related("run_job").order_by("-processed_at", "-imported_at", "-id").first()
+    if latest is None or latest.target_date is None:
+        return {
+            "target_date": None,
+            "prev_target_date": None,
+            "last_successful_at": None,
+            "has_data": False,
+        }
+
+    return {
+        "target_date": latest.target_date,
+        "prev_target_date": latest.target_date - timedelta(days=1),
+        "last_successful_at": latest.processed_at or latest.imported_at,
+        "has_data": True,
+    }
+
+
 def _overview_context(revenue_period: str = "7d") -> dict:
-    bounds = get_dashboard_date_bounds()
-    now = bounds["now_utc"]
-    today_start = bounds["today_start_utc"]
-    target_date = bounds["target_date"]
-    prev_target_date = bounds["prev_target_date"]
-    target_date_display = target_date.strftime("%b %d")
-    prev_target_date_display = prev_target_date.strftime("%b %d")
+    now = timezone.now()
+    target_date = None
+    prev_target_date = None
+    target_date_display = ""
+    prev_target_date_display = ""
+    business_timezone_display = get_business_timezone_display(now=now)
+    cutoff_hour, cutoff_minute = get_business_day_cutoff()
+    business_cutoff_display = f"{cutoff_hour:02d}:{cutoff_minute:02d}"
     since_7d = now - timedelta(days=7)
     revenue_period = _normalize_revenue_period(revenue_period)
 
     companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
     company_keys = [company.company_key for company in companies]
+    date_resolution = resolve_overview_target_date(company_keys)
+    has_overview_target_date = bool(date_resolution["has_data"])
+    target_date = date_resolution["target_date"]
+    prev_target_date = date_resolution["prev_target_date"]
+    last_successful_sync_at = date_resolution["last_successful_at"]
+    if target_date is not None:
+        target_date_display = target_date.strftime("%b %d, %Y")
+    if prev_target_date is not None:
+        prev_target_date_display = prev_target_date.strftime("%b %d")
+
     latest_artifacts: dict[str, RunArtifact] = {}
     latest_jobs: dict[str, RunJob] = {}
 
@@ -526,51 +582,65 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     system_health = _classify_system_health(healthy_count, warning_count, critical_count)
     system_health_breakdown = f"{healthy_count} healthy • {warning_count} warning • {critical_count} critical"
 
-    sales_trend = compute_sales_snapshot_by_target_date(
-        company_keys,
-        target_date,
-        prev_target_date,
-        prefer_reconcile=True,
-        comparison_label=f"vs {prev_target_date_display}",
-        flat_symbol="—",
-    )
-    if sales_trend.get("sample_count", 0) > 0 and sales_trend["total"] <= 0:
-        sales_trend["trend_color"] = "slate"
-        sales_trend["trend_text"] = "No monetary totals found"
-    else:
-        pct = abs(float(sales_trend.get("pct_change", 0.0)))
-        if sales_trend.get("trend_dir") == "up":
-            sales_trend["trend_text"] = f"↑ {pct:.1f}% increase vs {prev_target_date_display}"
-        elif sales_trend.get("trend_dir") == "down":
-            sales_trend["trend_text"] = f"↓ {pct:.1f}% decrease vs {prev_target_date_display}"
+    if has_overview_target_date and target_date is not None and prev_target_date is not None:
+        sales_trend = compute_sales_snapshot_by_target_date(
+            company_keys,
+            target_date,
+            prev_target_date,
+            prefer_reconcile=True,
+            comparison_label=f"vs {prev_target_date_display}",
+            flat_symbol="—",
+        )
+        if sales_trend.get("sample_count", 0) > 0 and sales_trend["total"] <= 0:
+            sales_trend["trend_color"] = "slate"
+            sales_trend["trend_text"] = "No monetary totals found"
         else:
-            sales_trend["trend_text"] = f"— {pct:.1f}% change vs {prev_target_date_display}"
+            pct = abs(float(sales_trend.get("pct_change", 0.0)))
+            if sales_trend.get("trend_dir") == "up":
+                sales_trend["trend_text"] = f"↑ {pct:.1f}% increase vs {prev_target_date_display}"
+            elif sales_trend.get("trend_dir") == "down":
+                sales_trend["trend_text"] = f"↓ {pct:.1f}% decrease vs {prev_target_date_display}"
+            else:
+                sales_trend["trend_text"] = f"— {pct:.1f}% change vs {prev_target_date_display}"
 
-    # Run Success: calendar day in dashboard TZ — runs that finished "today"
-    completed_runs_today = RunJob.objects.filter(
-        finished_at__gte=today_start,
-        finished_at__lt=bounds["today_end_utc"],
-        finished_at__isnull=False,
-        status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
-    )
-    successful_runs_24h = completed_runs_today.filter(status=RunJob.STATUS_SUCCEEDED).count()
-    total_completed_runs_24h = completed_runs_today.count()
-    run_success_pct_24h = (
-        round((successful_runs_24h / total_completed_runs_24h) * 100, 1)
-        if total_completed_runs_24h > 0
-        else 0.0
-    )
-    run_success_ratio_24h = (
-        f"{successful_runs_24h}/{total_completed_runs_24h}"
-        if total_completed_runs_24h > 0
-        else "0/0"
-    )
-    runtime_trend = compute_avg_runtime_by_target_date(
-        company_keys,
-        target_date,
-        prev_target_date,
-        prev_date_display=prev_target_date_display,
-    )
+        run_success = compute_run_success_by_target_date(company_keys, target_date)
+        successful_runs_24h = run_success["successful"]
+        total_completed_runs_24h = run_success["completed"]
+        run_success_pct_24h = run_success["pct"]
+        run_success_ratio_24h = run_success["ratio"]
+        runtime_trend = compute_avg_runtime_by_target_date(
+            company_keys,
+            target_date,
+            prev_target_date,
+            prev_date_display=prev_target_date_display,
+        )
+    else:
+        sales_trend = {
+            "total": Decimal("0"),
+            "prev_total": Decimal("0"),
+            "pct_change": 0.0,
+            "trend_dir": "flat",
+            "is_new": False,
+            "total_display": "₦0",
+            "trend_text": "No successful run data yet.",
+            "trend_color": "slate",
+            "sample_count": 0,
+            "prev_sample_count": 0,
+        }
+        successful_runs_24h = 0
+        total_completed_runs_24h = 0
+        run_success_pct_24h = 0.0
+        run_success_ratio_24h = "0/0"
+        runtime_trend = {
+            "avg_seconds": 0,
+            "prev_avg_seconds": 0,
+            "samples": 0,
+            "prev_samples": 0,
+            "trend_dir": "flat",
+            "trend_color": "slate",
+            "trend_text": "No successful run data yet.",
+        }
+
     avg_runtime_today_seconds = runtime_trend["avg_seconds"]
     avg_runtime_today_display = _format_runtime_compact(avg_runtime_today_seconds)
     avg_runtime_yesterday_seconds = runtime_trend["prev_avg_seconds"]
@@ -598,16 +668,21 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         live_log.append({"timestamp": job.created_at, "level": level, "message": message})
 
     revenue_days = REVENUE_PERIOD_DAYS[revenue_period]
-    revenue_end_date = bounds["revenue_end_date"]
-    revenue_start_date = revenue_end_date - timedelta(days=revenue_days - 1)
-    revenue_dates = [revenue_start_date + timedelta(days=i) for i in range(revenue_days)]
+    if has_overview_target_date and target_date is not None:
+        revenue_end_date = target_date
+        revenue_start_date = revenue_end_date - timedelta(days=revenue_days - 1)
+        revenue_dates = [revenue_start_date + timedelta(days=i) for i in range(revenue_days)]
+    else:
+        revenue_end_date = None
+        revenue_start_date = None
+        revenue_dates = []
     revenue_labels = [d.strftime("%b %d") for d in revenue_dates]
     revenue_index_by_date = {date: idx for idx, date in enumerate(revenue_dates)}
-    revenue_series_map = {company.company_key: [0.0] * revenue_days for company in companies}
+    revenue_series_map = {company.company_key: [0.0] * len(revenue_dates) for company in companies}
     revenue_totals_by_company = {company.company_key: 0.0 for company in companies}
     latest_reconciled_artifacts: dict[tuple[str, object], RunArtifact] = {}
 
-    if company_keys and revenue_days > 0:
+    if company_keys and revenue_days > 0 and revenue_start_date is not None and revenue_end_date is not None:
         reconciled_qs = RunArtifact.objects.filter(
             company_key__in=company_keys,
             target_date__isnull=False,
@@ -622,14 +697,14 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 latest_reconciled_artifacts[key] = artifact
 
     matched_dates = set()
-    for (company_key, target_date), artifact in latest_reconciled_artifacts.items():
-        if target_date not in revenue_index_by_date:
+    for (company_key, artifact_target_date), artifact in latest_reconciled_artifacts.items():
+        if artifact_target_date not in revenue_index_by_date:
             continue
         value = float(artifact.reconcile_epos_total or 0.0)
-        idx = revenue_index_by_date[target_date]
+        idx = revenue_index_by_date[artifact_target_date]
         revenue_series_map[company_key][idx] += value
         revenue_totals_by_company[company_key] = revenue_totals_by_company.get(company_key, 0.0) + value
-        matched_dates.add(target_date)
+        matched_dates.add(artifact_target_date)
 
     revenue_series = [
         {
@@ -653,8 +728,8 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         reverse=True,
     )
     has_reconciled_revenue_data = bool(latest_reconciled_artifacts)
-    revenue_start_date_display = revenue_start_date.strftime("%b %d")
-    revenue_end_date_display = revenue_end_date.strftime("%b %d")
+    revenue_start_date_display = revenue_start_date.strftime("%b %d") if revenue_start_date else ""
+    revenue_end_date_display = revenue_end_date.strftime("%b %d") if revenue_end_date else ""
     revenue_chart_payload = {
         "labels": revenue_labels,
         "series": revenue_series if has_reconciled_revenue_data else [],
@@ -665,9 +740,27 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
     
+    if has_overview_target_date and target_date_display and last_successful_sync_at:
+        age_text = _format_relative_age((now - last_successful_sync_at).total_seconds())
+        metric_basis_line = (
+            f"Metrics are based on Target Date: {target_date_display} • "
+            f"Last successful sync {age_text} ago"
+        )
+    elif has_overview_target_date and target_date_display:
+        metric_basis_line = f"Metrics are based on Target Date: {target_date_display}"
+    else:
+        metric_basis_line = "No successful run data yet."
+
     return {
         "target_date_display": target_date_display,
-        "target_date_iso": target_date.isoformat(),
+        "target_date_iso": target_date.isoformat() if target_date else "",
+        "target_trading_date_display": target_date_display,
+        "target_trading_date_iso": target_date.isoformat() if target_date else "",
+        "business_timezone_display": business_timezone_display,
+        "business_cutoff_display": business_cutoff_display,
+        "metric_basis_line": metric_basis_line,
+        "overview_has_data": has_overview_target_date,
+        "last_successful_sync_at": last_successful_sync_at,
         "kpis": {
             "healthy_count": healthy_count,
             "warning_count": warning_count,
@@ -732,7 +825,7 @@ def overview(request):
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
     context = _overview_context(revenue_period)
     context["quick_sync_target_date"] = _quick_sync_default_target_date()
-    context["quick_sync_timezone"] = get_dashboard_timezone_display()
+    context["quick_sync_timezone"] = context.get("business_timezone_display", get_business_timezone_display())
     context["dashboard_timezone_display"] = get_dashboard_timezone_display()
     context.update(_nav_context())
     context.update(
@@ -1430,6 +1523,22 @@ def _enrich_company_data(
         last_activity_at = max(latest_run_time, latest_artifact_time)
     else:
         last_activity_at = latest_run_time or latest_artifact_time
+
+    # Latest successful sync: receipt count and target date (aligned with overview)
+    latest_successful_artifact = (
+        RunArtifact.objects.filter(company_key=company.company_key)
+        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .select_related("run_job")
+        .order_by("-processed_at", "-imported_at", "-id")
+        .first()
+    )
+    if latest_successful_artifact:
+        records_latest_sync = _artifact_uploaded_count(latest_successful_artifact)
+        latest_sync_target_date = latest_successful_artifact.target_date
+    else:
+        records_latest_sync = 0
+        latest_sync_target_date = None
+
     return {
         "company": company,
         "status": status,
@@ -1441,6 +1550,8 @@ def _enrich_company_data(
         "records_24h": records_24h,
         "last_activity_at": last_activity_at,
         "last_run_display": _format_last_run_time(last_activity_at),
+        "records_latest_sync": records_latest_sync,
+        "latest_sync_target_date": latest_sync_target_date,
     }
 
 

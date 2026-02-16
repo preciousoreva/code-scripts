@@ -36,8 +36,8 @@ All routes require authentication.
 ## Current behavior highlights
 
 - Overview company search is client-side and matches `display_name + company_key` via `static/js/overview.js`.
-- Overview **"runs completed today" KPIs** (Run Success, Avg Runtime, Sales Synced) use **calendar day** in the **dashboard timezone** (see `OIAT_DASHBOARD_TIMEZONE`)—i.e. when the run finished in that zone, not the data’s target date. "Yesterday" means the previous full calendar day. Data target is typically yesterday’s business date.
-- Company list **"receipts uploaded (runs completed today)"** uses the same **dashboard timezone** calendar day so it aligns with the overview KPIs and does not accumulate across days.
+- Overview KPI date basis uses canonical **target trading date** from business settings (`OIAT_BUSINESS_TIMEZONE` + `OIAT_BUSINESS_DAY_CUTOFF_HOUR/MINUTE`). Run Success, Avg Runtime, and Sales Synced are all computed against that same target date for consistent cross-timezone operator views.
+- Company list shows **"N receipts from latest sync (date)"** or **"No sync yet"**, using the latest **successful** run artifact per company (same narrative as overview target date). Receipt count and target date come from `RunArtifact` with `run_job__status=SUCCEEDED`; this aligns the Companies page with the overview’s "last successful sync" data.
 - Overview **Live Log** shows the last **10** run events (by `created_at`), one entry per run.
 - Overview live log messages use company + run label format (not raw UUID in message text).
 - Overview reconciled revenue chart (under Company Status):
