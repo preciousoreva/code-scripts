@@ -100,7 +100,8 @@
     {% endif %}
 
     <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
-        <table class="w-full text-sm">
+        <div class="overflow-x-auto">
+        <table class="w-full text-sm min-w-max">
             <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                 <tr>
                     <th class="text-left px-4 py-3">Created</th>
@@ -141,6 +142,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </section>
 </div>
 {% endblock %}
