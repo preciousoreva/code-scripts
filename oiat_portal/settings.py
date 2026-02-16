@@ -57,6 +57,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "apps.epos_qbo.context_processors.dashboard_timezone",
             ],
         },
     },
@@ -109,3 +110,6 @@ OIAT_DASHBOARD_REAUTH_GUIDANCE = os.getenv(
     "OIAT_DASHBOARD_REAUTH_GUIDANCE",
     "QBO re-authentication required. Run OAuth flow and store tokens using code_scripts/store_tokens.py.",
 )
+# Timezone for dashboard "today" / "yesterday" (overview KPIs, Run Success, receipts uploaded, Quick Sync default).
+# Set to match your scheduler (e.g. America/New_York). If unset, uses TIME_ZONE (UTC).
+OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)

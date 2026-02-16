@@ -27,9 +27,9 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
+from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .services.metrics import (
     compute_avg_runtime_by_target_date,
-    compute_sales_day_snapshot_for_companies,
     compute_sales_snapshot_by_target_date,
     compute_sales_trend,
 )
@@ -160,11 +160,8 @@ def _normalize_revenue_period(value: str | None) -> str:
 
 
 def _quick_sync_default_target_date(*, now: datetime | None = None) -> str:
-    current = now or timezone.now()
-    if timezone.is_naive(current):
-        current = timezone.make_aware(current)
-    local_now = timezone.localtime(current)
-    return (local_now.date() - timedelta(days=1)).isoformat()
+    bounds = get_dashboard_date_bounds(now=now)
+    return bounds["target_date"].isoformat()
 
 
 def _exit_code_info(exit_code: int | None) -> dict | None:
@@ -467,15 +464,14 @@ def _classify_system_health(healthy_count: int, warning_count: int, critical_cou
 
 
 def _overview_context(revenue_period: str = "7d") -> dict:
-    now = timezone.now()
-    today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday_start = today_start - timedelta(days=1)
-    since_7d = now - timedelta(days=7)
-    # Target business date for overview KPIs (typically "yesterday")
-    target_date = timezone.localtime(now).date() - timedelta(days=1)
-    prev_target_date = target_date - timedelta(days=1)
+    bounds = get_dashboard_date_bounds()
+    now = bounds["now_utc"]
+    today_start = bounds["today_start_utc"]
+    target_date = bounds["target_date"]
+    prev_target_date = bounds["prev_target_date"]
     target_date_display = target_date.strftime("%b %d")
     prev_target_date_display = prev_target_date.strftime("%b %d")
+    since_7d = now - timedelta(days=7)
     revenue_period = _normalize_revenue_period(revenue_period)
 
     companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
@@ -550,10 +546,10 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         else:
             sales_trend["trend_text"] = f"— {pct:.1f}% change vs {prev_target_date_display}"
 
-    # Run Success: calendar day — runs that finished today (same definition as Avg Runtime)
+    # Run Success: calendar day in dashboard TZ — runs that finished "today"
     completed_runs_today = RunJob.objects.filter(
         finished_at__gte=today_start,
-        finished_at__lt=now,
+        finished_at__lt=bounds["today_end_utc"],
         finished_at__isnull=False,
         status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
     )
@@ -602,7 +598,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         live_log.append({"timestamp": job.created_at, "level": level, "message": message})
 
     revenue_days = REVENUE_PERIOD_DAYS[revenue_period]
-    revenue_end_date = (now - timedelta(days=1)).date()
+    revenue_end_date = bounds["revenue_end_date"]
     revenue_start_date = revenue_end_date - timedelta(days=revenue_days - 1)
     revenue_dates = [revenue_start_date + timedelta(days=i) for i in range(revenue_days)]
     revenue_labels = [d.strftime("%b %d") for d in revenue_dates]
@@ -736,7 +732,7 @@ def overview(request):
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
     context = _overview_context(revenue_period)
     context["quick_sync_target_date"] = _quick_sync_default_target_date()
-    context["quick_sync_timezone"] = timezone.get_current_timezone_name()
+    context["quick_sync_timezone"] = get_dashboard_timezone_display()
     context.update(_nav_context())
     context.update(
         _breadcrumb_context(
@@ -1367,17 +1363,18 @@ def _enrich_company_data(
         .order_by("-processed_at", "-imported_at")
         .first()
     )
-    # Receipts uploaded (Today): calendar day (midnight to now), same definition as overview KPIs
-    now = timezone.now()
-    today_start = timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Receipts uploaded (Today): calendar day in dashboard TZ, same definition as overview KPIs
+    bounds = get_dashboard_date_bounds()
+    today_start_utc = bounds["today_start_utc"]
+    now_utc = bounds["now_utc"]
     artifacts_today = (
         RunArtifact.objects.filter(company_key=company.company_key)
         .filter(
-            Q(processed_at__gte=today_start, processed_at__lt=now)
+            Q(processed_at__gte=today_start_utc, processed_at__lt=now_utc)
             | Q(
                 processed_at__isnull=True,
-                imported_at__gte=today_start,
-                imported_at__lt=now,
+                imported_at__gte=today_start_utc,
+                imported_at__lt=now_utc,
             )
         )
         .select_related("run_job")

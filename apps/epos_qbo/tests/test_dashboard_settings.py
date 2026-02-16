@@ -78,6 +78,7 @@ class DashboardSettingsTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):

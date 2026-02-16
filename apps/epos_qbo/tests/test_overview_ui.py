@@ -49,6 +49,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -97,6 +98,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -127,6 +129,7 @@ class OverviewUIContextTests(TestCase):
             reconcile_epos_total=100.0,
         )
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -146,6 +149,7 @@ class OverviewUIContextTests(TestCase):
             upload_stats_json={"uploaded": 5},
         )
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -191,6 +195,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -233,6 +238,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -272,6 +278,7 @@ class OverviewUIContextTests(TestCase):
         RunJob.objects.filter(id=failed.id).update(created_at=self.fixed_now - timedelta(minutes=91))
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -311,6 +318,7 @@ class OverviewUIContextTests(TestCase):
             reconcile_epos_total=100.0,
         )
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -388,6 +396,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -427,6 +436,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_renders_search_and_overview_script(self):
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -439,6 +449,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_does_not_render_run_reliability_panel(self):
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -458,6 +469,7 @@ class OverviewUITemplateTests(TestCase):
         run.refresh_from_db()
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -469,6 +481,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_panels_endpoint_renders_fragment(self):
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -483,6 +496,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_panels_respects_revenue_period_param(self):
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -496,6 +510,7 @@ class OverviewUITemplateTests(TestCase):
         perm = Permission.objects.get(codename="can_trigger_runs")
         self.user.user_permissions.add(perm)
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -539,6 +554,7 @@ class OverviewUITemplateTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):

@@ -121,6 +121,7 @@ class ReconciledRevenueOverviewContextTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -140,6 +141,7 @@ class ReconciledRevenueOverviewContextTests(TestCase):
 
     def test_revenue_period_invalid_falls_back_to_default(self):
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -190,6 +192,7 @@ class ReconciledRevenueOverviewTemplateTests(TestCase):
         )
 
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -204,6 +207,7 @@ class ReconciledRevenueOverviewTemplateTests(TestCase):
 
     def test_overview_renders_empty_state_for_no_reconciled_data(self):
         with (
+            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
