@@ -589,6 +589,22 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             if ck not in latest_jobs:
                 latest_jobs[ck] = job
 
+    # Reconciliation warnings for succeeded latest runs (overview company list)
+    succeeded_job_ids = list({j.id for j in latest_jobs.values() if j.status == RunJob.STATUS_SUCCEEDED})
+    artifacts_by_job_overview: dict = defaultdict(list)
+    for run_job_id, status in RunArtifact.objects.filter(
+        run_job_id__in=succeeded_job_ids
+    ).values_list("run_job_id", "reconcile_status"):
+        if run_job_id is not None:
+            artifacts_by_job_overview[str(run_job_id)].append(status or "")
+    reconciliation_warning_by_job_id: dict = {}
+    for jid in succeeded_job_ids:
+        label = _reconciliation_label_for_job(str(jid), artifacts_by_job_overview)
+        if label == "Mismatch":
+            reconciliation_warning_by_job_id[jid] = "Reconciliation mismatch"
+        elif label == "Not reconciled":
+            reconciliation_warning_by_job_id[jid] = "Not reconciled"
+
     ensure_db_initialized()
     token_pairs = [
         (c.company_key, ((c.config_json or {}).get("qbo") or {}).get("realm_id"))
@@ -615,6 +631,10 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             latest_artifact_time = latest_artifact.processed_at or latest_artifact.imported_at
         last_run_time = latest_job_time or latest_artifact_time
 
+        last_run_reconciliation_warning = None
+        if latest_job and latest_job.status == RunJob.STATUS_SUCCEEDED:
+            last_run_reconciliation_warning = reconciliation_warning_by_job_id.get(latest_job.id)
+
         if status == "healthy":
             healthy_count += 1
         elif status == "warning":
@@ -631,6 +651,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "token_info": token_info,
                 "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
                 "summary": summary,
+                "last_run_reconciliation_warning": last_run_reconciliation_warning,
             }
         )
 
@@ -941,6 +962,24 @@ def _reconciliation_label_for_job(job_id: str, artifacts_by_job: dict) -> str:
     return "Not reconciled"
 
 
+def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
+    """Return a short message for run-detail banner when run succeeded but needs attention; else None."""
+    if job.status != RunJob.STATUS_SUCCEEDED:
+        return None
+    if not artifacts:
+        return (
+            "Run succeeded but no artifacts were linked. "
+            "Check pipeline logs and that metadata files exist under Uploaded/."
+        )
+    statuses = [a.reconcile_status for a in artifacts if getattr(a, "reconcile_status", None)]
+    label = _reconciliation_label_for_job(str(job.id), {str(job.id): statuses})
+    if label == "Mismatch":
+        return "Reconciliation mismatch: EPOS and QBO totals differ. Verify in QuickBooks."
+    if label == "Not reconciled":
+        return "Reconciliation did not run or failed. Check pipeline logs for this run."
+    return None
+
+
 @login_required
 def runs_list(request):
     _ensure_company_records()
@@ -1145,6 +1184,7 @@ def logs_list(request):
 def run_detail(request, job_id):
     job = get_object_or_404(RunJob, id=job_id)
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
+    artifacts_list = list(artifacts)
     active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
     context = {
         "job": job,
@@ -1153,6 +1193,7 @@ def run_detail(request, job_id):
         "active_run_ids_json": json.dumps(active_run_ids_list),
         "exit_code_info": _exit_code_info(job.exit_code),
         "exit_code_reference": EXIT_CODE_REFERENCE,
+        "run_attention_message": _run_attention_message(job, artifacts_list),
     }
     context.update(_nav_context())
     context.update(

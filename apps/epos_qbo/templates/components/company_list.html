@@ -25,6 +25,12 @@
                         <div>
                             <h4 class="text-sm font-medium text-slate-900 dark:text-slate-100">{{ company.name }}</h4>
                             <p class="text-xs text-slate-500 dark:text-slate-400">Last run: {% if company.last_run %}{{ company.last_run|date:"M j, Y H:i" }}{% else %}Never run{% endif %}</p>
+                            {% if company.last_run_reconciliation_warning %}
+                            <p class="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
+                                <iconify-icon icon="solar:danger-triangle-linear" width="14"></iconify-icon>
+                                {{ company.last_run_reconciliation_warning }}
+                            </p>
+                            {% endif %}
                         </div>
                     </div>
 
