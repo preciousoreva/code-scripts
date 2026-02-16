@@ -160,6 +160,7 @@
 {% endblock %}
 
 {% block body_extra %}
+{% load static %}
 <script>
     function runTriggerForm() {
         return {
@@ -178,4 +179,5 @@
         };
     }
 </script>
+<script src="{% static 'js/runs.js' %}"></script>
 {% endblock %}

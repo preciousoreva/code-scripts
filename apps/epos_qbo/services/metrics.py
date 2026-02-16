@@ -445,22 +445,42 @@ def compute_avg_runtime_by_target_date(
     """
     Avg Runtime KPI by data target date: average duration of runs that produced
     artifacts for target_date vs prev_target_date (same comparison logic as Sales Synced).
+    
+    Only includes runs that actually uploaded at least one receipt (uploaded > 0)
+    to ensure consistent comparisons between runs that did QBO upload work.
     """
-    # RunJob IDs that have at least one artifact for this target_date (optionally for given companies)
+    # Get artifacts for target_date and filter to only those with uploaded > 0
     artifact_qs = RunArtifact.objects.filter(
         target_date=target_date,
         run_job_id__isnull=False,
     )
     if company_keys is not None:
         artifact_qs = artifact_qs.filter(company_key__in=company_keys)
-    job_ids_this = list(artifact_qs.values_list("run_job_id", flat=True).distinct())
+    artifacts_this = list(artifact_qs.select_related("run_job"))
+    # Filter to only artifacts from runs that uploaded at least one receipt
+    job_ids_this = list({
+        art.run_job_id
+        for art in artifacts_this
+        if art.run_job_id
+        and isinstance(art.upload_stats_json, dict)
+        and art.upload_stats_json.get("uploaded", 0) > 0
+    })
+    
+    # Same for previous target date
     prev_qs = RunArtifact.objects.filter(
         target_date=prev_target_date,
         run_job_id__isnull=False,
     )
     if company_keys is not None:
         prev_qs = prev_qs.filter(company_key__in=company_keys)
-    job_ids_prev = list(prev_qs.values_list("run_job_id", flat=True).distinct())
+    artifacts_prev = list(prev_qs.select_related("run_job"))
+    job_ids_prev = list({
+        art.run_job_id
+        for art in artifacts_prev
+        if art.run_job_id
+        and isinstance(art.upload_stats_json, dict)
+        and art.upload_stats_json.get("uploaded", 0) > 0
+    })
 
     jobs_this = list(
         RunJob.objects.filter(
@@ -514,9 +534,15 @@ def compute_avg_runtime_by_target_date(
         trend_color = "slate"
         trend_text = f"↑ New runtime vs {prev_date_display}"
     else:
+        # No upload runs for either date (or only skip-only runs)
         trend_dir = "flat"
         trend_color = "slate"
-        trend_text = f"— 0.0% change vs {prev_date_display}"
+        if len(duration_this) == 0 and len(duration_prev) == 0:
+            trend_text = f"— No upload runs vs {prev_date_display}"
+        elif len(duration_this) == 0:
+            trend_text = f"— No upload runs (vs {prev_date_display})"
+        else:
+            trend_text = f"— 0.0% change vs {prev_date_display}"
 
     return {
         "avg_seconds": avg_this,

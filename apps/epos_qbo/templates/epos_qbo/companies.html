@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Companies • EPOS → QBO{% endblock %}
 
@@ -136,4 +137,8 @@
     </div>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block body_extra %}
+<script src="{% static 'js/companies.js' %}"></script>
 {% endblock %}

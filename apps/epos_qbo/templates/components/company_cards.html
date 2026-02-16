@@ -35,7 +35,7 @@
                     {% endif %}
                     <span class="flex items-center gap-1.5">
                         <iconify-icon icon="solar:document-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
-                        <span title="Receipts uploaded in the most recent successful sync; date is the business date of the data’s.">{% if company_data.latest_sync_target_date %}{{ company_data.records_latest_sync|default:0 }} receipts from latest sync ({{ company_data.latest_sync_target_date|date:"M j, Y" }}){% elif company_data.records_latest_sync %}{{ company_data.records_latest_sync }} receipts from latest sync{% else %}No sync yet{% endif %}</span>
+                        <span title="Receipts uploaded in the most recent successful sync; date is the business date of the data’s.">{% if company_data.latest_sync_target_date %}{{ company_data.records_latest_sync|default:0 }} receipts from latest sync ({{ company_data.latest_sync_target_date|date:"M j, Y" }}){% elif company_data.records_latest_sync %}{{ company_data.records_latest_sync }} receipts from latest sync{% else %}No sync yet{% endif %}{% if company_data.records_latest_sync == 0 and company_data.upload_skipped_latest_sync > 0 %} — {{ company_data.upload_skipped_latest_sync }} skipped (already in QBO){% endif %}</span>
                     </span>
                     <span class="flex items-center gap-1.5">
                         <iconify-icon icon="solar:key-minimalistic-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
@@ -164,6 +164,11 @@
                     {{ company_data.latest_run.started_at|date:"M d, Y g:i A" }}
                     {% if company_data.latest_run.target_date %} • Target: {{ company_data.latest_run.target_date|date:"Y-m-d" }}{% endif %}
                 </div>
+                {% if company_data.latest_run.status == 'succeeded' %}
+                <div class="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                    {{ company_data.records_latest_sync|default:0 }} uploaded, {{ company_data.upload_skipped_latest_sync|default:0 }} skipped (already in QBO)
+                </div>
+                {% endif %}
             </div>
         </div>
         {% endif %}

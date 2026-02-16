@@ -154,6 +154,7 @@ class OverviewUIContextTests(TestCase):
             source_path="/tmp/company_a_runtime.json",
             source_hash="hash-runtime",
             reconcile_epos_total=100.0,
+            upload_stats_json={"uploaded": 3, "skipped": 0, "failed": 0},
         )
         with (
             mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
@@ -218,6 +219,7 @@ class OverviewUIContextTests(TestCase):
             source_path="/tmp/y_run.json",
             source_hash="hash-y",
             reconcile_epos_total=50.0,
+            upload_stats_json={"uploaded": 4, "skipped": 0, "failed": 0},
         )
         t_run = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
@@ -235,6 +237,7 @@ class OverviewUIContextTests(TestCase):
             source_path="/tmp/t_run.json",
             source_hash="hash-t",
             reconcile_epos_total=50.0,
+            upload_stats_json={"uploaded": 4, "skipped": 0, "failed": 0},
         )
 
         with (
@@ -324,6 +327,7 @@ class OverviewUIContextTests(TestCase):
             source_path="/tmp/succeeded.json",
             source_hash="hash-succeeded",
             reconcile_epos_total=100.0,
+            upload_stats_json={"uploaded": 5, "skipped": 0, "failed": 0},
         )
         failed = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,

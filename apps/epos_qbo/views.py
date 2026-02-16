@@ -70,6 +70,10 @@ HEALTH_REASON_LABELS = {
     "RECON_MISMATCH": "Reconciliation mismatch above threshold",
     "NO_ARTIFACT_METADATA": "No successful sync yet",
 }
+# Run detail: message when run succeeded but 0 receipts uploaded (all skipped). {skipped} placeholder.
+RUN_DETAIL_ALL_SKIPPED_MESSAGE = (
+    "QuickBooks: 0 new receipts uploaded; {skipped} receipt(s) skipped (already in QuickBooks)."
+)
 EXIT_CODE_REFERENCE = [
     {"code": "0", "message": "Success."},
     {"code": "1", "message": "Pipeline failed during execution. Check Live Log for root cause."},
@@ -719,14 +723,62 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         if run_job_id and ck:
             job_id_to_company_keys[run_job_id].add(ck)
     job_ids_with_artifacts = list(job_id_to_company_keys.keys())
+    # #region agent log
+    import json as json_lib
+    from pathlib import Path
+    log_path = None
+    try:
+        log_path = Path(__file__).resolve().parents[2] / '.cursor' / 'debug.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, 'a', encoding='utf-8') as log_file:
+            log_file.write(json_lib.dumps({"id":"log_overview_latest_jobs_start","timestamp":timezone.now().timestamp()*1000,"location":"views.py:722","message":"Building latest_jobs","data":{"company_keys":company_keys,"job_ids_with_artifacts_count":len(job_ids_with_artifacts)},"runId":"debug","hypothesisId":"H1"})+'\n')
+    except Exception:
+        pass
+    # #endregion
     # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
-    all_relevant_jobs = RunJob.objects.filter(
-        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts)
-    ).order_by("-finished_at", "-started_at", "-created_at")
+    # PRIORITIZE RUNNING/QUEUED JOBS: Query all relevant jobs, then process running/queued first
+    all_relevant_jobs = list(RunJob.objects.filter(
+        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+    ).order_by("-finished_at", "-started_at", "-created_at"))
+    # #region agent log
+    active_jobs = [j for j in all_relevant_jobs if j.status in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED)]
+    try:
+        if log_path:
+            with open(log_path, 'a', encoding='utf-8') as log_file:
+                log_file.write(json_lib.dumps({"id":"log_overview_jobs_query","timestamp":timezone.now().timestamp()*1000,"location":"views.py:738","message":"Queried all_relevant_jobs","data":{"total_jobs":len(all_relevant_jobs),"active_jobs_count":len(active_jobs),"active_job_ids":[str(j.id) for j in active_jobs],"active_statuses":[j.status for j in active_jobs]},"runId":"debug","hypothesisId":"H1"})+'\n')
+    except Exception:
+        pass
+    # #endregion
+    # First pass: prioritize running/queued jobs
+    for job in all_relevant_jobs:
+        if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+            continue
+        candidates = []
+        if job.company_key and job.company_key in company_keys:
+            candidates.append(job.company_key)
+        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+            # All Companies run applies to all companies
+            candidates.extend(company_keys)
+        candidates.extend(job_id_to_company_keys.get(job.id, []))
+        for ck in candidates:
+            if ck not in latest_jobs:
+                latest_jobs[ck] = job
+                # #region agent log
+                try:
+                    if log_path:
+                        with open(log_path, 'a', encoding='utf-8') as log_file:
+                            log_file.write(json_lib.dumps({"id":"log_overview_set_active_latest","timestamp":timezone.now().timestamp()*1000,"location":"views.py:763","message":"Set active job as latest","data":{"company_key":ck,"job_id":str(job.id),"job_status":job.status},"runId":"debug","hypothesisId":"H1"})+'\n')
+                except Exception:
+                    pass
+                # #endregion
+    # Second pass: fill in completed jobs for companies without active runs
     for job in all_relevant_jobs:
         candidates = []
         if job.company_key and job.company_key in company_keys:
             candidates.append(job.company_key)
+        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+            # All Companies run applies to all companies
+            candidates.extend(company_keys)
         candidates.extend(job_id_to_company_keys.get(job.id, []))
         for ck in candidates:
             if ck not in latest_jobs:
@@ -813,6 +865,20 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "last_run_reconciliation_warning": last_run_reconciliation_warning,
             }
         )
+
+    # Check for active runs across all companies
+    active_runs = RunJob.objects.filter(
+        status__in=[RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED]
+    ).order_by("-created_at")
+    active_run_count = active_runs.count()
+    # #region agent log
+    try:
+        if log_path:
+            with open(log_path, 'a', encoding='utf-8') as log_file:
+                log_file.write(json_lib.dumps({"id":"log_overview_active_runs","timestamp":timezone.now().timestamp()*1000,"location":"views.py:870","message":"Checked active runs","data":{"active_run_count":active_run_count,"active_run_ids":[str(j.id) for j in active_runs[:5]]},"runId":"debug","hypothesisId":"H4"})+'\n')
+    except Exception:
+        pass
+    # #endregion
 
     system_health = _classify_system_health(healthy_count, warning_count, critical_count)
     system_health_breakdown = _format_system_health_breakdown(
@@ -1352,6 +1418,7 @@ def run_detail(request, job_id):
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
     artifacts_list = list(artifacts)
     active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
+    run_upload_summary_message = _run_detail_upload_summary_message(artifacts_list)
     context = {
         "job": job,
         "artifacts": artifacts,
@@ -1360,6 +1427,7 @@ def run_detail(request, job_id):
         "exit_code_info": _exit_code_info(job.exit_code),
         "exit_code_reference": EXIT_CODE_REFERENCE,
         "run_attention_message": _run_attention_message(job, artifacts_list),
+        "run_upload_summary_message": run_upload_summary_message,
     }
     context.update(_nav_context())
     context.update(
@@ -1638,6 +1706,32 @@ def _artifact_uploaded_count(artifact: RunArtifact) -> int:
     return 0
 
 
+def _artifact_upload_stat(artifact: RunArtifact, key: str) -> int | None:
+    """Return upload_stats_json[key] as int, or None if missing/invalid."""
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    raw = stats.get(key)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_detail_upload_summary_message(artifacts_list: list[RunArtifact]) -> str | None:
+    """If run had 0 uploads but some skipped, return a short explanation; else None."""
+    total_uploaded = 0
+    total_skipped = 0
+    for art in artifacts_list:
+        u = _artifact_upload_stat(art, "uploaded")
+        s = _artifact_upload_stat(art, "skipped")
+        if u is not None:
+            total_uploaded += u
+        if s is not None:
+            total_skipped += s
+    if total_uploaded == 0 and total_skipped > 0:
+        return RUN_DETAIL_ALL_SKIPPED_MESSAGE.format(skipped=total_skipped)
+    return None
+
+
 def _select_day_artifact_for_uploaded_count(artifacts: list[RunArtifact]) -> RunArtifact | None:
     by_hash: dict[str, RunArtifact] = {}
     no_hash: list[RunArtifact] = []
@@ -1893,9 +1987,31 @@ def _enrich_company_data(
     if latest_successful_artifact:
         records_latest_sync = _artifact_uploaded_count(latest_successful_artifact)
         latest_sync_target_date = latest_successful_artifact.target_date
+        upload_skipped_latest_sync = _artifact_upload_stat(latest_successful_artifact, "skipped")
+        if upload_skipped_latest_sync is None:
+            upload_skipped_latest_sync = 0
+        # #region agent log
+        try:
+            _lp = "/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log"
+            _payload = {"hypothesisId": "H1", "location": "views.py:_enrich_company_data", "message": "latest_successful_artifact stats", "data": {"company_key": company.company_key, "records_latest_sync": records_latest_sync, "upload_skipped_latest_sync": upload_skipped_latest_sync, "upload_stats_keys": list((latest_successful_artifact.upload_stats_json or {}).keys())}, "timestamp": __import__("time").time() * 1000}
+            with open(_lp, "a", encoding="utf-8") as _f:
+                _f.write(__import__("json").dumps(_payload) + "\n")
+        except Exception:
+            pass
+        # #endregion
     else:
         records_latest_sync = 0
         latest_sync_target_date = None
+        upload_skipped_latest_sync = 0
+        # #region agent log
+        try:
+            _lp = "/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log"
+            _payload = {"hypothesisId": "H2", "location": "views.py:_enrich_company_data", "message": "no latest_successful_artifact", "data": {"company_key": company.company_key}, "timestamp": __import__("time").time() * 1000}
+            with open(_lp, "a", encoding="utf-8") as _f:
+                _f.write(__import__("json").dumps(_payload) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
     # So templates can style the issue block by severity (amber/red), not overall status (which can be healthy)
     issues_highest_severity = None
@@ -1923,6 +2039,7 @@ def _enrich_company_data(
         "last_run_display": _format_last_run_time(last_activity_at),
         "records_latest_sync": records_latest_sync,
         "latest_sync_target_date": latest_sync_target_date,
+        "upload_skipped_latest_sync": upload_skipped_latest_sync,
     }
 
 
@@ -1974,20 +2091,40 @@ def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | N
         return {}, {}, {}, {}, {}
 
     # Latest run per company (include All Companies runs that produced an artifact for this company)
+    # Same logic as Overview page: include All Companies runs and prioritize running/queued jobs
     job_id_to_company_keys: dict = defaultdict(set)
     for run_job_id, ck in RunArtifact.objects.filter(company_key__in=company_keys).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
         if run_job_id and ck:
             job_id_to_company_keys[run_job_id].add(ck)
     job_ids_with_artifacts = list(job_id_to_company_keys.keys())
     # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
-    all_relevant_jobs = RunJob.objects.filter(
-        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts)
-    ).order_by("-finished_at", "-started_at", "-created_at")
+    # Include All Companies runs (same as Overview)
+    all_relevant_jobs = list(RunJob.objects.filter(
+        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+    ).order_by("-finished_at", "-started_at", "-created_at"))
     latest_runs_map: dict[str, RunJob | None] = {}
+    # First pass: prioritize running/queued jobs (same as Overview)
+    for job in all_relevant_jobs:
+        if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+            continue
+        candidates = []
+        if job.company_key and job.company_key in company_keys:
+            candidates.append(job.company_key)
+        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+            # All Companies run applies to all companies
+            candidates.extend(company_keys)
+        candidates.extend(job_id_to_company_keys.get(job.id, []))
+        for ck in candidates:
+            if ck not in latest_runs_map:
+                latest_runs_map[ck] = job
+    # Second pass: fill in completed jobs for companies without active runs
     for job in all_relevant_jobs:
         candidates = []
         if job.company_key and job.company_key in company_keys:
             candidates.append(job.company_key)
+        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+            # All Companies run applies to all companies
+            candidates.extend(company_keys)
         candidates.extend(job_id_to_company_keys.get(job.id, []))
         for ck in candidates:
             if ck not in latest_runs_map:

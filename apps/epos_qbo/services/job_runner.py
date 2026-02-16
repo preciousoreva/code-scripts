@@ -90,6 +90,7 @@ def build_command_for_job(job: RunJob) -> list[str]:
 
 
 def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
+    exit_code = None
     try:
         exit_code = popen.wait()
     finally:
@@ -106,16 +107,38 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
         pass
 
     if job is not None:
-        job.exit_code = exit_code
-        job.finished_at = timezone.now()
-        job.status = RunJob.STATUS_SUCCEEDED if exit_code == 0 else RunJob.STATUS_FAILED
-        if exit_code != 0 and not job.failure_reason:
-            job.failure_reason = f"Subprocess exited with code {exit_code}"
-        job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
-        attach_recent_artifacts_to_job(job)
+        try:
+            job.exit_code = exit_code
+            job.finished_at = timezone.now()
+            job.status = RunJob.STATUS_SUCCEEDED if exit_code == 0 else RunJob.STATUS_FAILED
+            if exit_code != 0 and not job.failure_reason:
+                job.failure_reason = f"Subprocess exited with code {exit_code}"
+            job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
+            attach_recent_artifacts_to_job(job)
+        except Exception as exc:
+            # Log error but don't crash - try to mark job as failed if status update failed
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to update RunJob {job_id} status after process exit: {exc}", exc_info=True)
+            try:
+                # Attempt to mark as failed if we couldn't update status normally
+                RunJob.objects.filter(id=job_id).update(
+                    status=RunJob.STATUS_FAILED,
+                    failure_reason=f"Status update failed: {exc}",
+                    finished_at=timezone.now(),
+                    exit_code=exit_code if exit_code is not None else -1,
+                )
+            except Exception:
+                # If even this fails, log and give up
+                logger.error(f"Failed to mark RunJob {job_id} as failed after status update error", exc_info=True)
 
-    release_run_lock(run_job=job, force=True)
-    dispatch_next_queued_job()
+    try:
+        release_run_lock(run_job=job, force=True)
+        dispatch_next_queued_job()
+    except Exception as exc:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in post-completion cleanup for RunJob {job_id}: {exc}", exc_info=True)
 
 
 def start_run_job(job: RunJob, command: list[str]) -> RunJob:

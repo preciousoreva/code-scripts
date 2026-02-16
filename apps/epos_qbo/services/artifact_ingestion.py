@@ -220,6 +220,10 @@ def ingest_metadata_file(path: Path, run_job: RunJob | None = None) -> tuple[Run
         if current_value is None and parsed_value is not None:
             setattr(artifact, field_name, parsed_value)
             updated_fields.append(field_name)
+    # Refresh upload stats from metadata so Companies page and Run Detail show skipped/uploaded correctly
+    if parsed.upload_stats_json and isinstance(parsed.upload_stats_json, dict):
+        artifact.upload_stats_json = parsed.upload_stats_json
+        updated_fields.append("upload_stats_json")
     if updated_fields:
         artifact.save(update_fields=updated_fields)
 

@@ -63,16 +63,7 @@
                     {% endif %}
                 </div>
 
-                <div class="grid grid-cols-3 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
-                    <div>
-                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Records</span>
-                        <span class="text-xs font-medium text-slate-700 dark:text-slate-300">
-                            {{ company.records_synced|default:"0" }} synced
-                        </span>
-                        {% if company.health_reason_labels %}
-                        <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-1">{{ company.health_reason_labels|join:", " }}</p>
-                        {% endif %}
-                    </div>
+                <div class="grid grid-cols-2 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
                     <div>
                         <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Token</span>
                         <span class="text-xs font-medium {% if company.token_info.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company.token_info.severity == 'warning' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">

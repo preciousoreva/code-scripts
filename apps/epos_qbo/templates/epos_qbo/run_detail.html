@@ -62,14 +62,23 @@
 
     <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Artifacts</h2>
+        {% if run_upload_summary_message %}
+        <div class="mb-3 rounded-md border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 px-4 py-3 text-sm text-slate-700 dark:text-slate-300">
+            {{ run_upload_summary_message }}
+        </div>
+        {% endif %}
         <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <table class="w-full text-sm min-w-max">
                 <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                     <tr>
                         <th class="text-left px-3 py-2">Company</th>
                         <th class="text-left px-3 py-2">Target Date</th>
                         <th class="text-left px-3 py-2">Processed</th>
                         <th class="text-left px-3 py-2">Rows Kept</th>
+                        <th class="text-left px-3 py-2" title="Receipts considered for upload">QBO Attempted</th>
+                        <th class="text-left px-3 py-2" title="New receipts created in QuickBooks">QBO Uploaded</th>
+                        <th class="text-left px-3 py-2" title="Receipts skipped (already existed in QuickBooks)">QBO Skipped</th>
+                        <th class="text-left px-3 py-2" title="Receipts that failed to upload">QBO Failed</th>
                         <th class="text-left px-3 py-2">Metadata Source</th>
                     </tr>
                 </thead>
@@ -80,6 +89,10 @@
                         <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
                         <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
                         <td class="px-3 py-2">{{ artifact.rows_kept|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.attempted|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.uploaded|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.skipped|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.failed|default:"-" }}</td>
                         <td class="px-3 py-2">
                             {% if artifact.reliability_status == 'warning' %}
                             <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Rolling (last_*)</span>
@@ -90,7 +103,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="5" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
+                        <td colspan="9" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
                     </tr>
                     {% endfor %}
                 </tbody>

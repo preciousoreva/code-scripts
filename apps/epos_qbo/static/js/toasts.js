@@ -257,9 +257,15 @@
                         if (ids.length === 0) return;
                         const hadNew = this.mergeActiveRunIds(ids);
                         if (hadNew) {
+                            // #region agent log
+                            fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'toasts.js:259',message:'New active run discovered',data:{jobIds:ids},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+                            // #endregion
                             this.show('info', 'Run started', 'A pipeline run has started and is now visible in the log.', {
                                 duration: TOAST_DURATION,
                             });
+                            // #region agent log
+                            fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'toasts.js:263',message:'Dispatching oiat:run-started event',data:{jobIds:ids},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+                            // #endregion
                             window.dispatchEvent(new CustomEvent('oiat:run-started', { detail: { jobIds: ids } }));
                             if (!this.pollingInterval && this.activeRunIds.length > 0) {
                                 this.startPollingLoop();

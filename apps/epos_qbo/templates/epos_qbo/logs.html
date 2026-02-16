@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block title %}Logs • EPOS → QBO{% endblock %}
 
@@ -157,4 +158,9 @@
         </div>
     </section>
 </div>
+{% endblock %}
+
+{% block body_extra %}
+{% load static %}
+<script src="{% static 'js/logs.js' %}"></script>
 {% endblock %}

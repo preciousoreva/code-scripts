@@ -227,6 +227,9 @@
         const revenueCompany = existingCompany ? existingCompany.value : 'all';
         const period = currentRevenuePeriod();
         const requestUrl = `${OVERVIEW_PANELS_URL}?revenue_period=${encodeURIComponent(period)}`;
+        // #region agent log
+        fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:221',message:'refreshOverviewPanels called',data:{url:requestUrl},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
 
         fetch(requestUrl, {
             credentials: 'same-origin',
@@ -241,10 +244,36 @@
                 return response.text();
             })
             .then((html) => {
-                root.innerHTML = html;
+                // #region agent log
+                fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:243',message:'refreshOverviewPanels HTML received',data:{html_length:html.length},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+                // #endregion
+                // Parse HTML to extract metric_basis_line from the response
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const metricBasisData = doc.querySelector('#metric-basis-line-data');
+                
+                // Update the metric_basis_line in the header if found in response
+                if (metricBasisData) {
+                    const headerMetricLine = document.getElementById('metric-basis-line');
+                    if (headerMetricLine) {
+                        headerMetricLine.textContent = metricBasisData.textContent.trim();
+                    }
+                }
+                
+                // Update panels content (remove the hidden metric_basis_line-data div)
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = html;
+                const metricDataDiv = tempDiv.querySelector('#metric-basis-line-data');
+                if (metricDataDiv) {
+                    metricDataDiv.remove();
+                }
+                root.innerHTML = tempDiv.innerHTML;
                 initOverview({ filterQuery, revenueCompany });
             })
-            .catch(() => {
+            .catch((err) => {
+                // #region agent log
+                fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:247',message:'refreshOverviewPanels failed',data:{error:String(err)},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+                // #endregion
                 // Best-effort refresh: keep current panel content when request fails.
             });
     }
@@ -262,13 +291,22 @@
 
     function bindCompletionRefresh() {
         if (completionListenerBound) return;
-        window.addEventListener('oiat:run-completed', () => {
+        window.addEventListener('oiat:run-completed', (event) => {
+            // #region agent log
+            fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:265',message:'oiat:run-completed event received',data:{detail:event.detail},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+            // #endregion
             scheduleOverviewRefresh(OVERVIEW_REFRESH_AFTER_COMPLETION_MS);
         });
-        window.addEventListener('oiat:run-started', () => {
+        window.addEventListener('oiat:run-started', (event) => {
+            // #region agent log
+            fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:269',message:'oiat:run-started event received',data:{detail:event.detail},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+            // #endregion
             scheduleOverviewRefresh(OVERVIEW_REFRESH_DEBOUNCE_MS);
         });
         completionListenerBound = true;
+        // #region agent log
+        fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:272',message:'bindCompletionRefresh completed',data:{},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
     }
 
     function bindRevenuePeriodChange() {
