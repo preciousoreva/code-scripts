@@ -11,13 +11,13 @@
     <div class="flex items-start justify-between">
         <div>
             <div class="flex items-center gap-3 mb-2">
-                <h1 class="text-3xl font-bold text-slate-900">{{ company_data.company.display_name }}</h1>
-                <span class="px-3 py-1 bg-{{ company_data.status.color }}-100 text-{{ company_data.status.color }}-700 text-sm font-medium rounded-full flex items-center gap-2">
+                <h1 class="text-3xl font-bold text-slate-900 dark:text-slate-100">{{ company_data.company.display_name }}</h1>
+                <span class="px-3 py-1 bg-{{ company_data.status.color }}-100 dark:bg-{{ company_data.status.color }}-900/30 text-{{ company_data.status.color }}-700 dark:text-{{ company_data.status.color }}-400 text-sm font-medium rounded-full flex items-center gap-2">
                     <span class="w-2 h-2 bg-{{ company_data.status.color }}-500 rounded-full"></span>
                     {{ company_data.status.label }}
                 </span>
             </div>
-            <p class="text-sm text-slate-500">Company Key: <code class="px-2 py-1 bg-slate-100 rounded text-xs font-mono">{{ company_data.company.company_key }}</code></p>
+            <p class="text-sm text-slate-500 dark:text-slate-400">Company Key: <code class="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded text-xs font-mono text-slate-900 dark:text-slate-200">{{ company_data.company.company_key }}</code></p>
         </div>
         <div class="flex items-center gap-3">
             {% if perms.epos_qbo.can_trigger_runs %}
@@ -42,13 +42,13 @@
     </div>
 
     {% if company_data.issues %}
-    <div class="bg-{{ company_data.status.color }}-50 border border-{{ company_data.status.color }}-200 rounded-xl p-4">
+    <div class="bg-{{ company_data.status.color }}-50 dark:bg-{{ company_data.status.color }}-900/20 border border-{{ company_data.status.color }}-200 dark:border-{{ company_data.status.color }}-800 rounded-xl p-4">
         <div class="flex items-start gap-3">
-            <iconify-icon icon="solar:danger-triangle-linear" width="24" class="text-{{ company_data.status.color }}-600 flex-shrink-0 mt-0.5"></iconify-icon>
+            <iconify-icon icon="solar:danger-triangle-linear" width="24" class="text-{{ company_data.status.color }}-600 dark:text-{{ company_data.status.color }}-400 flex-shrink-0 mt-0.5"></iconify-icon>
             <div class="flex-1">
-                <h3 class="font-semibold text-{{ company_data.status.color }}-900 mb-2">{{ company_data.issues|length }} Active Issue{{ company_data.issues|length|pluralize }}</h3>
+                <h3 class="font-semibold text-{{ company_data.status.color }}-900 dark:text-{{ company_data.status.color }}-300 mb-2">{{ company_data.issues|length }} Active Issue{{ company_data.issues|length|pluralize }}</h3>
                 <ul class="space-y-1.5">
-                    {% for issue in company_data.issues %}<li class="text-sm text-{{ company_data.status.color }}-800">• {{ issue.message }}</li>{% endfor %}
+                    {% for issue in company_data.issues %}<li class="text-sm text-{{ company_data.status.color }}-800 dark:text-{{ company_data.status.color }}-300">• {{ issue.message }}</li>{% endfor %}
                 </ul>
             </div>
         </div>
@@ -56,45 +56,45 @@
     {% endif %}
 
     <div class="grid grid-cols-4 gap-6">
-        <div class="bg-white border border-slate-200 rounded-xl p-5">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Last Run</p>
-                <iconify-icon icon="solar:clock-circle-linear" width="20" class="text-slate-400"></iconify-icon>
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last Run</p>
+                <iconify-icon icon="solar:clock-circle-linear" width="20" class="text-slate-400 dark:text-slate-500"></iconify-icon>
             </div>
-            <p class="text-xl font-bold text-slate-900">{{ company_data.last_run_display }}</p>
-            {% if company_data.latest_run %}<p class="text-xs text-slate-500 mt-1">{{ company_data.latest_run.started_at|date:"M d, g:i A" }}</p>{% endif %}
+            <p class="text-xl font-bold text-slate-900 dark:text-slate-100">{{ company_data.last_run_display }}</p>
+            {% if company_data.latest_run %}<p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ company_data.latest_run.started_at|date:"M d, g:i A" }}</p>{% endif %}
         </div>
-        <div class="bg-white border border-slate-200 rounded-xl p-5">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">SALES SYNCED (7D)</p>
-                <iconify-icon icon="solar:wallet-money-linear" width="20" class="text-slate-400"></iconify-icon>
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">SALES SYNCED (7D)</p>
+                <iconify-icon icon="solar:wallet-money-linear" width="20" class="text-slate-400 dark:text-slate-500"></iconify-icon>
             </div>
-            <p class="text-xl font-bold text-slate-900">{{ company_data.sales_7d_total_display }}</p>
-            <p class="text-xs mt-1 {% if company_data.sales_7d_trend_color == 'emerald' %}text-emerald-600{% elif company_data.sales_7d_trend_color == 'red' %}text-red-600{% else %}text-slate-500{% endif %}">
+            <p class="text-xl font-bold text-slate-900 dark:text-slate-100">{{ company_data.sales_7d_total_display }}</p>
+            <p class="text-xs mt-1 {% if company_data.sales_7d_trend_color == 'emerald' %}text-emerald-600 dark:text-emerald-400{% elif company_data.sales_7d_trend_color == 'red' %}text-red-600 dark:text-red-400{% else %}text-slate-500 dark:text-slate-400{% endif %}">
                 {{ company_data.sales_7d_trend_text }}
             </p>
         </div>
-        <div class="bg-white border border-slate-200 rounded-xl p-5">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Token Status</p>
-                <iconify-icon icon="solar:key-minimalistic-linear" width="20" class="text-slate-400"></iconify-icon>
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Token Status</p>
+                <iconify-icon icon="solar:key-minimalistic-linear" width="20" class="text-slate-400 dark:text-slate-500"></iconify-icon>
             </div>
-            <p class="text-xl font-bold {% if company_data.token_info.severity == 'critical' %}text-red-600{% elif company_data.token_info.severity == 'warning' %}text-amber-600{% else %}text-emerald-600{% endif %}">{{ company_data.token_info.display_label }}</p>
-            <p class="text-xs text-slate-500 mt-1">{{ company_data.token_info.display_subtext }}</p>
+            <p class="text-xl font-bold {% if company_data.token_info.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company_data.token_info.severity == 'warning' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">{{ company_data.token_info.display_label }}</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ company_data.token_info.display_subtext }}</p>
         </div>
-        <div class="bg-white border border-slate-200 rounded-xl p-5">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Runs</p>
-                <iconify-icon icon="solar:history-linear" width="20" class="text-slate-400"></iconify-icon>
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Total Runs</p>
+                <iconify-icon icon="solar:history-linear" width="20" class="text-slate-400 dark:text-slate-500"></iconify-icon>
             </div>
-            <p class="text-xl font-bold text-slate-900">{{ recent_runs|length }}</p>
-            <p class="text-xs text-slate-500 mt-1">Last 30 runs</p>
+            <p class="text-xl font-bold text-slate-900 dark:text-slate-100">{{ recent_runs|length }}</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Last 30 runs</p>
         </div>
     </div>
 
-    <div class="bg-white border border-slate-200 rounded-xl">
-        <div class="px-6 py-4 border-b border-slate-200">
-            <h2 class="text-lg font-semibold text-slate-900 flex items-center gap-2">
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-600">
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <iconify-icon icon="solar:settings-linear" width="20"></iconify-icon>
                 Configuration
             </h2>
@@ -102,24 +102,24 @@
         <div class="p-6">
             <div class="grid grid-cols-2 gap-x-8 gap-y-4">
                 <div>
-                    <h3 class="text-sm font-semibold text-slate-700 mb-3">QuickBooks Online</h3>
+                    <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">QuickBooks Online</h3>
                     <dl class="space-y-2 text-sm">
-                        <div class="flex justify-between"><dt class="text-slate-500">Realm ID:</dt><dd class="font-mono text-xs text-slate-900">{{ company_data.config_display.realm_id }}</dd></div>
-                        <div class="flex justify-between"><dt class="text-slate-500">Deposit Account:</dt><dd class="text-slate-900 font-medium">{{ company_data.config_display.deposit_account }}</dd></div>
-                        <div class="flex justify-between"><dt class="text-slate-500">Tax rate:</dt><dd class="text-slate-900 font-medium">{{ company_data.config_display.tax_rate|default:"—" }}</dd></div>
-                        <div class="flex justify-between"><dt class="text-slate-500">Inventory:</dt><dd class="text-slate-900 font-medium">{% if company_data.config_display.inventory_enabled %}<span class="text-emerald-600">Enabled</span>{% else %}<span class="text-slate-400">Disabled</span>{% endif %}</dd></div>
+                        <div class="flex justify-between"><dt class="text-slate-500 dark:text-slate-400">Realm ID:</dt><dd class="font-mono text-xs text-slate-900 dark:text-slate-100">{{ company_data.config_display.realm_id }}</dd></div>
+                        <div class="flex justify-between"><dt class="text-slate-500 dark:text-slate-400">Deposit Account:</dt><dd class="text-slate-900 dark:text-slate-100 font-medium">{{ company_data.config_display.deposit_account }}</dd></div>
+                        <div class="flex justify-between"><dt class="text-slate-500 dark:text-slate-400">Tax rate:</dt><dd class="text-slate-900 dark:text-slate-100 font-medium">{{ company_data.config_display.tax_rate|default:"—" }}</dd></div>
+                        <div class="flex justify-between"><dt class="text-slate-500 dark:text-slate-400">Inventory:</dt><dd class="text-slate-900 dark:text-slate-100 font-medium">{% if company_data.config_display.inventory_enabled %}<span class="text-emerald-600 dark:text-emerald-400">Enabled</span>{% else %}<span class="text-slate-400 dark:text-slate-500">Disabled</span>{% endif %}</dd></div>
                     </dl>
                 </div>
                 <div>
-                    <h3 class="text-sm font-semibold text-slate-700 mb-3">Transform</h3>
+                    <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Transform</h3>
                     <dl class="space-y-2 text-sm">
-                        <div class="flex justify-between"><dt class="text-slate-500">Group By:</dt><dd class="text-slate-900 font-medium">{{ company_data.config_display.group_by }}</dd></div>
-                        <div class="flex justify-between"><dt class="text-slate-500">Date Format:</dt><dd class="font-mono text-xs text-slate-900">{{ company_data.config_display.date_format }}</dd></div>
+                        <div class="flex justify-between"><dt class="text-slate-500 dark:text-slate-400">Group By:</dt><dd class="text-slate-900 dark:text-slate-100 font-medium">{{ company_data.config_display.group_by }}</dd></div>
+                        <div class="flex justify-between"><dt class="text-slate-500 dark:text-slate-400">Date Format:</dt><dd class="font-mono text-xs text-slate-900 dark:text-slate-100">{{ company_data.config_display.date_format }}</dd></div>
                     </dl>
                 </div>
             </div>
-            <div class="mt-6 pt-6 border-t border-slate-200" x-data="{ showJson: false }">
-                <button type="button" @click="showJson = !showJson" class="text-sm text-slate-600 hover:text-slate-900 flex items-center gap-2">
+            <div class="mt-6 pt-6 border-t border-slate-200 dark:border-slate-600" x-data="{ showJson: false }">
+                <button type="button" @click="showJson = !showJson" class="text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 flex items-center gap-2">
                     <iconify-icon :icon="showJson ? 'solar:alt-arrow-up-linear' : 'solar:alt-arrow-down-linear'" width="16"></iconify-icon>
                     <span x-text="showJson ? 'Hide' : 'Show'"></span> Full Configuration JSON
                 </button>
@@ -130,77 +130,77 @@
         </div>
     </div>
 
-    <div class="bg-white border border-slate-200 rounded-xl">
-        <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-            <h2 class="text-lg font-semibold text-slate-900 flex items-center gap-2">
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-600 flex items-center justify-between">
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <iconify-icon icon="solar:history-linear" width="20"></iconify-icon>
                 Recent Runs
             </h2>
-            <a href="{% url 'epos_qbo:runs' %}?company={{ company_data.company.company_key }}" class="text-sm text-blue-600 hover:text-blue-700 font-medium">View All →</a>
+            <a href="{% url 'epos_qbo:runs' %}?company={{ company_data.company.company_key }}" class="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium">View All →</a>
         </div>
-        <div class="divide-y divide-slate-100">
+        <div class="divide-y divide-slate-100 dark:divide-slate-700">
             {% for run in recent_runs|slice:":10" %}
-            <a href="{% url 'epos_qbo:run-detail' job_id=run.id %}" class="block px-6 py-4 hover:bg-slate-50 transition-colors">
+            <a href="{% url 'epos_qbo:run-detail' job_id=run.id %}" class="block px-6 py-4 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors">
                 <div class="flex items-center justify-between">
                     <div class="flex-1">
                         <div class="flex items-center gap-3 mb-1">
-                            <span class="font-mono text-sm text-slate-600">Run #{{ run.id|slice:":8" }}</span>
-                            <span class="px-2 py-0.5 rounded-full text-xs font-medium {% if run.status == 'succeeded' %}bg-emerald-100 text-emerald-700{% elif run.status == 'failed' %}bg-red-100 text-red-700{% elif run.status == 'running' %}bg-blue-100 text-blue-700{% else %}bg-slate-100 text-slate-700{% endif %}">{{ run.get_status_display }}</span>
+                            <span class="font-mono text-sm text-slate-600 dark:text-slate-400">Run #{{ run.id|slice:":8" }}</span>
+                            <span class="px-2 py-0.5 rounded-full text-xs font-medium {% if run.status == 'succeeded' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300{% elif run.status == 'failed' %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300{% elif run.status == 'running' %}bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300{% else %}bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200{% endif %}">{{ run.get_status_display }}</span>
                         </div>
-                        <p class="text-xs text-slate-500">
+                        <p class="text-xs text-slate-500 dark:text-slate-400">
                             {{ run.started_at|date:"M d, Y g:i A" }}
                             {% if run.target_date %} • Target: {{ run.target_date|date:"Y-m-d" }}{% endif %}
                         </p>
                     </div>
-                    <iconify-icon icon="solar:alt-arrow-right-linear" width="20" class="text-slate-400"></iconify-icon>
+                    <iconify-icon icon="solar:alt-arrow-right-linear" width="20" class="text-slate-400 dark:text-slate-500"></iconify-icon>
                 </div>
             </a>
             {% empty %}
-            <div class="px-6 py-8 text-center text-sm text-slate-500">No runs yet. Trigger your first sync to get started.</div>
+            <div class="px-6 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No runs yet. Trigger your first sync to get started.</div>
             {% endfor %}
         </div>
     </div>
 
     {% if recent_artifacts %}
-    <div class="bg-white border border-slate-200 rounded-xl">
-        <div class="px-6 py-4 border-b border-slate-200">
-            <h2 class="text-lg font-semibold text-slate-900 flex items-center gap-2">
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-600">
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
                 <iconify-icon icon="solar:document-text-linear" width="20"></iconify-icon>
                 Recent Artifacts
             </h2>
         </div>
-        <div class="divide-y divide-slate-100">
+        <div class="divide-y divide-slate-100 dark:divide-slate-700">
             {% for artifact in recent_artifacts|slice:":5" %}
             <div class="px-6 py-4">
                 <div class="grid grid-cols-1 md:grid-cols-[1fr_auto] items-center gap-3 md:gap-4">
                     <div>
                         <div class="mb-2">
-                            <span class="text-sm font-medium text-slate-900">{{ artifact.target_date|date:"Y-m-d" }}</span>
+                            <span class="text-sm font-medium text-slate-900 dark:text-slate-100">{{ artifact.target_date|date:"Y-m-d" }}</span>
                         </div>
-                        <div class="grid grid-cols-3 gap-4 text-xs text-slate-600">
-                            <div><span class="text-slate-500">Total Rows:</span> <span class="font-medium">{{ artifact.rows_total|default:"0" }}</span></div>
-                            <div><span class="text-slate-500">Kept:</span> <span class="font-medium">{{ artifact.rows_kept|default:"0" }}</span></div>
-                            <div><span class="text-slate-500">Processed:</span> <span class="font-medium">{{ artifact.processed_at|date:"M d, g:i A" }}</span></div>
+                        <div class="grid grid-cols-3 gap-4 text-xs text-slate-600 dark:text-slate-400">
+                            <div><span class="text-slate-500 dark:text-slate-400">Total Rows:</span> <span class="font-medium">{{ artifact.rows_total|default:"0" }}</span></div>
+                            <div><span class="text-slate-500 dark:text-slate-400">Kept:</span> <span class="font-medium">{{ artifact.rows_kept|default:"0" }}</span></div>
+                            <div><span class="text-slate-500 dark:text-slate-400">Processed:</span> <span class="font-medium">{{ artifact.processed_at|date:"M d, g:i A" }}</span></div>
                         </div>
                     </div>
                     <div class="md:justify-self-end self-center">
                         {% if artifact.reliability_status == 'warning' %}
-                        <span class="px-2 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full">Rolling (last_*)</span>
+                        <span class="px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Rolling (last_*)</span>
                         {% else %}
-                        <span class="px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded-full">Snapshot (dated)</span>
+                        <span class="px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">Snapshot (dated)</span>
                         {% endif %}
                     </div>
                 </div>
             </div>
             {% endfor %}
         </div>
-        <div class="px-6 py-4 border-t border-slate-100 bg-slate-50/60">
-            <p class="text-xs text-slate-600 mb-2">
-                <span class="font-semibold text-slate-700">About metadata source:</span> This is informational and does not indicate sync failure.
+        <div class="px-6 py-4 border-t border-slate-100 dark:border-slate-600 bg-slate-50/60 dark:bg-slate-700/30">
+            <p class="text-xs text-slate-600 dark:text-slate-400 mb-2">
+                <span class="font-semibold text-slate-700 dark:text-slate-300">About metadata source:</span> This is informational and does not indicate sync failure.
             </p>
-            <ul class="text-xs text-slate-500 space-y-1">
-                <li>• <span class="font-medium text-slate-700">Rolling (last_*)</span>: file is a rolling state file and may be overwritten by newer runs.</li>
-                <li>• <span class="font-medium text-slate-700">Snapshot (dated)</span>: file is treated as an immutable run-specific snapshot.</li>
+            <ul class="text-xs text-slate-500 dark:text-slate-400 space-y-1">
+                <li>• <span class="font-medium text-slate-700 dark:text-slate-300">Rolling (last_*)</span>: file is a rolling state file and may be overwritten by newer runs.</li>
+                <li>• <span class="font-medium text-slate-700 dark:text-slate-300">Snapshot (dated)</span>: file is treated as an immutable run-specific snapshot.</li>
             </ul>
         </div>
     </div>

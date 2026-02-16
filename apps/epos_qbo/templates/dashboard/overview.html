@@ -12,7 +12,7 @@
     <div>
         <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">System Overview</h1>
         <p class="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Target: Yesterday ({{ target_date_display|default:"" }}) • Times shown in {{ dashboard_timezone_display|default:"UTC" }}
+            {{ metric_basis_line|default:"" }}
         </p>
         <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Real-time monitoring of EPOS to QuickBooks Online synchronization.

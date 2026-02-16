@@ -219,7 +219,10 @@ These optional env vars tune portal defaults/thresholds without code edits:
 
 | Variable | Default | Purpose |
 |---------|---------|---------|
-| `OIAT_DASHBOARD_TIMEZONE` | `TIME_ZONE` (UTC) | Timezone for dashboard "today"/"yesterday" (overview KPIs, Run Success, receipts uploaded, Quick Sync default). Set to match your scheduler (e.g. `America/New_York`). |
+| `OIAT_DASHBOARD_TIMEZONE` | `TIME_ZONE` (UTC) | Timezone for non-overview dashboard calendar-day displays (e.g. runs/receipts "today"). |
+| `OIAT_BUSINESS_TIMEZONE` | `Africa/Lagos` | Canonical business timezone used for overview target trading date and Quick Sync default date. |
+| `OIAT_BUSINESS_DAY_CUTOFF_HOUR` | `5` | Trading-day cutoff hour in business timezone. Before cutoff, overview target date rolls back an extra day. |
+| `OIAT_BUSINESS_DAY_CUTOFF_MINUTE` | `0` | Trading-day cutoff minute in business timezone. |
 | `OIAT_DASHBOARD_DEFAULT_PARALLEL` | `2` | Default worker count for all-company run trigger form |
 | `OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS` | `2` | Default stagger interval for all-company run trigger form |
 | `OIAT_DASHBOARD_STALE_HOURS_WARNING` | `48` | Hours since last run before company sync-stale warning appears |

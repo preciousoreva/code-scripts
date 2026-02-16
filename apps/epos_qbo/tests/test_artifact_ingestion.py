@@ -120,3 +120,16 @@ class ArtifactIngestionTests(TestCase):
         artifact_b = RunArtifact.objects.get(company_key="company_b")
         self.assertIsNone(artifact_a.run_job_id)
         self.assertEqual(artifact_b.run_job_id, job.id)
+
+    def test_parse_metadata_logs_warning_for_naive_processed_at(self):
+        payload = self._metadata_payload()
+        payload["processed_at"] = "2026-02-10T11:00:00"
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "last_company_a_transform.json"
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            with self.assertLogs("apps.epos_qbo.services.artifact_ingestion", level="WARNING") as logs:
+                parsed = parse_metadata_file(path)
+
+        self.assertIsNotNone(parsed)
+        self.assertTrue(any("naive" in line for line in logs.output))

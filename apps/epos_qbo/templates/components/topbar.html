@@ -35,7 +35,7 @@
                 <div x-show="quickSyncOpen" x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 scale-95" x-transition:enter-end="opacity-100 scale-100" x-cloak
                      class="absolute right-0 mt-2 w-64 py-3 px-4 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 z-50">
                     <form method="post" action="{% url 'epos_qbo:run-trigger' %}"
-                          onsubmit="return confirm('Quick Sync will run all companies for target date ' + this.target_date.value + ' (timezone: {{ quick_sync_timezone|default:'UTC' }}). Continue?');">
+                          onsubmit="return confirm('Quick Sync will run all companies for target trading date ' + this.target_date.value + ' (business timezone: {{ quick_sync_timezone|default:'UTC' }}). Continue?');">
                         {% csrf_token %}
                         <input type="hidden" name="scope" value="all_companies">
                         <input type="hidden" name="date_mode" value="target_date">
@@ -52,7 +52,7 @@
                             <iconify-icon icon="solar:play-linear" width="16"></iconify-icon>
                             Run Sync
                         </button>
-                        <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">Times shown in {{ quick_sync_timezone|default:"UTC" }}</p>
+                        <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">Target trading date uses {{ quick_sync_timezone|default:"UTC" }} cutoff {{ business_cutoff_display|default:"05:00" }}</p>
                     </form>
                 </div>
             </div>

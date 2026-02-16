@@ -9,34 +9,34 @@
 {% block content %}
 <div class="space-y-6" data-active-runs='{{ active_run_ids_json|safe }}'>
     <div>
-        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Runs</h1>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Runs</h1>
     </div>
 
     {% if perms.epos_qbo.can_trigger_runs %}
-    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm" x-data="runTriggerForm()">
-        <h2 class="text-sm font-semibold text-slate-900 mb-4">Trigger Run</h2>
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm" x-data="runTriggerForm()">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-4">Trigger Run</h2>
         <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="space-y-4">
             {% csrf_token %}
             <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <label class="text-xs text-slate-600">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
                     Scope
-                    <select name="scope" x-model="scope" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    <select name="scope" x-model="scope" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                         <option value="all_companies">All Companies</option>
                         <option value="single_company">Single Company</option>
                     </select>
                 </label>
-                <label class="text-xs text-slate-600" x-show="scope === 'single_company'" x-cloak>
+                <label class="text-xs text-slate-600 dark:text-slate-400" x-show="scope === 'single_company'" x-cloak>
                     Company
-                    <select name="company_key" :required="scope === 'single_company'" :disabled="scope !== 'single_company'" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    <select name="company_key" :required="scope === 'single_company'" :disabled="scope !== 'single_company'" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                         <option value="">Select company</option>
                         {% for company in companies %}
                         <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
                         {% endfor %}
                     </select>
                 </label>
-                <label class="text-xs text-slate-600">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
                     Date Mode
-                    <select name="date_mode" x-model="dateMode" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                    <select name="date_mode" x-model="dateMode" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                         <option value="yesterday">Yesterday</option>
                         <option value="target_date">Target Date</option>
                         <option value="range">Range</option>
@@ -49,47 +49,47 @@
                 </div>
             </div>
 
-            <p class="text-xs text-slate-500" x-text="summaryText"></p>
+            <p class="text-xs text-slate-500 dark:text-slate-400" x-text="summaryText"></p>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="dateMode === 'target_date'" x-cloak>
-                <label class="text-xs text-slate-600">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
                     Target Date
                     <input type="date" name="target_date" :required="dateMode === 'target_date'" :disabled="dateMode !== 'target_date'"
-                        class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                 </label>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="dateMode === 'range'" x-cloak>
-                <label class="text-xs text-slate-600">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
                     From Date
                     <input type="date" name="from_date" :required="dateMode === 'range'" :disabled="dateMode !== 'range'"
-                        class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                 </label>
-                <label class="text-xs text-slate-600">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
                     To Date
                     <input type="date" name="to_date" :required="dateMode === 'range'" :disabled="dateMode !== 'range'"
-                        class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                 </label>
-                <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">
+                <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2 mt-6">
                     <input type="checkbox" name="skip_download" :disabled="dateMode !== 'range'">
                     Skip download
                 </label>
             </div>
 
-            <details class="border border-slate-200 rounded-lg p-3" x-show="scope === 'all_companies'" x-cloak>
-                <summary class="cursor-pointer text-sm font-medium text-slate-700">Advanced options (all companies)</summary>
+            <details class="border border-slate-200 dark:border-slate-600 rounded-lg p-3" x-show="scope === 'all_companies'" x-cloak>
+                <summary class="cursor-pointer text-sm font-medium text-slate-700 dark:text-slate-300">Advanced options (all companies)</summary>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
-                    <label class="text-xs text-slate-600">
+                    <label class="text-xs text-slate-600 dark:text-slate-400">
                         Parallel workers
                         <input type="number" name="parallel" min="1" value="{{ default_parallel }}" :disabled="scope !== 'all_companies'"
-                            class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                     </label>
-                    <label class="text-xs text-slate-600">
+                    <label class="text-xs text-slate-600 dark:text-slate-400">
                         Stagger seconds
                         <input type="number" name="stagger_seconds" min="0" value="{{ default_stagger_seconds }}" :disabled="scope !== 'all_companies'"
-                            class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm">
+                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                     </label>
-                    <label class="text-xs text-slate-600 flex items-center gap-2 mt-6">
+                    <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2 mt-6">
                         <input type="checkbox" name="continue_on_failure" :disabled="scope !== 'all_companies'">
                         Continue on failure
                     </label>
@@ -99,9 +99,9 @@
     </section>
     {% endif %}
 
-    <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
         <table class="w-full text-sm">
-            <thead class="bg-slate-50 text-slate-600">
+            <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                 <tr>
                     <th class="text-left px-4 py-3">Created</th>
                     <th class="text-left px-4 py-3">Scope</th>
@@ -111,7 +111,7 @@
                     <th class="text-left px-4 py-3">Action</th>
                 </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
+            <tbody class="divide-y divide-slate-100 dark:divide-slate-700 text-slate-900 dark:text-slate-200">
                 {% for job in jobs %}
                 <tr>
                     <td class="px-4 py-3">{{ job.created_at|date:"Y-m-d H:i:s" }}</td>
@@ -121,12 +121,12 @@
                     <td class="px-4 py-3">{{ job.exit_code|default:"-" }}</td>
                     <td class="px-4 py-3">
                         <a href="{% url 'epos_qbo:run-detail' job_id=job.id %}"
-                            class="text-blue-600 hover:underline">View</a>
+                            class="text-blue-600 dark:text-blue-400 hover:underline">View</a>
                     </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="6" class="px-4 py-6 text-slate-500">No runs yet.</td>
+                    <td colspan="6" class="px-4 py-6 text-slate-500 dark:text-slate-400">No runs yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>

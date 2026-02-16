@@ -529,6 +529,36 @@ def compute_avg_runtime_by_target_date(
     }
 
 
+def compute_run_success_by_target_date(
+    company_keys: list[str] | None,
+    target_date: date,
+) -> dict[str, Any]:
+    artifact_qs = RunArtifact.objects.filter(
+        target_date=target_date,
+        run_job_id__isnull=False,
+    )
+    if company_keys is not None:
+        artifact_qs = artifact_qs.filter(company_key__in=company_keys)
+
+    job_ids = list(artifact_qs.values_list("run_job_id", flat=True).distinct())
+    if not job_ids:
+        return {"successful": 0, "completed": 0, "pct": 0.0, "ratio": "0/0"}
+
+    completed_qs = RunJob.objects.filter(
+        id__in=job_ids,
+        status__in=[
+            RunJob.STATUS_SUCCEEDED,
+            RunJob.STATUS_FAILED,
+            RunJob.STATUS_CANCELLED,
+        ],
+    )
+    successful = completed_qs.filter(status=RunJob.STATUS_SUCCEEDED).count()
+    completed = completed_qs.count()
+    pct = round((successful / completed) * 100, 1) if completed > 0 else 0.0
+    ratio = f"{successful}/{completed}" if completed > 0 else "0/0"
+    return {"successful": successful, "completed": completed, "pct": pct, "ratio": ratio}
+
+
 def compute_sales_trend(company_key: str, *, now: datetime | None = None) -> dict[str, Any]:
     trend = compute_sales_trend_for_companies(
         [company_key],

@@ -49,7 +49,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -98,7 +98,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -129,7 +129,7 @@ class OverviewUIContextTests(TestCase):
             reconcile_epos_total=100.0,
         )
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -140,7 +140,13 @@ class OverviewUIContextTests(TestCase):
         self.assertIn("vs Feb 11", context["kpis"]["avg_runtime_today_trend_text"])
 
     def test_overview_sales_24h_shows_no_monetary_totals_when_artifacts_have_no_amount(self):
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+        )
         RunArtifact.objects.create(
+            run_job=run,
             company_key=self.company.company_key,
             target_date=(self.fixed_now - timedelta(days=1)).date(),
             processed_at=self.fixed_now - timedelta(hours=3),
@@ -149,12 +155,22 @@ class OverviewUIContextTests(TestCase):
             upload_stats_json={"uploaded": 5},
         )
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             context = views._overview_context()
         self.assertEqual(context["kpis"]["sales_24h_trend_text"], "No monetary totals found")
+
+    def test_overview_context_shows_no_data_basis_line_without_successful_run_artifacts(self):
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+        self.assertFalse(context["overview_has_data"])
+        self.assertEqual(context["metric_basis_line"], "No successful run data yet.")
 
     def test_overview_avg_runtime_today_uses_faster_slower_wording(self):
         yesterday_date = (self.fixed_now - timedelta(days=1)).date()
@@ -195,55 +211,69 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             context = views._overview_context()
         self.assertIn("faster vs Feb 11", context["kpis"]["avg_runtime_today_trend_text"])
 
-    def test_overview_run_success_today_uses_calendar_day(self):
-        """Run Success counts only runs that finished today (finished_at), not rolling 24h."""
-        # fixed_now = 2026-02-13 12:00 -> today_start = 2026-02-13 00:00 (server local)
-        run_today_success = RunJob.objects.create(
+    def test_overview_run_success_uses_target_date_artifact_linkage(self):
+        """Run Success counts completed runs linked to artifacts for target trading date."""
+        target_date = (self.fixed_now - timedelta(days=1)).date()
+        other_date = (self.fixed_now - timedelta(days=2)).date()
+
+        run_target_success = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
             status=RunJob.STATUS_SUCCEEDED,
-            finished_at=self.fixed_now - timedelta(hours=1),
+            finished_at=self.fixed_now - timedelta(hours=4),
         )
-        RunJob.objects.filter(id=run_today_success.id).update(
-            created_at=self.fixed_now - timedelta(hours=2)
+        RunArtifact.objects.create(
+            run_job=run_target_success,
+            company_key=self.company.company_key,
+            target_date=target_date,
+            processed_at=self.fixed_now - timedelta(hours=3),
+            source_path="/tmp/target-success.json",
+            source_hash="hash-target-success",
         )
-        run_today_failed = RunJob.objects.create(
+        run_target_failed = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
             status=RunJob.STATUS_FAILED,
-            finished_at=self.fixed_now - timedelta(minutes=30),
+            finished_at=self.fixed_now - timedelta(hours=2),
         )
-        RunJob.objects.filter(id=run_today_failed.id).update(
-            created_at=self.fixed_now - timedelta(hours=1)
+        RunArtifact.objects.create(
+            run_job=run_target_failed,
+            company_key=self.company.company_key,
+            target_date=target_date,
+            processed_at=self.fixed_now - timedelta(hours=1),
+            source_path="/tmp/target-failed.json",
+            source_hash="hash-target-failed",
         )
-        # Run that finished yesterday: must not count in "today"
-        yesterday_start = timezone.localtime(self.fixed_now).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) - timedelta(days=1)
-        run_yesterday = RunJob.objects.create(
+
+        run_other_date = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key=self.company.company_key,
             status=RunJob.STATUS_SUCCEEDED,
-            finished_at=yesterday_start + timedelta(hours=2),
+            finished_at=self.fixed_now - timedelta(hours=8),
         )
-        RunJob.objects.filter(id=run_yesterday.id).update(
-            created_at=yesterday_start + timedelta(hours=2)
+        RunArtifact.objects.create(
+            run_job=run_other_date,
+            company_key=self.company.company_key,
+            target_date=other_date,
+            processed_at=self.fixed_now - timedelta(hours=7),
+            source_path="/tmp/other-date.json",
+            source_hash="hash-other-date",
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             context = views._overview_context()
-        # Only the two runs that finished today (1 success, 1 failed)
+        # Only runs linked to artifacts for the target trading date should count.
         self.assertEqual(context["kpis"]["total_completed_runs_24h"], 2)
         self.assertEqual(context["kpis"]["successful_runs_24h"], 1)
         self.assertEqual(context["kpis"]["run_success_pct_24h"], 50.0)
@@ -278,7 +308,7 @@ class OverviewUIContextTests(TestCase):
         RunJob.objects.filter(id=failed.id).update(created_at=self.fixed_now - timedelta(minutes=91))
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -318,7 +348,7 @@ class OverviewUIContextTests(TestCase):
             reconcile_epos_total=100.0,
         )
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -396,7 +426,7 @@ class OverviewUIContextTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -436,7 +466,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_renders_search_and_overview_script(self):
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -449,7 +479,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_does_not_render_run_reliability_panel(self):
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -469,7 +499,7 @@ class OverviewUITemplateTests(TestCase):
         run.refresh_from_db()
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -481,7 +511,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_panels_endpoint_renders_fragment(self):
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -496,7 +526,7 @@ class OverviewUITemplateTests(TestCase):
 
     def test_overview_panels_respects_revenue_period_param(self):
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -510,7 +540,7 @@ class OverviewUITemplateTests(TestCase):
         perm = Permission.objects.get(codename="can_trigger_runs")
         self.user.user_permissions.add(perm)
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -554,7 +584,7 @@ class OverviewUITemplateTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -566,7 +596,9 @@ class OverviewUITemplateTests(TestCase):
         self.assertIn("Sales Synced", html)
         self.assertIn("Run Success", html)
         self.assertIn("Avg Runtime", html)
-        self.assertIn("Target: Yesterday", html)
+        self.assertIn("Metrics are based on Target Date:", html)
+        self.assertIn("Last successful sync", html)
+        self.assertNotIn("KPI basis: trading day cutoff", html)
         self.assertNotIn("Healthy Companies", html)
         self.assertNotIn("Critical Errors", html)
         self.assertNotIn("Records Synced (24h)", html)

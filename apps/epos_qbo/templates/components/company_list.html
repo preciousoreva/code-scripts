@@ -1,67 +1,67 @@
 <div class="lg:col-span-2 space-y-6">
     <!-- Section Header -->
     <div class="flex items-center justify-between">
-        <h3 class="text-base font-semibold text-slate-900">Company Status</h3>
+        <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">Company Status</h3>
         <div class="flex gap-2">
             <input
                 type="text"
                 placeholder="Filter companies..."
                 id="overview-company-filter"
-                class="px-3 py-1.5 bg-white border border-slate-200 rounded-md text-xs focus:outline-none focus:ring-2 focus:ring-slate-100 w-48 transition-shadow"
+                class="px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-100 dark:focus:ring-slate-600 w-48 transition-shadow"
             >
         </div>
     </div>
 
     <!-- Company List -->
-    <div class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden divide-y divide-slate-100">
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden divide-y divide-slate-100 dark:divide-slate-700">
         {% for company in companies %}
             {% with name_initial=company.name|first %}
-            <div class="overview-company-row group p-4 hover:bg-slate-50 transition-colors cursor-pointer {% if company.status == 'warning' %}border-l-4 border-l-amber-400 bg-amber-50/10{% elif company.status == 'critical' %}border-l-4 border-l-red-500 bg-red-50/10{% endif %}" data-search="{{ company.name|default:''|lower }} {{ company.company_key|default:''|lower }}">
+            <div class="overview-company-row group p-4 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer {% if company.status == 'warning' %}border-l-4 border-l-amber-400 dark:border-l-amber-500 bg-amber-50/10 dark:bg-amber-900/20{% elif company.status == 'critical' %}border-l-4 border-l-red-500 dark:border-l-red-500 bg-red-50/10 dark:bg-red-900/20{% endif %}" data-search="{{ company.name|default:''|lower }} {{ company.company_key|default:''|lower }}">
                 <div class="flex items-center justify-between mb-2">
                     <div class="flex items-center gap-3">
-                        <div class="w-8 h-8 rounded bg-slate-100 flex items-center justify-center text-slate-600 text-xs font-bold">
+                        <div class="w-8 h-8 rounded bg-slate-100 dark:bg-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 text-xs font-bold">
                             {{ name_initial }}
                         </div>
                         <div>
-                            <h4 class="text-sm font-medium text-slate-900">{{ company.name }}</h4>
-                            <p class="text-xs text-slate-500">Last run: {% if company.last_run %}{{ company.last_run|date:"M j, Y H:i" }}{% else %}Never run{% endif %}</p>
+                            <h4 class="text-sm font-medium text-slate-900 dark:text-slate-100">{{ company.name }}</h4>
+                            <p class="text-xs text-slate-500 dark:text-slate-400">Last run: {% if company.last_run %}{{ company.last_run|date:"M j, Y H:i" }}{% else %}Never run{% endif %}</p>
                         </div>
                     </div>
 
                     {% if company.status == 'healthy' %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-100">
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-800">
                             <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
                             Healthy
                         </span>
                     {% elif company.status == 'warning' %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-100">
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-800">
                             <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
                             Warning
                         </span>
                     {% else %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-100">
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-100 dark:border-red-800">
                             <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
                             Critical
                         </span>
                     {% endif %}
                 </div>
 
-                <div class="grid grid-cols-3 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100">
+                <div class="grid grid-cols-3 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
                     <div>
-                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-medium">Records</span>
-                        <span class="text-xs font-medium text-slate-700">
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Records</span>
+                        <span class="text-xs font-medium text-slate-700 dark:text-slate-300">
                             {{ company.records_synced|default:"0" }} synced
                         </span>
                     </div>
                     <div>
-                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 font-medium">Token</span>
-                        <span class="text-xs font-medium {% if company.token_info.severity == 'critical' %}text-red-600{% elif company.token_info.severity == 'warning' %}text-amber-600{% else %}text-emerald-600{% endif %}">
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Token</span>
+                        <span class="text-xs font-medium {% if company.token_info.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company.token_info.severity == 'warning' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">
                             {{ company.token_info.display_label }}
                         </span>
-                        <p class="text-[10px] text-slate-500 mt-0.5">{{ company.token_info.display_subtext }}</p>
+                        <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{{ company.token_info.display_subtext }}</p>
                     </div>
                     <div class="flex justify-end items-center">
-                        <a href="{% url 'epos_qbo:company-detail' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white border border-slate-200 rounded text-slate-700 hover:bg-slate-50">
+                        <a href="{% url 'epos_qbo:company-detail' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600">
                             View Details
                         </a>
                     </div>
@@ -69,26 +69,26 @@
 
                 {% if company.summary %}
                     <div class="mt-2 pl-11">
-                        <p class="text-xs text-slate-500">{{ company.summary }}</p>
+                        <p class="text-xs text-slate-500 dark:text-slate-400">{{ company.summary }}</p>
                     </div>
                 {% endif %}
             </div>
             {% endwith %}
         {% empty %}
-            <div class="p-6 text-sm text-slate-500">
+            <div class="p-6 text-sm text-slate-500 dark:text-slate-400">
                 No companies configured yet.
             </div>
         {% endfor %}
     </div>
-    <div id="overview-company-filter-empty" class="hidden text-xs text-slate-500">
+    <div id="overview-company-filter-empty" class="hidden text-xs text-slate-500 dark:text-slate-400">
         No companies match this filter.
     </div>
 
-    <div class="bg-white border border-slate-200 rounded-xl shadow-sm p-5 space-y-4">
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm p-5 space-y-4">
         <div class="flex items-start justify-between gap-4">
             <div>
-                <h3 class="text-sm font-semibold text-slate-900" title="Values are by data target date (business day), not run completion time.">Reconciled EPOS Revenue</h3>
-                <p class="text-xs text-slate-500 mt-1">
+                <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100" title="Values are by data target date (business day), not run completion time.">Reconciled EPOS Revenue</h3>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">
                     Based on successful reconciliations. <strong>{{ revenue_start_date_display }} – {{ revenue_end_date_display }}</strong>
                 </p>
             </div>
@@ -96,7 +96,7 @@
                 <label class="sr-only" for="overview-revenue-company">Company filter</label>
                 <select
                     id="overview-revenue-company"
-                    class="px-2.5 py-1.5 bg-white border border-slate-200 rounded-md text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-100"
+                    class="px-2.5 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-100 dark:focus:ring-slate-600"
                 >
                     <option value="all">All Companies</option>
                     {% for company in companies %}
@@ -107,7 +107,7 @@
                 <select
                     id="overview-revenue-period"
                     name="revenue_period"
-                    class="px-2.5 py-1.5 bg-white border border-slate-200 rounded-md text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-100"
+                    class="px-2.5 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-100 dark:focus:ring-slate-600"
                 >
                     {% for option in revenue_period_options %}
                     <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
@@ -121,12 +121,12 @@
             <canvas id="overview-revenue-chart"></canvas>
         </div>
         {% else %}
-        <div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+        <div class="rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 px-3 py-3 text-xs text-slate-600 dark:text-slate-300">
             No reconciled revenue data yet for this period. This chart includes only runs with reconciliation status <span class="font-medium">MATCH</span>, and historical runs before this rollout may not appear.
             Data will populate automatically as new reconciled runs complete.
         </div>
         {% endif %}
-        <p id="overview-revenue-matched-days" class="text-[11px] text-slate-400">Matched days in period: {{ revenue_matched_days }}</p>
+        <p id="overview-revenue-matched-days" class="text-[11px] text-slate-400 dark:text-slate-500">Matched days in period: {{ revenue_matched_days }}</p>
     </div>
 
     {{ revenue_chart_payload|json_script:"overview-revenue-chart-data" }}

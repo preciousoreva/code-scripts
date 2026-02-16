@@ -21,4 +21,5 @@ urlpatterns = [
     path("companies/<slug:company_key>/toggle-active/", views.company_toggle_active, name="company-toggle-active"),
     path("companies/<slug:company_key>/advanced", views.company_advanced, name="company-advanced"),
     path("companies/<slug:company_key>/sync-json", views.sync_company_json, name="company-sync-json"),
+    path("settings/", views.settings_page, name="settings"),
 ]

@@ -113,3 +113,8 @@ OIAT_DASHBOARD_REAUTH_GUIDANCE = os.getenv(
 # Timezone for dashboard "today" / "yesterday" (overview KPIs, Run Success, receipts uploaded, Quick Sync default).
 # Set to match your scheduler (e.g. America/New_York). If unset, uses TIME_ZONE (UTC).
 OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)
+
+# Canonical business-day clock for overview KPIs and quick-sync defaults.
+OIAT_BUSINESS_TIMEZONE = os.getenv("OIAT_BUSINESS_TIMEZONE", "Africa/Lagos")
+OIAT_BUSINESS_DAY_CUTOFF_HOUR = _env_int("OIAT_BUSINESS_DAY_CUTOFF_HOUR", 5, minimum=0)
+OIAT_BUSINESS_DAY_CUTOFF_MINUTE = _env_int("OIAT_BUSINESS_DAY_CUTOFF_MINUTE", 0, minimum=0)

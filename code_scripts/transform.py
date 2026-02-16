@@ -638,7 +638,7 @@ def main():
         "dates_present": stats["dates_present"],
         "min_dt": stats["min_dt"],
         "max_dt": stats["max_dt"],
-        "processed_at": datetime.now().isoformat(),
+        "processed_at": datetime.now(timezone.utc).isoformat(),
         "company_key": config.company_key,
         "grouping": config.group_by,
         "source_mode": source_mode,

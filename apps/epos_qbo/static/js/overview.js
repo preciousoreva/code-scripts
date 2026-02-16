@@ -159,6 +159,7 @@
 
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
+        const colors = typeof window.getChartColors === 'function' ? window.getChartColors() : { textColor: '#64748b', gridColor: 'rgba(226, 232, 240, 0.5)' };
         revenueChart = new Chart(ctx, {
             type: 'line',
             data: { labels, datasets },
@@ -174,6 +175,7 @@
                             usePointStyle: true,
                             pointStyle: 'circle',
                             font: { size: 11 },
+                            color: colors.textColor,
                         },
                     },
                     tooltip: {
@@ -188,12 +190,14 @@
                 },
                 scales: {
                     x: {
-                        grid: { display: false },
-                        ticks: { maxRotation: 0, autoSkip: true },
+                        grid: { display: false, color: colors.gridColor },
+                        ticks: { maxRotation: 0, autoSkip: true, color: colors.textColor },
                     },
                     y: {
                         beginAtZero: true,
+                        grid: { color: colors.gridColor },
                         ticks: {
+                            color: colors.textColor,
                             callback(value) {
                                 return formatCurrency(value);
                             },
@@ -279,11 +283,20 @@
         };
     }
 
+    function bindThemeChange() {
+        window.addEventListener('themeChange', () => {
+            const companySelect = document.getElementById('overview-revenue-company');
+            const company = companySelect ? companySelect.value : 'all';
+            initRevenueChart(company);
+        });
+    }
+
     function initOverview(options = {}) {
         initCompanyFilter(options.filterQuery || '');
         initRevenueChart(options.revenueCompany || 'all');
         bindRevenuePeriodChange();
         bindCompletionRefresh();
+        bindThemeChange();
     }
 
     if (document.readyState === 'loading') {

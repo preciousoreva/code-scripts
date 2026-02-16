@@ -3,12 +3,12 @@
 {% block title %}Account • OIAT Portal{% endblock %}
 
 {% block topbar %}
-<header class="h-16 bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-40 px-8 flex items-center justify-between">
+<header class="h-16 bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-40 px-8 flex items-center justify-between dark:bg-slate-900/80 dark:border-slate-700">
     <div class="flex items-center gap-4">
         {% if breadcrumbs %}
         {% include "components/breadcrumb.html" %}
         {% else %}
-        <h2 class="text-sm font-medium text-slate-500">Account</h2>
+        <h2 class="text-sm font-medium text-slate-500 dark:text-slate-400">Account</h2>
         {% endif %}
     </div>
 </header>
@@ -17,64 +17,64 @@
 {% block content %}
 <div class="max-w-2xl space-y-8">
     <div>
-        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Account</h1>
-        <p class="text-sm text-slate-500 mt-1">Manage your profile and password.</p>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Account</h1>
+        <p class="text-sm text-slate-500 mt-1 dark:text-slate-400">Manage your profile and password.</p>
     </div>
 
-    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
-        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4">Profile</h2>
+    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm dark:bg-slate-800 dark:border-slate-600">
+        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 dark:text-slate-300">Profile</h2>
         <form method="post" action="{% url 'core-account' %}" class="space-y-4">
             {% csrf_token %}
             <div>
-                <label class="block text-sm font-medium text-slate-500 mb-1">Username</label>
-                <p class="font-mono text-slate-900">{{ request.user.username }}</p>
-                <p class="mt-1 text-xs text-slate-500">Your login name cannot be changed here. Ask an administrator if you need it changed.</p>
+                <label class="block text-sm font-medium text-slate-500 mb-1 dark:text-slate-400">Username</label>
+                <p class="font-mono text-slate-900 dark:text-slate-200">{{ request.user.username }}</p>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Your login name cannot be changed here. Ask an administrator if you need it changed.</p>
             </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                    <label for="id_first_name" class="block text-sm font-medium text-slate-700 mb-1">First name</label>
+                    <label for="id_first_name" class="block text-sm font-medium text-slate-700 mb-1 dark:text-slate-300">First name</label>
                     {{ profile_form.first_name }}
                     {% if profile_form.first_name.errors %}
-                    <p class="mt-1 text-sm text-red-600">{{ profile_form.first_name.errors.0 }}</p>
+                    <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ profile_form.first_name.errors.0 }}</p>
                     {% endif %}
                 </div>
                 <div>
-                    <label for="id_last_name" class="block text-sm font-medium text-slate-700 mb-1">Last name</label>
+                    <label for="id_last_name" class="block text-sm font-medium text-slate-700 mb-1 dark:text-slate-300">Last name</label>
                     {{ profile_form.last_name }}
                     {% if profile_form.last_name.errors %}
-                    <p class="mt-1 text-sm text-red-600">{{ profile_form.last_name.errors.0 }}</p>
+                    <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ profile_form.last_name.errors.0 }}</p>
                     {% endif %}
                 </div>
             </div>
             <div>
-                <label for="id_email" class="block text-sm font-medium text-slate-700 mb-1">Email</label>
+                <label for="id_email" class="block text-sm font-medium text-slate-700 mb-1 dark:text-slate-300">Email</label>
                 {{ profile_form.email }}
                 {% if profile_form.email.errors %}
-                <p class="mt-1 text-sm text-red-600">{{ profile_form.email.errors.0 }}</p>
+                <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ profile_form.email.errors.0 }}</p>
                 {% endif %}
             </div>
             <button type="submit" class="btn btn-primary">Save profile</button>
         </form>
     </section>
 
-    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
-        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4">Portal permissions</h2>
+    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm dark:bg-slate-800 dark:border-slate-600">
+        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 dark:text-slate-300">Portal permissions</h2>
         {% if is_superuser %}
-        <p class="text-sm text-slate-600">You have full access (superuser).</p>
+        <p class="text-sm text-slate-600 dark:text-slate-400">You have full access (superuser).</p>
         {% elif portal_permissions %}
-        <ul class="text-sm text-slate-700 space-y-1">
+        <ul class="text-sm text-slate-700 space-y-1 dark:text-slate-300">
             {% for perm in portal_permissions %}
             <li class="font-mono">{{ perm }}</li>
             {% endfor %}
         </ul>
         {% else %}
-        <p class="text-sm text-slate-500">No portal-specific permissions assigned.</p>
+        <p class="text-sm text-slate-500 dark:text-slate-400">No portal-specific permissions assigned.</p>
         {% endif %}
     </section>
 
-    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
-        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4">Password</h2>
-        <p class="text-sm text-slate-600 mb-4">Change your password to keep your account secure.</p>
+    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm dark:bg-slate-800 dark:border-slate-600">
+        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 dark:text-slate-300">Password</h2>
+        <p class="text-sm text-slate-600 mb-4 dark:text-slate-400">Change your password to keep your account secure.</p>
         <a href="{% url 'core-password-change' %}" class="btn btn-primary">
             <iconify-icon icon="solar:lock-password-linear" width="16"></iconify-icon>
             Change password
@@ -82,9 +82,9 @@
     </section>
 
     {% if request.user.is_staff %}
-    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
-        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4">Administration</h2>
-        <p class="text-sm text-slate-600 mb-4">Manage users, permissions, and other site data.</p>
+    <section class="bg-white border border-slate-200 rounded-xl p-6 shadow-sm dark:bg-slate-800 dark:border-slate-600">
+        <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4 dark:text-slate-300">Administration</h2>
+        <p class="text-sm text-slate-600 mb-4 dark:text-slate-400">Manage users, permissions, and other site data.</p>
         <a href="{% url 'admin:index' %}" class="btn btn-secondary" target="_blank" rel="noopener noreferrer">
             <iconify-icon icon="solar:settings-linear" width="16"></iconify-icon>
             Open Django Admin

@@ -11,10 +11,12 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+
+from apps.epos_qbo.business_date import get_target_trading_date
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ def run_pipeline_subprocess(
     parallel: int,
     stagger_seconds: int,
     continue_on_failure: bool,
+    target_date: str,
 ) -> int:
     """
     Run code_scripts.run_all_companies as subprocess; stdout+stderr go to log_path (append).
@@ -59,6 +62,8 @@ def run_pipeline_subprocess(
         str(parallel),
         "--stagger-seconds",
         str(stagger_seconds),
+        "--target-date",
+        target_date,
     ]
     if continue_on_failure:
         cmd.append("--continue-on-failure")
@@ -149,6 +154,7 @@ class Command(BaseCommand):
         parallel = options["parallel"]
         stagger_seconds = options["stagger_seconds"]
         continue_on_failure = options["continue_on_failure"]
+        target_date = get_target_trading_date().isoformat()
 
         repo_root = get_repo_root()
         lock_path = get_global_lock_path(repo_root)
@@ -160,7 +166,13 @@ class Command(BaseCommand):
 
         run_job = None
         try:
-            run_job = self._create_run_job_if_available(log_path, parallel, stagger_seconds, continue_on_failure)
+            run_job = self._create_run_job_if_available(
+                log_path,
+                parallel,
+                stagger_seconds,
+                continue_on_failure,
+                target_date,
+            )
 
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(
@@ -173,6 +185,7 @@ class Command(BaseCommand):
                 parallel=parallel,
                 stagger_seconds=stagger_seconds,
                 continue_on_failure=continue_on_failure,
+                target_date=target_date,
             )
 
             if run_job is not None:
@@ -183,7 +196,14 @@ class Command(BaseCommand):
         finally:
             release_lock(lock_path)
 
-    def _create_run_job_if_available(self, log_path: Path, parallel: int, stagger_seconds: int, continue_on_failure: bool):
+    def _create_run_job_if_available(
+        self,
+        log_path: Path,
+        parallel: int,
+        stagger_seconds: int,
+        continue_on_failure: bool,
+        target_date: str,
+    ):
         """If RunJob model exists, create a running record. Else return None."""
         RunJob = _get_run_job_model()
         if RunJob is None:
@@ -192,6 +212,7 @@ class Command(BaseCommand):
 
         command_display = (
             f"run_scheduled_all_companies --parallel {parallel} --stagger-seconds {stagger_seconds}"
+            + f" --target-date {target_date}"
             + (" --continue-on-failure" if continue_on_failure else "")
         )
         job = RunJob.objects.create(
@@ -204,6 +225,7 @@ class Command(BaseCommand):
             parallel=parallel,
             stagger_seconds=stagger_seconds,
             continue_on_failure=continue_on_failure,
+            target_date=date.fromisoformat(target_date),
         )
         return job
 

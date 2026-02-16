@@ -78,10 +78,21 @@ class DashboardSettingsTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
             enriched = views._enrich_company_data(self.company, run)
         issue_messages = [item["message"] for item in enriched["issues"]]
         self.assertIn("No sync in 3 hours", issue_messages)
+
+    @override_settings(
+        OIAT_BUSINESS_TIMEZONE="Africa/Lagos",
+        OIAT_BUSINESS_DAY_CUTOFF_HOUR=5,
+        OIAT_BUSINESS_DAY_CUTOFF_MINUTE=0,
+    )
+    def test_quick_sync_default_target_date_uses_business_trading_date(self):
+        with mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now):
+            target_date = views._quick_sync_default_target_date()
+        # fixed_now 2026-02-14 12:00 UTC -> 13:00 WAT, target trading date = previous day
+        self.assertEqual(target_date, "2026-02-13")

@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.epos_qbo import views
-from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact
+from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
 
 
 class ReconciledRevenueOverviewContextTests(TestCase):
@@ -57,7 +57,13 @@ class ReconciledRevenueOverviewContextTests(TestCase):
         epos_total: float | None,
         source_suffix: str,
     ) -> None:
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+        )
         RunArtifact.objects.create(
+            run_job=run,
             company_key=company_key,
             target_date=target_date,
             processed_at=processed_at,
@@ -121,7 +127,7 @@ class ReconciledRevenueOverviewContextTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -141,7 +147,7 @@ class ReconciledRevenueOverviewContextTests(TestCase):
 
     def test_revenue_period_invalid_falls_back_to_default(self):
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -178,7 +184,13 @@ class ReconciledRevenueOverviewTemplateTests(TestCase):
         }
 
     def test_overview_renders_revenue_chart_section(self):
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+        )
         RunArtifact.objects.create(
+            run_job=run,
             company_key="company_a",
             target_date=date(2026, 2, 13),
             processed_at=timezone.make_aware(datetime(2026, 2, 13, 20, 0, 0)),
@@ -192,7 +204,7 @@ class ReconciledRevenueOverviewTemplateTests(TestCase):
         )
 
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
@@ -207,7 +219,7 @@ class ReconciledRevenueOverviewTemplateTests(TestCase):
 
     def test_overview_renders_empty_state_for_no_reconciled_data(self):
         with (
-            mock.patch("apps.epos_qbo.dashboard_timezone.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):

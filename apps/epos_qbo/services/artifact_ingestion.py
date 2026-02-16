@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ from django.utils import timezone as dj_timezone
 from oiat_portal.paths import OPS_LOGS_DIR, OPS_UPLOADED_DIR
 
 from ..models import RunArtifact, RunJob
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,6 +66,7 @@ def _parse_dt(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
+        logger.warning("Artifact metadata processed_at is naive; assuming UTC: %s", value)
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
