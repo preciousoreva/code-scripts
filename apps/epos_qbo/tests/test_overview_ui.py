@@ -566,7 +566,7 @@ class OverviewUITemplateTests(TestCase):
         self.assertIn("Sales Synced", html)
         self.assertIn("Run Success", html)
         self.assertIn("Avg Runtime", html)
-        self.assertIn("Target Date: Yesterday", html)
+        self.assertIn("Target: Yesterday", html)
         self.assertNotIn("Healthy Companies", html)
         self.assertNotIn("Critical Errors", html)
         self.assertNotIn("Records Synced (24h)", html)

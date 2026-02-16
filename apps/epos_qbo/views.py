@@ -27,7 +27,7 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
-from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
+from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display, get_dashboard_timezone_name
 from .services.metrics import (
     compute_avg_runtime_by_target_date,
     compute_sales_snapshot_by_target_date,
@@ -733,6 +733,7 @@ def overview(request):
     context = _overview_context(revenue_period)
     context["quick_sync_target_date"] = _quick_sync_default_target_date()
     context["quick_sync_timezone"] = get_dashboard_timezone_display()
+    context["dashboard_timezone_display"] = get_dashboard_timezone_display()
     context.update(_nav_context())
     context.update(
         _breadcrumb_context(
@@ -753,6 +754,31 @@ def overview_panels(request):
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
     context = _overview_context(revenue_period)
     return render(request, "components/overview_refresh.html", context)
+
+
+@login_required
+@require_GET
+def settings_page(request):
+    """Settings page: dashboard tuning (read-only) and appearance (theme)."""
+    context = {
+        "dashboard_timezone_display": get_dashboard_timezone_display(),
+        "dashboard_timezone_name": get_dashboard_timezone_name(),
+        "default_parallel": _dashboard_default_parallel(),
+        "default_stagger_seconds": _dashboard_default_stagger_seconds(),
+        "stale_hours_warning": _dashboard_stale_hours_warning(),
+        "refresh_expiring_days": _dashboard_refresh_expiring_days(),
+        "reauth_guidance": _reauth_guidance(),
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Settings", "url": None},
+            ],
+        )
+    )
+    return render(request, "epos_qbo/settings.html", context)
 
 
 @login_required

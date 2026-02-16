@@ -10,14 +10,15 @@
 {% block content %}
 <div class="flex items-end justify-between" data-active-runs='{{ active_run_ids_json|safe }}'>
     <div>
-        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">System Overview</h1>
-        <p class="text-sm text-slate-500 mt-1">
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">System Overview</h1>
+        <p class="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+            Target: Yesterday ({{ target_date_display|default:"" }}) • Times shown in {{ dashboard_timezone_display|default:"UTC" }}
+        </p>
+        <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">
             Real-time monitoring of EPOS to QuickBooks Online synchronization.
         </p>
     </div>
     <div class="flex items-center gap-3">
-        <span class="text-xs text-slate-500 border border-slate-200 rounded-full px-2.5 py-1 bg-slate-50" title="Business date that overview KPIs typically refer to">Target Date: Yesterday ({{ target_date_display|default:"" }})</span>
-        <span class="text-xs text-slate-500 border border-slate-200 rounded-full px-2.5 py-1 bg-slate-50" title="All dashboard dates and KPIs use this timezone">Data in {{ dashboard_timezone_display|default:"UTC" }}</span>
         <a href="{% url 'epos_qbo:company-new' %}" class="btn btn-primary">
             <iconify-icon icon="solar:add-circle-linear" width="16"></iconify-icon>
             Add Company

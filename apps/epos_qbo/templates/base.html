@@ -1,14 +1,38 @@
 {% load static %}
 <!DOCTYPE html>
-<html lang="en" class="antialiased bg-slate-50">
+<html lang="en" class="antialiased bg-slate-50 dark:bg-slate-900">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}EPOS → QBO Automation Dashboard{% endblock %}</title>
 
+    <!-- Theme: light/dark only, MUST run before Tailwind so first paint uses correct theme (no flash) -->
+    <script>
+        (function() {
+            var key = 'dashboard_theme';
+            function normalize(v) { return v === 'dark' ? 'dark' : 'light'; }
+            var v = normalize(localStorage.getItem(key) || 'light');
+            document.documentElement.classList.toggle('dark', v === 'dark');
+            window.applyDashboardTheme = function(value) {
+                var cur = normalize(value !== undefined ? value : localStorage.getItem(key));
+                if (value !== undefined) localStorage.setItem(key, cur);
+                document.documentElement.classList.toggle('dark', cur === 'dark');
+                try { window.dispatchEvent(new CustomEvent('themeChange')); } catch (e) {}
+                return cur;
+            };
+            window.getDashboardTheme = function() { return normalize(localStorage.getItem(key)); };
+            window.cycleDashboardTheme = function() {
+                var next = window.getDashboardTheme() === 'dark' ? 'light' : 'dark';
+                window.applyDashboardTheme(next);
+            };
+        })();
+    </script>
     <!-- Tailwind (CDN) -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { darkMode: 'class' };
+    </script>
 
     <!-- Iconify Icons -->
     <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
@@ -66,8 +90,17 @@
             color: white;
         }
 
+        .dark .btn-primary {
+            background-color: rgb(59 130 246);
+            color: white;
+        }
+
         .btn-primary:hover {
             background-color: rgb(30 41 59);
+        }
+
+        .dark .btn-primary:hover {
+            background-color: rgb(37 99 235);
         }
 
         .btn-secondary {
@@ -76,16 +109,34 @@
             color: rgb(51 65 85);
         }
 
+        .dark .btn-secondary {
+            background-color: rgb(51 65 85);
+            border-color: rgb(71 85 105);
+            color: rgb(226 232 240);
+        }
+
         .btn-secondary:hover {
             background-color: rgb(248 250 252);
+        }
+
+        .dark .btn-secondary:hover {
+            background-color: rgb(71 85 105);
         }
 
         .btn-tertiary {
             color: rgb(71 85 105);
         }
 
+        .dark .btn-tertiary {
+            color: rgb(148 163 184);
+        }
+
         .btn-tertiary:hover {
             color: rgb(15 23 42);
+        }
+
+        .dark .btn-tertiary:hover {
+            color: rgb(226 232 240);
         }
 
         .btn-sm {
@@ -103,6 +154,10 @@
 
         .btn-icon:hover {
             background-color: rgb(241 245 249);
+        }
+
+        .dark .btn-icon:hover {
+            background-color: rgb(51 65 85);
         }
 
         /* Toast Notification System */
@@ -218,14 +273,14 @@
 </head>
 
 <body data-debug-beacon="{% if ui_debug_beacon_enabled %}1{% else %}0{% endif %}"
-    class="text-slate-900 flex min-h-screen overflow-hidden selection:bg-blue-100 selection:text-blue-700">
+    class="text-slate-900 dark:text-slate-100 flex min-h-screen overflow-hidden selection:bg-blue-100 selection:text-blue-700 dark:selection:bg-blue-900 dark:selection:text-blue-200">
 
     {% include "components/sidebar.html" %}
 
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container"></div>
 
-    <main class="flex-1 ml-64 overflow-y-auto h-screen bg-slate-50/50">
+    <main class="flex-1 ml-64 overflow-y-auto h-screen bg-slate-50 dark:bg-slate-900">
         {% block topbar %}{% endblock %}
 
         <div class="p-8 max-w-7xl mx-auto space-y-8">
@@ -234,11 +289,11 @@
                 {% for message in messages %}
                 <div class="rounded-md border px-3 py-2 text-sm
                     {% if message.level_tag == 'error' %}
-                        border-red-200 bg-red-50 text-red-800
+                        border-red-200 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-900/30 dark:text-red-200
                     {% elif message.level_tag == 'success' %}
-                        border-emerald-200 bg-emerald-50 text-emerald-800
+                        border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200
                     {% else %}
-                        border-slate-200 bg-white text-slate-700
+                        border-slate-200 bg-white text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300
                     {% endif %}
                 ">
                     {{ message }}
@@ -262,6 +317,16 @@
 
     <!-- Toast Notifications & Run Status Polling -->
     <script src="{% static 'js/toasts.js' %}"></script>
+
+    <!-- Theme: sync sr-only label on load and on themeChange (topbar) -->
+    <script>
+        function syncThemeLabel() {
+            var label = document.getElementById('theme-label');
+            if (label && typeof window.getDashboardTheme === 'function') label.textContent = window.getDashboardTheme();
+        }
+        document.addEventListener('DOMContentLoaded', syncThemeLabel);
+        window.addEventListener('themeChange', syncThemeLabel);
+    </script>
 
     {% block body_extra %}{% endblock %}
 </body>
