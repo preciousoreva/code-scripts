@@ -48,10 +48,16 @@
             <div class="flex items-center justify-between">
                 <div>
                     <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Warnings</p>
-                    <p class="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">{{ summary.warning }}</p>
+                    <p class="text-2xl font-bold {% if summary.warning %}text-amber-600 dark:text-amber-400{% else %}text-slate-400 dark:text-slate-500{% endif %} mt-1">
+                        {{ summary.warning }}
+                    </p>
                 </div>
-                <div class="w-10 h-10 bg-amber-100 dark:bg-amber-900/30 rounded-lg flex items-center justify-center">
-                    <iconify-icon icon="solar:danger-triangle-linear" width="24" class="text-amber-600 dark:text-amber-400"></iconify-icon>
+                <div class="w-10 h-10 rounded-lg flex items-center justify-center {% if summary.warning %}bg-amber-100 dark:bg-amber-900/30{% else %}bg-slate-100 dark:bg-slate-700{% endif %}">
+                    <iconify-icon
+                        icon="solar:danger-triangle-linear"
+                        width="24"
+                        class="{% if summary.warning %}text-amber-600 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %}"
+                    ></iconify-icon>
                 </div>
             </div>
         </div>
@@ -59,10 +65,16 @@
             <div class="flex items-center justify-between">
                 <div>
                     <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Critical</p>
-                    <p class="text-2xl font-bold text-red-600 dark:text-red-400 mt-1">{{ summary.critical }}</p>
+                    <p class="text-2xl font-bold {% if summary.critical %}text-red-600 dark:text-red-400{% else %}text-slate-400 dark:text-slate-500{% endif %} mt-1">
+                        {{ summary.critical }}
+                    </p>
                 </div>
-                <div class="w-10 h-10 bg-red-100 dark:bg-red-900/30 rounded-lg flex items-center justify-center">
-                    <iconify-icon icon="solar:close-circle-linear" width="24" class="text-red-600 dark:text-red-400"></iconify-icon>
+                <div class="w-10 h-10 rounded-lg flex items-center justify-center {% if summary.critical %}bg-red-100 dark:bg-red-900/30{% else %}bg-slate-100 dark:bg-slate-700{% endif %}">
+                    <iconify-icon
+                        icon="solar:close-circle-linear"
+                        width="24"
+                        class="{% if summary.critical %}text-red-600 dark:text-red-400{% else %}text-slate-500 dark:text-slate-400{% endif %}"
+                    ></iconify-icon>
                 </div>
             </div>
         </div>

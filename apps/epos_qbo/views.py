@@ -586,6 +586,36 @@ def _format_system_health_breakdown(
     return " • ".join(parts)
 
 
+def _normalize_summary_text(value: str | None) -> str:
+    if not value:
+        return ""
+    # Normalize for lightweight equality checks: trim, strip trailing punctuation, and casefold.
+    return value.strip().rstrip(".:").casefold()
+
+
+def _should_show_company_summary(
+    status: str,
+    summary: str | None,
+    health_reason_labels: list[str] | None = None,
+) -> bool:
+    """Render summary only when it adds value beyond status/reason labels."""
+    norm_summary = _normalize_summary_text(summary)
+    # Healthy/unknown rows already communicate enough via labels and run/activity lines.
+    if status in {"healthy", "unknown"}:
+        return False
+    if not norm_summary:
+        return False
+    # Critical rows: always show summary when present (acts as primary error explanation).
+    if status == "critical":
+        return True
+    # For warnings (and any other non-healthy/unknown/non-critical), hide if summary just repeats a label.
+    labels = health_reason_labels or []
+    for label in labels:
+        if _normalize_summary_text(label) == norm_summary:
+            return False
+    return True
+
+
 def _format_relative_age(delta_seconds: float) -> str:
     seconds = max(0, int(delta_seconds))
     if seconds < 60:
@@ -745,6 +775,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         summary = health["summary"]
         run_activity = _run_activity_display(health["run_activity"])
         health_reason_labels = _health_reason_labels(health.get("reason_codes"))
+        show_summary = _should_show_company_summary(status, summary, health_reason_labels)
         latest_job_time = None
         if latest_job:
             latest_job_time = latest_job.finished_at or latest_job.started_at or latest_job.created_at
@@ -778,6 +809,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "token_info": token_info,
                 "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
                 "summary": summary,
+                "show_summary": show_summary,
                 "last_run_reconciliation_warning": last_run_reconciliation_warning,
             }
         )

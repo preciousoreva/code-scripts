@@ -78,6 +78,18 @@ class OverviewUIContextTests(TestCase):
             "1 healthy • 1 warning • 2 unknown",
         )
 
+    def test_company_summary_visibility_rules(self):
+        self.assertFalse(views._should_show_company_summary("healthy", "Last run succeeded.", []))
+        self.assertFalse(views._should_show_company_summary("unknown", "No successful sync yet.", []))
+        self.assertFalse(
+            views._should_show_company_summary(
+                "warning",
+                "Reconciliation mismatch above threshold.",
+                ["Reconciliation mismatch above threshold."],
+            )
+        )
+        self.assertTrue(views._should_show_company_summary("critical", "Latest run failed.", ["Latest run failed"]))
+
     def test_overview_sales_24h_uses_reconcile_first_and_computes_trend(self):
         prev_run = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
