@@ -929,12 +929,36 @@ def settings_page(request):
     return render(request, "epos_qbo/settings.html", context)
 
 
+def _reconciliation_label_for_job(job_id: str, artifacts_by_job: dict) -> str:
+    """Return 'Match', 'Mismatch', or 'Not reconciled' for a run from its artifacts' reconcile_status."""
+    statuses = artifacts_by_job.get(job_id) or []
+    if not statuses:
+        return "Not reconciled"
+    if any(s == "MISMATCH" for s in statuses):
+        return "Mismatch"
+    if all(s == "MATCH" for s in statuses):
+        return "Match"
+    return "Not reconciled"
+
+
 @login_required
 def runs_list(request):
     _ensure_company_records()
     default_parallel = _dashboard_default_parallel()
     default_stagger_seconds = _dashboard_default_stagger_seconds()
-    jobs = RunJob.objects.order_by("-created_at")[:100]
+    jobs = list(RunJob.objects.order_by("-created_at")[:100])
+    job_ids = [j.id for j in jobs]
+    # Reconcile status per run (from artifacts)
+    artifacts_by_job = defaultdict(list)
+    for run_job_id, status in RunArtifact.objects.filter(
+        run_job_id__in=job_ids,
+    ).exclude(reconcile_status="").values_list("run_job_id", "reconcile_status"):
+        if run_job_id and status:
+            artifacts_by_job[run_job_id].append(status)
+    run_rows = [
+        {"job": job, "reconciliation_label": _reconciliation_label_for_job(job.id, artifacts_by_job)}
+        for job in jobs
+    ]
     form = RunTriggerForm(initial={"scope": RunJob.SCOPE_ALL, "date_mode": "yesterday"})
     companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
     
@@ -945,7 +969,7 @@ def runs_list(request):
     
     active_run_ids_list = [str(id) for id in active_runs]
     context = {
-        "jobs": jobs, 
+        "run_rows": run_rows,
         "form": form, 
         "companies": companies,
         "default_parallel": default_parallel,
