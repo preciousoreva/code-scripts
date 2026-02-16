@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth.models import Permission, User
@@ -10,7 +11,7 @@ from django.utils import timezone
 
 from apps.epos_qbo import views
 from apps.epos_qbo.forms import RunTriggerForm
-from apps.epos_qbo.models import CompanyConfigRecord, RunJob
+from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
 
 
 class DashboardSettingsTests(TestCase):
@@ -85,6 +86,61 @@ class DashboardSettingsTests(TestCase):
             enriched = views._enrich_company_data(self.company, run)
         issue_messages = [item["message"] for item in enriched["issues"]]
         self.assertIn("No sync in 3 hours", issue_messages)
+
+    @override_settings(OIAT_DASHBOARD_RECON_DIFF_WARNING="2.5")
+    def test_reconcile_mismatch_threshold_respects_setting(self):
+        artifact = RunArtifact.objects.create(
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(hours=1),
+            source_path="/tmp/company_a_recon_threshold.json",
+            source_hash="hash-company-a-recon-threshold",
+            reconcile_difference=Decimal("1.6"),
+        )
+
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            status, summary = views._status_for_company(self.company, artifact, latest_job=None)
+        self.assertEqual(status, "healthy")
+        self.assertEqual(summary, "Last run succeeded.")
+
+    def test_running_activity_does_not_downgrade_health_status(self):
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_RUNNING,
+            started_at=self.fixed_now - timedelta(minutes=15),
+        )
+        artifact = RunArtifact.objects.create(
+            run_job=run,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(minutes=10),
+            source_path="/tmp/company_a_running_health.json",
+            source_hash="hash-company-a-running-health",
+            reconcile_difference=Decimal("0.0"),
+        )
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            status, summary = views._status_for_company(self.company, artifact, latest_job=run)
+        self.assertEqual(status, "healthy")
+        self.assertEqual(summary, "Last run succeeded.")
+
+    def test_no_artifact_classifies_company_as_unknown(self):
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            status, summary = views._status_for_company(self.company, latest_artifact=None, latest_job=None)
+        self.assertEqual(status, "unknown")
+        self.assertEqual(summary, "No successful sync yet.")
 
     @override_settings(
         OIAT_BUSINESS_TIMEZONE="Africa/Lagos",

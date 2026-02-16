@@ -27,6 +27,12 @@
                         <iconify-icon icon="solar:clock-circle-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
                         {{ company_data.last_run_display }}
                     </span>
+                    {% if company_data.run_activity %}
+                    <span class="flex items-center gap-1.5 {% if company_data.run_activity.color == 'blue' %}text-blue-600 dark:text-blue-400{% else %}text-amber-600 dark:text-amber-400{% endif %}">
+                        <iconify-icon icon="{{ company_data.run_activity.icon }}" width="16"></iconify-icon>
+                        {{ company_data.run_activity.label }}
+                    </span>
+                    {% endif %}
                     <span class="flex items-center gap-1.5">
                         <iconify-icon icon="solar:document-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
                         <span title="Receipts uploaded in the most recent successful sync; date is the business date of the data’s.">{% if company_data.latest_sync_target_date %}{{ company_data.records_latest_sync|default:0 }} receipts from latest sync ({{ company_data.latest_sync_target_date|date:"M j, Y" }}){% elif company_data.records_latest_sync %}{{ company_data.records_latest_sync }} receipts from latest sync{% else %}No sync yet{% endif %}</span>
@@ -48,6 +54,22 @@
                     <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-amber-500 dark:text-amber-400 flex-shrink-0"></iconify-icon>
                     <span class="text-amber-700 dark:text-amber-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
                     {% endif %}
+                </div>
+                {% endif %}
+                {% if company_data.health_reason_labels %}
+                <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">{{ company_data.health_reason_labels|join:", " }}</p>
+                {% endif %}
+                {% if company_data.status.level == 'unknown' and 'NO_ARTIFACT_METADATA' in company_data.health.reason_codes and perms.epos_qbo.can_trigger_runs %}
+                <div class="mt-3">
+                    <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="inline-flex" @click.stop>
+                        {% csrf_token %}
+                        <input type="hidden" name="scope" value="single_company">
+                        <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
+                        <input type="hidden" name="date_mode" value="yesterday">
+                        <button type="submit" class="text-xs font-medium px-2 py-1 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50">
+                            Trigger Sync
+                        </button>
+                    </form>
                 </div>
                 {% endif %}
             </div>
@@ -79,8 +101,8 @@
             </h4>
             <div class="space-y-2">
                 {% for issue in company_data.issues %}
-                <div class="flex items-start gap-2 p-3 bg-white dark:bg-slate-800 rounded-lg border {% if issue.severity == 'critical' %}border-red-200 dark:border-red-800{% elif issue.severity == 'warning' %}border-amber-200 dark:border-amber-800{% else %}border-slate-200 dark:border-slate-600{% endif %}">
-                    <iconify-icon icon="{{ issue.icon }}" class="{% if issue.severity == 'critical' %}text-red-500 dark:text-red-400{% elif issue.severity == 'warning' %}text-amber-500 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %} mt-0.5 flex-shrink-0" width="16"></iconify-icon>
+                <div class="flex items-start gap-2 p-3 bg-white dark:bg-slate-800 rounded-lg border {% if issue.severity == 'red' %}border-red-200 dark:border-red-800{% elif issue.severity == 'amber' %}border-amber-200 dark:border-amber-800{% else %}border-slate-200 dark:border-slate-600{% endif %}">
+                    <iconify-icon icon="{{ issue.icon }}" class="{% if issue.severity == 'red' %}text-red-500 dark:text-red-400{% elif issue.severity == 'amber' %}text-amber-500 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %} mt-0.5 flex-shrink-0" width="16"></iconify-icon>
                     <div class="flex-1 min-w-0"><p class="text-sm text-slate-700 dark:text-slate-300">{{ issue.message }}</p></div>
                     {% if issue.action == 'view_run' and company_data.latest_run %}
                     <a href="{% url 'epos_qbo:run-detail' job_id=company_data.latest_run.id %}" class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium whitespace-nowrap">View →</a>

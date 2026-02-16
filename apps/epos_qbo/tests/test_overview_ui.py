@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth.models import Permission
@@ -63,6 +64,20 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(views._classify_system_health(1, 1, 0)["label"], "Warning")
         self.assertEqual(views._classify_system_health(1, 0, 1)["label"], "Degraded")
 
+    def test_system_health_breakdown_compacts_zero_buckets(self):
+        self.assertEqual(
+            views._format_system_health_breakdown(2, 0, 0, 0),
+            "2 healthy",
+        )
+        self.assertEqual(
+            views._format_system_health_breakdown(1, 0, 1, 0),
+            "1 healthy • 1 critical",
+        )
+        self.assertEqual(
+            views._format_system_health_breakdown(1, 1, 0, 2),
+            "1 healthy • 1 warning • 2 unknown",
+        )
+
     def test_overview_sales_24h_uses_reconcile_first_and_computes_trend(self):
         prev_run = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
@@ -105,8 +120,8 @@ class OverviewUIContextTests(TestCase):
             context = views._overview_context()
 
         kpis = context["kpis"]
-        self.assertEqual(str(kpis["sales_24h_total"]), "200.0")
-        self.assertEqual(str(kpis["sales_prev_24h_total"]), "100.0")
+        self.assertEqual(kpis["sales_24h_total"], Decimal("200.0000"))
+        self.assertEqual(kpis["sales_prev_24h_total"], Decimal("100.0000"))
         self.assertEqual(kpis["sales_24h_trend_dir"], "up")
         self.assertEqual(kpis["sales_24h_trend_text"], "↑ 100.0% increase vs Feb 11")
 
@@ -432,9 +447,11 @@ class OverviewUIContextTests(TestCase):
         ):
             context = views._overview_context()
 
-        # By target date: Feb 12 total = 3,995,250 + 9,505,350 = 13,500,600.
-        self.assertEqual(str(context["kpis"]["sales_24h_total"]), "13500600.0")
-        self.assertEqual(str(context["kpis"]["sales_prev_24h_total"]), "12019300.0")
+        # Resolver picks the latest succeeded artifact by processed_at; here that's Feb 11.
+        self.assertEqual(context["target_date_iso"], (self.fixed_now - timedelta(days=2)).date().isoformat())
+        # By target date: Feb 11 total = 2,645,250 + 9,374,050 = 12,019,300.
+        self.assertEqual(context["kpis"]["sales_24h_total"], Decimal("12019300.0000"))
+        self.assertEqual(context["kpis"]["sales_prev_24h_total"], Decimal("0.0000"))
 
 
 class OverviewUITemplateTests(TestCase):

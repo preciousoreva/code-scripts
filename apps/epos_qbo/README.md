@@ -99,6 +99,7 @@ All routes require authentication.
 - `OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS` (default `2`)
 - `OIAT_DASHBOARD_STALE_HOURS_WARNING` (default `48`)
 - `OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS` (default `7`)
+- `OIAT_DASHBOARD_RECON_DIFF_WARNING` (default `1.0`)
 - `OIAT_DASHBOARD_REAUTH_GUIDANCE` (default points to `code_scripts/store_tokens.py` guidance text)
 
 ## Template formatting rule

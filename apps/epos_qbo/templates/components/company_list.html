@@ -16,7 +16,7 @@
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden divide-y divide-slate-100 dark:divide-slate-700">
         {% for company in companies %}
             {% with name_initial=company.name|first %}
-            <div class="overview-company-row group p-4 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer {% if company.status == 'warning' %}border-l-4 border-l-amber-400 dark:border-l-amber-500 bg-amber-50/10 dark:bg-amber-900/20{% elif company.status == 'critical' %}border-l-4 border-l-red-500 dark:border-l-red-500 bg-red-50/10 dark:bg-red-900/20{% endif %}" data-search="{{ company.name|default:''|lower }} {{ company.company_key|default:''|lower }}">
+            <div class="overview-company-row group p-4 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer {% if company.status == 'warning' or company.status == 'unknown' %}border-l-4 border-l-amber-400 dark:border-l-amber-500 bg-amber-50/10 dark:bg-amber-900/20{% elif company.status == 'critical' %}border-l-4 border-l-red-500 dark:border-l-red-500 bg-red-50/10 dark:bg-red-900/20{% endif %}" data-search="{{ company.name|default:''|lower }} {{ company.company_key|default:''|lower }}">
                 <div class="flex items-center justify-between mb-2">
                     <div class="flex items-center gap-3">
                         <div class="w-8 h-8 rounded bg-slate-100 dark:bg-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 text-xs font-bold">
@@ -25,6 +25,12 @@
                         <div>
                             <h4 class="text-sm font-medium text-slate-900 dark:text-slate-100">{{ company.name }}</h4>
                             <p class="text-xs text-slate-500 dark:text-slate-400">Last run: {% if company.last_run %}{{ company.last_run|date:"M j, Y H:i" }}{% else %}Never run{% endif %}</p>
+                            {% if company.run_activity %}
+                            <p class="text-xs {% if company.run_activity.color == 'blue' %}text-blue-600 dark:text-blue-400{% else %}text-amber-600 dark:text-amber-400{% endif %} mt-1 flex items-center gap-1">
+                                <iconify-icon icon="{{ company.run_activity.icon }}" width="14"></iconify-icon>
+                                {{ company.run_activity.label }}
+                            </p>
+                            {% endif %}
                             {% if company.last_run_reconciliation_warning %}
                             <p class="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
                                 <iconify-icon icon="solar:danger-triangle-linear" width="14"></iconify-icon>
@@ -44,6 +50,11 @@
                             <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
                             Warning
                         </span>
+                    {% elif company.status == 'unknown' %}
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-800">
+                            <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                            Never Run
+                        </span>
                     {% else %}
                         <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-100 dark:border-red-800">
                             <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
@@ -58,6 +69,9 @@
                         <span class="text-xs font-medium text-slate-700 dark:text-slate-300">
                             {{ company.records_synced|default:"0" }} synced
                         </span>
+                        {% if company.health_reason_labels %}
+                        <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-1">{{ company.health_reason_labels|join:", " }}</p>
+                        {% endif %}
                     </div>
                     <div>
                         <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Token</span>
@@ -67,6 +81,17 @@
                         <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{{ company.token_info.display_subtext }}</p>
                     </div>
                     <div class="flex justify-end items-center">
+                        {% if company.status == 'unknown' and 'NO_ARTIFACT_METADATA' in company.health.reason_codes and perms.epos_qbo.can_trigger_runs %}
+                        <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="mr-2">
+                            {% csrf_token %}
+                            <input type="hidden" name="scope" value="single_company">
+                            <input type="hidden" name="company_key" value="{{ company.company_key }}">
+                            <input type="hidden" name="date_mode" value="yesterday">
+                            <button type="submit" class="text-xs font-medium px-2 py-1 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50">
+                                Trigger Sync
+                            </button>
+                        </form>
+                        {% endif %}
                         <a href="{% url 'epos_qbo:company-detail' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600">
                             View Details
                         </a>

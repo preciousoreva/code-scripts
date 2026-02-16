@@ -358,3 +358,49 @@ class CompanyRunActivityTests(TestCase):
         # Last successful run is this_run (target 1 day ago, total 75000)
         self.assertIn("75,000", html)
         self.assertIn("Target:", html)
+
+    def test_warning_filter_excludes_running_when_health_is_otherwise_healthy(self):
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_RUNNING,
+            started_at=self.fixed_now - timedelta(minutes=30),
+        )
+        RunArtifact.objects.create(
+            run_job=run,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(minutes=20),
+            source_path="/tmp/company_a_running_filter.json",
+            source_hash="hash-company-a-running-filter",
+            rows_kept=1,
+        )
+
+        with self._patch_time_and_tokens():
+            response = self.client.get(
+                reverse("epos_qbo:companies-list"),
+                {"filter": "warning"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["companies_data"]), 0)
+
+        with self._patch_time_and_tokens():
+            response_all = self.client.get(reverse("epos_qbo:companies-list"))
+        company_data = response_all.context["companies_data"][0]
+        self.assertEqual(company_data["status"]["level"], "healthy")
+        self.assertEqual(company_data["status"]["canonical_level"], "healthy")
+        self.assertEqual(company_data["health"]["run_activity"], "running")
+        self.assertEqual(company_data["run_activity"]["state"], "running")
+
+    def test_unknown_filter_includes_never_synced_companies(self):
+        with self._patch_time_and_tokens():
+            response = self.client.get(
+                reverse("epos_qbo:companies-list"),
+                {"filter": "unknown"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["companies_data"]), 1)
+        company_data = response.context["companies_data"][0]
+        self.assertEqual(company_data["status"]["level"], "unknown")
+        self.assertEqual(company_data["status"]["canonical_level"], "unknown")

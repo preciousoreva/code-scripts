@@ -127,7 +127,10 @@ class TokenHealthViewsTests(TestCase):
         }
 
     def test_overview_never_shows_unknown_green(self):
-        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=None):
+        with (
+            mock.patch("apps.epos_qbo.views.load_tokens_batch", return_value={}),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=None),
+        ):
             response = self.client.get(reverse("epos_qbo:overview"))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
@@ -139,7 +142,10 @@ class TokenHealthViewsTests(TestCase):
             access_delta=timedelta(minutes=30),
             refresh_delta=timedelta(days=30),
         )
-        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens):
+        with (
+            mock.patch("apps.epos_qbo.views.load_tokens_batch", return_value={}),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens),
+        ):
             response = self.client.get(reverse("epos_qbo:companies-list"))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
@@ -151,7 +157,10 @@ class TokenHealthViewsTests(TestCase):
             access_delta=timedelta(minutes=-5),
             refresh_delta=timedelta(days=25),
         )
-        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens):
+        with (
+            mock.patch("apps.epos_qbo.views.load_tokens_batch", return_value={}),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens),
+        ):
             response = self.client.get(reverse("epos_qbo:companies-list"))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
@@ -164,7 +173,10 @@ class TokenHealthViewsTests(TestCase):
             refresh_delta=timedelta(days=20),
             refresh_token=None,
         )
-        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens):
+        with (
+            mock.patch("apps.epos_qbo.views.load_tokens_batch", return_value={}),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens),
+        ):
             response = self.client.get(reverse("epos_qbo:companies-list"))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")

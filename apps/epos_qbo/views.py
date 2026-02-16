@@ -61,6 +61,15 @@ DEFAULT_REAUTH_GUIDANCE = (
     "QBO re-authentication required. Run OAuth flow and store tokens using "
     "code_scripts/store_tokens.py."
 )
+HEALTH_REASON_LABELS = {
+    "EPOS_CONFIG_MISSING": "EPOS config/env keys missing",
+    "TOKEN_CRITICAL": "QBO re-authentication required",
+    "TOKEN_EXPIRING_SOON": "QBO refresh token expiring soon",
+    "LATEST_RUN_FAILED": "Latest run failed",
+    "UPLOAD_FAILURE": "Upload failures in latest run",
+    "RECON_MISMATCH": "Reconciliation mismatch above threshold",
+    "NO_ARTIFACT_METADATA": "No successful sync yet",
+}
 EXIT_CODE_REFERENCE = [
     {"code": "0", "message": "Success."},
     {"code": "1", "message": "Pipeline failed during execution. Check Live Log for root cause."},
@@ -83,6 +92,17 @@ def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
     return value
 
 
+def _decimal_setting(name: str, default: Decimal, *, minimum: Decimal | None = None) -> Decimal:
+    raw = getattr(settings, name, default)
+    try:
+        value = Decimal(str(raw))
+    except Exception:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
 def _dashboard_default_parallel() -> int:
     return _int_setting("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
 
@@ -99,9 +119,22 @@ def _dashboard_refresh_expiring_days() -> int:
     return _int_setting("OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS", 7, minimum=1)
 
 
+def _dashboard_reconcile_diff_warning_threshold() -> Decimal:
+    return _decimal_setting("OIAT_DASHBOARD_RECON_DIFF_WARNING", Decimal("1.0"), minimum=Decimal("0"))
+
+
 def _reauth_guidance() -> str:
     text = str(getattr(settings, "OIAT_DASHBOARD_REAUTH_GUIDANCE", DEFAULT_REAUTH_GUIDANCE)).strip()
     return text or DEFAULT_REAUTH_GUIDANCE
+
+
+def _health_reason_labels(reason_codes: list[str] | None) -> list[str]:
+    labels: list[str] = []
+    for code in reason_codes or []:
+        label = HEALTH_REASON_LABELS.get(code)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
 
 
 def _ensure_company_records() -> None:
@@ -421,33 +454,97 @@ def _status_for_company(
     latest_job: RunJob | None,
     token_info: dict | None = None,
 ) -> tuple[str, str]:
+    health = _company_health_snapshot(
+        company,
+        latest_artifact=latest_artifact,
+        latest_job=latest_job,
+        token_info=token_info,
+    )
+    return health["level"], health["summary"]
+
+
+def _run_activity_status(latest_job: RunJob | None) -> str:
+    if latest_job and latest_job.status == RunJob.STATUS_RUNNING:
+        return "running"
+    if latest_job and latest_job.status == RunJob.STATUS_QUEUED:
+        return "queued"
+    return "idle"
+
+
+def _company_health_snapshot(
+    company: CompanyConfigRecord,
+    latest_artifact: RunArtifact | None,
+    latest_job: RunJob | None,
+    token_info: dict | None = None,
+) -> dict:
+    """Canonical company health classification used by overview/list/detail views."""
     cfg = company.config_json or {}
     epos = cfg.get("epos") or {}
     token_info = token_info or _company_token_health(company)
+    run_activity = _run_activity_status(latest_job)
 
     if not epos.get("username_env_key") or not epos.get("password_env_key"):
-        return "warning", "Missing EPOS env key names in company config."
+        return {
+            "level": "warning",
+            "summary": "Missing EPOS env key names in company config.",
+            "reason_codes": ["EPOS_CONFIG_MISSING"],
+            "run_activity": run_activity,
+        }
     if token_info["severity"] == "critical":
-        return "critical", token_info["status_message"]
+        return {
+            "level": "critical",
+            "summary": token_info["status_message"],
+            "reason_codes": ["TOKEN_CRITICAL"],
+            "run_activity": run_activity,
+        }
 
     if latest_job and latest_job.status == RunJob.STATUS_FAILED:
-        return "critical", latest_job.failure_reason or "Latest run failed."
-    if latest_job and latest_job.status in (RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING):
-        return "warning", "Run currently queued/running."
+        return {
+            "level": "critical",
+            "summary": latest_job.failure_reason or "Latest run failed.",
+            "reason_codes": ["LATEST_RUN_FAILED"],
+            "run_activity": run_activity,
+        }
 
     if token_info["severity"] == "warning":
-        return "warning", token_info["status_message"]
+        return {
+            "level": "warning",
+            "summary": token_info["status_message"],
+            "reason_codes": ["TOKEN_EXPIRING_SOON"],
+            "run_activity": run_activity,
+        }
 
     if latest_artifact:
         failed_uploads = int((latest_artifact.upload_stats_json or {}).get("failed", 0))
         if failed_uploads > 0:
-            return "critical", f"{failed_uploads} upload(s) failed in latest run."
-        if latest_artifact.reconcile_difference and abs(latest_artifact.reconcile_difference) > 1.0:
-            return "warning", "Reconciliation mismatch above threshold."
+            return {
+                "level": "critical",
+                "summary": f"{failed_uploads} upload(s) failed in latest run.",
+                "reason_codes": ["UPLOAD_FAILURE"],
+                "run_activity": run_activity,
+            }
+        reconcile_diff = latest_artifact.reconcile_difference
+        if reconcile_diff is not None and abs(reconcile_diff) > _dashboard_reconcile_diff_warning_threshold():
+            return {
+                "level": "warning",
+                "summary": "Reconciliation mismatch above threshold.",
+                "reason_codes": ["RECON_MISMATCH"],
+                "run_activity": run_activity,
+            }
     else:
-        return "warning", "No artifact metadata ingested yet."
+        return {
+            "level": "unknown",
+            "summary": "No successful sync yet.",
+            "reason_codes": ["NO_ARTIFACT_METADATA"],
+            "run_activity": run_activity,
+        }
 
-    return "healthy", "Last run succeeded."
+    return {
+        "level": "healthy",
+        "summary": "Last run succeeded.",
+        "reason_codes": [],
+        "run_activity": run_activity,
+    }
 
 
 def _classify_system_health(healthy_count: int, warning_count: int, critical_count: int) -> dict:
@@ -471,6 +568,22 @@ def _classify_system_health(healthy_count: int, warning_count: int, critical_cou
         "color": "emerald",
         "icon": "solar:shield-check-linear",
     }
+
+
+def _format_system_health_breakdown(
+    healthy_count: int,
+    warning_count: int,
+    critical_count: int,
+    unknown_count: int = 0,
+) -> str:
+    parts = [f"{healthy_count} healthy"]
+    if warning_count > 0:
+        parts.append(f"{warning_count} warning")
+    if critical_count > 0:
+        parts.append(f"{critical_count} critical")
+    if unknown_count > 0:
+        parts.append(f"{unknown_count} unknown")
+    return " • ".join(parts)
 
 
 def _format_relative_age(delta_seconds: float) -> str:
@@ -614,7 +727,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     token_batch = load_tokens_batch(token_pairs)
 
     companies_context = []
-    healthy_count = warning_count = critical_count = 0
+    healthy_count = warning_count = critical_count = unknown_count = 0
 
     for company in companies:
         latest_artifact = latest_artifacts.get(company.company_key)
@@ -622,7 +735,16 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         realm_id = ((company.config_json or {}).get("qbo") or {}).get("realm_id")
         preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
         token_info = _company_token_health(company, tokens=preloaded_tokens)
-        status, summary = _status_for_company(company, latest_artifact, latest_job, token_info)
+        health = _company_health_snapshot(
+            company,
+            latest_artifact=latest_artifact,
+            latest_job=latest_job,
+            token_info=token_info,
+        )
+        status = health["level"]
+        summary = health["summary"]
+        run_activity = _run_activity_display(health["run_activity"])
+        health_reason_labels = _health_reason_labels(health.get("reason_codes"))
         latest_job_time = None
         if latest_job:
             latest_job_time = latest_job.finished_at or latest_job.started_at or latest_job.created_at
@@ -639,6 +761,8 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             healthy_count += 1
         elif status == "warning":
             warning_count += 1
+        elif status == "unknown":
+            unknown_count += 1
         else:
             critical_count += 1
 
@@ -648,6 +772,9 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "company_key": company.company_key,
                 "last_run": last_run_time,
                 "status": status,
+                "health": health,
+                "run_activity": run_activity,
+                "health_reason_labels": health_reason_labels,
                 "token_info": token_info,
                 "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
                 "summary": summary,
@@ -656,7 +783,12 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         )
 
     system_health = _classify_system_health(healthy_count, warning_count, critical_count)
-    system_health_breakdown = f"{healthy_count} healthy • {warning_count} warning • {critical_count} critical"
+    system_health_breakdown = _format_system_health_breakdown(
+        healthy_count,
+        warning_count,
+        critical_count,
+        unknown_count,
+    )
 
     if has_overview_target_date and target_date is not None and prev_target_date is not None:
         sales_trend = compute_sales_snapshot_by_target_date(
@@ -841,6 +973,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             "healthy_count": healthy_count,
             "warning_count": warning_count,
             "critical_count": critical_count,
+            "unknown_count": unknown_count,
             "system_health_label": system_health["label"],
             "system_health_severity": system_health["severity"],
             "system_health_color": system_health["color"],
@@ -936,6 +1069,7 @@ def settings_page(request):
         "default_stagger_seconds": _dashboard_default_stagger_seconds(),
         "stale_hours_warning": _dashboard_stale_hours_warning(),
         "refresh_expiring_days": _dashboard_refresh_expiring_days(),
+        "reconcile_diff_warning": _dashboard_reconcile_diff_warning_threshold(),
         "reauth_guidance": _reauth_guidance(),
     }
     context.update(_nav_context())
@@ -1550,15 +1684,45 @@ def _status_display_from_canonical(
 ) -> dict:
     """Map canonical status from _status_for_company to display dict (level, label, color, icon)."""
     if status_str == "critical":
-        return {"level": "critical", "label": "Critical", "color": "red", "icon": "solar:close-circle-linear"}
+        return {
+            "level": "critical",
+            "canonical_level": "critical",
+            "label": "Critical",
+            "color": "red",
+            "icon": "solar:close-circle-linear",
+        }
     if status_str == "healthy":
-        return {"level": "healthy", "label": "Healthy", "color": "emerald", "icon": "solar:check-circle-linear"}
-    # warning: show "Running" when job is running, "Never Run" when no run, else "Warning"
-    if latest_run and latest_run.status == RunJob.STATUS_RUNNING:
-        return {"level": "running", "label": "Running", "color": "blue", "icon": "solar:refresh-linear"}
+        return {
+            "level": "healthy",
+            "canonical_level": "healthy",
+            "label": "Healthy",
+            "color": "emerald",
+            "icon": "solar:check-circle-linear",
+        }
+    if status_str == "unknown":
+        return {
+            "level": "unknown",
+            "canonical_level": "unknown",
+            "label": "Never Run",
+            "color": "amber",
+            "icon": "solar:question-circle-linear",
+        }
+    # warning: show "Never Run" when no run, else "Warning"
     if not latest_run and not latest_artifact:
-        return {"level": "warning", "label": "Never Run", "color": "amber", "icon": "solar:danger-triangle-linear"}
-    return {"level": "warning", "label": "Warning", "color": "amber", "icon": "solar:danger-triangle-linear"}
+        return {
+            "level": "warning",
+            "canonical_level": "warning",
+            "label": "Never Run",
+            "color": "amber",
+            "icon": "solar:danger-triangle-linear",
+        }
+    return {
+        "level": "warning",
+        "canonical_level": "warning",
+        "label": "Warning",
+        "color": "amber",
+        "icon": "solar:danger-triangle-linear",
+    }
 
 
 def _get_company_issues_for_list(
@@ -1596,6 +1760,24 @@ def _get_company_issues_for_list(
                 "action": "trigger_sync",
             })
     return issues
+
+
+def _run_activity_display(run_activity: str) -> dict | None:
+    if run_activity == "running":
+        return {
+            "state": "running",
+            "label": "Sync running",
+            "icon": "solar:refresh-linear",
+            "color": "blue",
+        }
+    if run_activity == "queued":
+        return {
+            "state": "queued",
+            "label": "Sync queued",
+            "icon": "solar:clock-circle-linear",
+            "color": "amber",
+        }
+    return None
 
 
 def _enrich_company_data(
@@ -1641,8 +1823,20 @@ def _enrich_company_data(
             .first()
         )
 
-    status_str, _ = _status_for_company(company, latest_artifact, latest_run, token_info)
-    status = _status_display_from_canonical(status_str, latest_run, latest_artifact)
+    health = _company_health_snapshot(
+        company,
+        latest_artifact=latest_artifact,
+        latest_job=latest_run,
+        token_info=token_info,
+    )
+    status_str = health["level"]
+    status = _status_display_from_canonical(
+        status_str,
+        latest_run,
+        latest_artifact,
+    )
+    run_activity = _run_activity_display(health["run_activity"])
+    health_reason_labels = _health_reason_labels(health.get("reason_codes"))
     issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
     config_display = _parse_config_for_display(company.config_json)
     artifacts_by_day: dict[object, list[RunArtifact]] = {}
@@ -1683,6 +1877,9 @@ def _enrich_company_data(
     return {
         "company": company,
         "status": status,
+        "health": health,
+        "health_reason_labels": health_reason_labels,
+        "run_activity": run_activity,
         "latest_run": latest_run,
         "latest_artifact": latest_artifact,
         "token_info": token_info,
@@ -1707,18 +1904,34 @@ def _sort_companies_data(companies_data: list, sort_by: str) -> list:
             reverse=True,
         )
     if sort_by == "status":
-        order = {"critical": 0, "warning": 1, "running": 2, "healthy": 3}
+        order = {"critical": 0, "warning": 1, "unknown": 2, "healthy": 3}
         return sorted(companies_data, key=lambda c: order.get(c["status"]["level"], 99))
     return companies_data
 
 
 def _calculate_companies_summary(companies_data: list) -> dict:
     total = len(companies_data)
-    healthy = sum(1 for c in companies_data if c["status"]["level"] == "healthy")
-    # Count "running" as warning so totals match Overview (Overview has no separate running count)
-    warning = sum(1 for c in companies_data if c["status"]["level"] in ("warning", "running"))
-    critical = sum(1 for c in companies_data if c["status"]["level"] == "critical")
-    return {"total": total, "healthy": healthy, "warning": warning, "critical": critical}
+    healthy = sum(
+        1
+        for c in companies_data
+        if c["status"].get("canonical_level", c["status"]["level"]) == "healthy"
+    )
+    warning = sum(
+        1
+        for c in companies_data
+        if c["status"].get("canonical_level", c["status"]["level"]) == "warning"
+    )
+    critical = sum(
+        1
+        for c in companies_data
+        if c["status"].get("canonical_level", c["status"]["level"]) == "critical"
+    )
+    unknown = sum(
+        1
+        for c in companies_data
+        if c["status"].get("canonical_level", c["status"]["level"]) == "unknown"
+    )
+    return {"total": total, "healthy": healthy, "warning": warning, "critical": critical, "unknown": unknown}
 
 
 def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | None], dict[str, RunArtifact | None], dict[str, list], dict[str, RunArtifact | None], dict[str, dict]]:
@@ -1838,7 +2051,11 @@ def companies_list(request):
             companies_data.append(company_data)
 
     if filter_status != "all":
-        companies_data = [c for c in companies_data if c["status"]["level"] == filter_status]
+        companies_data = [
+            c
+            for c in companies_data
+            if c["status"].get("canonical_level", c["status"]["level"]) == filter_status
+        ]
     companies_data = _sort_companies_data(companies_data, sort_by)
     summary = _calculate_companies_summary(companies_data)
 
