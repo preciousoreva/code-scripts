@@ -18,9 +18,29 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
         return default
     return value
 
-SECRET_KEY = "django-insecure-vb4alzjrj)s)_#stsklynb)iohe)ybs7axx+2=3p!e)cuoc6#3"
-DEBUG = True
-ALLOWED_HOSTS = ["*"]
+# Security: prefer env in production; dev default only when explicitly enabled
+_SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+if _SECRET_KEY:
+    SECRET_KEY = _SECRET_KEY
+else:
+    # Fallback for local dev only; do not use in production
+    SECRET_KEY = os.getenv("OIAT_DEV_SECRET_KEY", "django-insecure-dev-only-change-in-production")
+
+# Default DEBUG=True when unset so runserver works with no env (local dev). Set DJANGO_DEBUG=0 in production.
+_debug_raw = os.getenv("DJANGO_DEBUG")
+if _debug_raw is None:
+    DEBUG = True
+else:
+    DEBUG = _debug_raw.lower() in ("1", "true", "yes")
+
+_raw_hosts = os.getenv("DJANGO_ALLOWED_HOSTS", "").strip()
+if _raw_hosts:
+    ALLOWED_HOSTS = [h.strip() for h in _raw_hosts.split(",") if h.strip()]
+elif DEBUG:
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]", "*"]
+else:
+    # DEBUG=False but no DJANGO_ALLOWED_HOSTS: allow runserver for local testing (production must set DJANGO_ALLOWED_HOSTS).
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]"]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -118,3 +138,15 @@ OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)
 OIAT_BUSINESS_TIMEZONE = os.getenv("OIAT_BUSINESS_TIMEZONE", "Africa/Lagos")
 OIAT_BUSINESS_DAY_CUTOFF_HOUR = _env_int("OIAT_BUSINESS_DAY_CUTOFF_HOUR", 5, minimum=0)
 OIAT_BUSINESS_DAY_CUTOFF_MINUTE = _env_int("OIAT_BUSINESS_DAY_CUTOFF_MINUTE", 0, minimum=0)
+
+# Production security (when DEBUG is False)
+if not DEBUG:
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = "DENY"
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "").lower() in ("1", "true", "yes")
+    SECURE_HSTS_SECONDS = _env_int("DJANGO_SECURE_HSTS_SECONDS", 0, minimum=0)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = SECURE_HSTS_SECONDS > 0
+    SECURE_HSTS_PRELOAD = SECURE_HSTS_SECONDS > 0

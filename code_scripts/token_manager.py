@@ -12,7 +12,7 @@ import sqlite3
 import stat
 import base64
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 import threading
 
 import requests
@@ -35,6 +35,18 @@ DB_FILE = SCRIPT_DIR / "qbo_tokens.sqlite"
 
 # Thread lock for database operations
 _db_lock = threading.Lock()
+
+# One-time init per process (avoids DDL + chmod on every load_tokens call)
+_db_initialized = False
+
+
+def ensure_db_initialized() -> None:
+    """Ensure SQLite token DB exists and is ready. Safe to call repeatedly; runs init at most once per process."""
+    global _db_initialized
+    if _db_initialized:
+        return
+    _init_database()
+    _db_initialized = True
 
 
 def _validate_credentials() -> None:
@@ -98,8 +110,8 @@ def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with access_token, refresh_token, expires_at, or None if not found
     """
-    _init_database()
-    
+    ensure_db_initialized()
+
     with _db_lock:
         conn = sqlite3.connect(DB_FILE)
         try:
@@ -126,6 +138,45 @@ def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:
             conn.close()
 
 
+def load_tokens_batch(
+    pairs: List[Tuple[str, str]],
+) -> Dict[Tuple[str, str], Optional[Dict[str, Any]]]:
+    """
+    Load tokens for multiple (company_key, realm_id) pairs in one connection.
+    Call ensure_db_initialized() once before if this is the first token access in the process.
+    Returns dict keyed by (company_key, realm_id) -> token dict or None if not found.
+    """
+    if not pairs:
+        return {}
+    ensure_db_initialized()
+    result: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+    with _db_lock:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            for company_key, realm_id in pairs:
+                cursor = conn.execute(
+                    "SELECT access_token, refresh_token, access_expires_at, refresh_expires_at, "
+                    "updated_at, environment "
+                    "FROM qbo_tokens WHERE company_key = ? AND realm_id = ?",
+                    (company_key, realm_id),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    result[(company_key, realm_id)] = None
+                else:
+                    result[(company_key, realm_id)] = {
+                        "access_token": row[0],
+                        "refresh_token": row[1],
+                        "expires_at": row[2],
+                        "refresh_expires_at": row[3],
+                        "updated_at": row[4],
+                        "environment": row[5] or "production",
+                    }
+        finally:
+            conn.close()
+    return result
+
+
 def save_tokens(
     company_key: str,
     realm_id: str,
@@ -147,11 +198,11 @@ def save_tokens(
         refresh_expires_at: Unix timestamp when refresh token expires
         environment: 'production' or 'sandbox'
     """
-    _init_database()
+    ensure_db_initialized()
     _validate_credentials()
-    
+
     updated_at = int(time.time())
-    
+
     with _db_lock:
         conn = sqlite3.connect(DB_FILE)
         try:

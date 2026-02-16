@@ -217,6 +217,58 @@ class CompanyRunActivityTests(TestCase):
         self.assertEqual(recent_runs[0].id, run.id)
         self.assertNotEqual(response.context["company_data"]["last_run_display"], "Never run")
 
+    def test_company_detail_latest_run_ordered_by_finished_at_not_started_at(self):
+        """Company detail 'latest run' must match overview/companies list: order by finished_at then started_at."""
+        # Run A: started earlier, finished at 18:00
+        run_a = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(hours=4),
+            finished_at=self.fixed_now - timedelta(hours=2),
+        )
+        RunArtifact.objects.create(
+            run_job=run_a,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(hours=2),
+            source_path="/tmp/company_a_run_a.json",
+            source_hash="hash-run-a",
+            rows_kept=10,
+        )
+        # Run B: started later (1h ago) but finished earlier (3h ago)
+        run_b = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(hours=1),
+            finished_at=self.fixed_now - timedelta(hours=3),
+        )
+        RunArtifact.objects.create(
+            run_job=run_b,
+            company_key=self.company.company_key,
+            target_date=(self.fixed_now - timedelta(days=1)).date(),
+            processed_at=self.fixed_now - timedelta(hours=3),
+            source_path="/tmp/company_a_run_b.json",
+            source_hash="hash-run-b",
+            rows_kept=20,
+        )
+
+        with self._patch_time_and_tokens():
+            response = self.client.get(
+                reverse("epos_qbo:company-detail", kwargs={"company_key": self.company.company_key})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        # Latest by finished_at is run_a (finished 2h ago); run_b finished 3h ago. So run_a must be first.
+        company_data = response.context["company_data"]
+        self.assertIsNotNone(company_data["latest_run"])
+        self.assertEqual(company_data["latest_run"].id, run_a.id)
+        recent_runs = list(response.context["recent_runs"])
+        self.assertEqual(len(recent_runs), 2)
+        self.assertEqual(recent_runs[0].id, run_a.id)
+        self.assertEqual(recent_runs[1].id, run_b.id)
+
     def test_company_detail_last_run_falls_back_to_artifact_time_without_runjob(self):
         RunArtifact.objects.create(
             company_key=self.company.company_key,
@@ -301,6 +353,8 @@ class CompanyRunActivityTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
-        self.assertIn("SALES SYNCED (7D)", html)
+        self.assertIn("Sales Synced (last run)", html)
         self.assertNotIn("Records (24h)", html)
-        self.assertIn("vs last week", html)
+        # Last successful run is this_run (target 1 day ago, total 75000)
+        self.assertIn("75,000", html)
+        self.assertIn("Target:", html)

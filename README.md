@@ -166,6 +166,8 @@ python manage.py run_scheduled_all_companies --parallel 2
 
 The OIAT Portal is a Django web application that provides a monitoring dashboard, run triggering, and company onboarding UI for the pipeline.
 
+> **Tracking:** Security, performance, and deployment notes (env vars, runserver defaults, migrations) are in [docs/PORTAL_IMPROVEMENTS_AND_TRACKING.md](docs/PORTAL_IMPROVEMENTS_AND_TRACKING.md).
+
 ### Portal Setup
 
 Use the **same virtual environment** as the pipeline. If you have not already done so, run the [First-time setup (all in one)](#first-time-setup-all-in-one) steps (venv, `pip install -r requirements.txt`, `playwright install chromium`, and on Linux/WSL `sudo playwright install-deps`). That ensures the dashboard can trigger runs without missing dependencies (pandas, Playwright, Chromium system libs).

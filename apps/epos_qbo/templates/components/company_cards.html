@@ -38,15 +38,15 @@
                 </div>
                 {% if company_data.issues %}
                 <div class="mt-3 flex items-center gap-2 text-sm">
-                    {% if company_data.status.color == 'red' %}
+                    {% if company_data.issues_highest_severity == 'critical' %}
                     <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-red-500 dark:text-red-400 flex-shrink-0"></iconify-icon>
                     <span class="text-red-700 dark:text-red-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
-                    {% elif company_data.status.color == 'amber' %}
+                    {% elif company_data.issues_highest_severity == 'warning' %}
                     <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-amber-500 dark:text-amber-400 flex-shrink-0"></iconify-icon>
                     <span class="text-amber-700 dark:text-amber-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
                     {% else %}
-                    <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-emerald-500 dark:text-emerald-400 flex-shrink-0"></iconify-icon>
-                    <span class="text-emerald-700 dark:text-emerald-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
+                    <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-amber-500 dark:text-amber-400 flex-shrink-0"></iconify-icon>
+                    <span class="text-amber-700 dark:text-amber-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
                     {% endif %}
                 </div>
                 {% endif %}

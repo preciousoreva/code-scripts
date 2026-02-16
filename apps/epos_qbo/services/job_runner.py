@@ -157,40 +157,48 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
     return job
 
 
+# Max consecutive start failures before giving up (avoids unbounded recursion / thrashing)
+DISPATCH_START_FAILURE_LIMIT = 5
+
+
 def dispatch_next_queued_job() -> tuple[RunJob | None, str]:
-    with transaction.atomic():
-        lock, _ = RunLock.objects.select_for_update().get_or_create(id=1)
-        if lock.active:
-            return None, "queued"
+    failure_count = 0
+    while failure_count < DISPATCH_START_FAILURE_LIMIT:
+        with transaction.atomic():
+            lock, _ = RunLock.objects.select_for_update().get_or_create(id=1)
+            if lock.active:
+                return None, "queued"
 
-        job = (
-            RunJob.objects.select_for_update()
-            .filter(status=RunJob.STATUS_QUEUED)
-            .order_by("created_at")
-            .first()
-        )
-        if job is None:
-            return None, "empty"
+            job = (
+                RunJob.objects.select_for_update()
+                .filter(status=RunJob.STATUS_QUEUED)
+                .order_by("created_at")
+                .first()
+            )
+            if job is None:
+                return None, "empty"
 
-        lock.active = True
-        lock.holder = f"dashboard:{job.id}"
-        lock.owner_run_job = job
-        lock.acquired_at = timezone.now()
-        lock.save(update_fields=["active", "holder", "owner_run_job", "acquired_at", "updated_at"])
+            lock.active = True
+            lock.holder = f"dashboard:{job.id}"
+            lock.owner_run_job = job
+            lock.acquired_at = timezone.now()
+            lock.save(update_fields=["active", "holder", "owner_run_job", "acquired_at", "updated_at"])
 
-    try:
-        command = build_command_for_job(job)
-        started_job = start_run_job(job, command)
-        return started_job, "started"
-    except Exception as exc:
-        release_run_lock(run_job=job, force=True)
-        RunJob.objects.filter(id=job.id).update(
-            status=RunJob.STATUS_FAILED,
-            failure_reason=f"Failed to start subprocess: {exc}",
-            finished_at=timezone.now(),
-            exit_code=3,
-        )
-        return dispatch_next_queued_job()
+        try:
+            command = build_command_for_job(job)
+            started_job = start_run_job(job, command)
+            return started_job, "started"
+        except Exception as exc:
+            failure_count += 1
+            release_run_lock(run_job=job, force=True)
+            RunJob.objects.filter(id=job.id).update(
+                status=RunJob.STATUS_FAILED,
+                failure_reason=f"Failed to start subprocess: {exc}",
+                finished_at=timezone.now(),
+                exit_code=3,
+            )
+            # Loop to try next queued job instead of recursing
+    return None, "start_failed"
 
 
 def read_log_chunk(job: RunJob, offset: int, max_bytes: int = 65536) -> tuple[str, int]:

@@ -100,6 +100,10 @@ class RunJob(models.Model):
             ("can_trigger_runs", "Can trigger pipeline runs"),
         ]
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "-created_at"]),
+            models.Index(fields=["company_key", "-created_at"]),
+        ]
 
     @property
     def display_label(self) -> str:
@@ -131,9 +135,15 @@ class RunArtifact(models.Model):
     rows_non_target = models.IntegerField(null=True, blank=True)
     upload_stats_json = models.JSONField(default=dict)
     reconcile_status = models.CharField(max_length=32, blank=True)
-    reconcile_difference = models.FloatField(null=True, blank=True)
-    reconcile_epos_total = models.FloatField(null=True, blank=True)
-    reconcile_qbo_total = models.FloatField(null=True, blank=True)
+    reconcile_difference = models.DecimalField(
+        max_digits=19, decimal_places=4, null=True, blank=True
+    )
+    reconcile_epos_total = models.DecimalField(
+        max_digits=19, decimal_places=4, null=True, blank=True
+    )
+    reconcile_qbo_total = models.DecimalField(
+        max_digits=19, decimal_places=4, null=True, blank=True
+    )
     reconcile_epos_count = models.IntegerField(null=True, blank=True)
     reconcile_qbo_count = models.IntegerField(null=True, blank=True)
     raw_file = models.CharField(max_length=255, blank=True)
@@ -149,6 +159,11 @@ class RunArtifact(models.Model):
             )
         ]
         ordering = ["-processed_at", "-imported_at"]
+        indexes = [
+            models.Index(fields=["company_key", "-processed_at"]),
+            models.Index(fields=["company_key", "target_date"]),
+            models.Index(fields=["company_key", "reconcile_status"]),
+        ]
 
 
 class RunLock(models.Model):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from math import ceil
@@ -16,7 +17,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from code_scripts.token_manager import load_tokens
+from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
 
 from .forms import CompanyAdvancedForm, CompanyBasicForm, RunTriggerForm
 from .models import CompanyConfigRecord, RunArtifact, RunJob
@@ -39,6 +40,8 @@ from .services.metrics import (
     compute_run_success_by_target_date,
     compute_sales_snapshot_by_target_date,
     compute_sales_trend,
+    extract_amount_hybrid,
+    _format_currency as _metrics_format_currency,
 )
 
 ACCESS_REFRESH_MARGIN_SECONDS = 60
@@ -216,7 +219,7 @@ def _exit_code_info(exit_code: int | None) -> dict | None:
     }
 
 
-def _company_token_health(company: CompanyConfigRecord) -> dict:
+def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = None) -> dict:
     guidance = _reauth_guidance()
     cfg = company.config_json or {}
     realm_id = (cfg.get("qbo") or {}).get("realm_id")
@@ -246,7 +249,8 @@ def _company_token_health(company: CompanyConfigRecord) -> dict:
             ],
         }
 
-    tokens = load_tokens(company.company_key, realm_id)
+    if tokens is None:
+        tokens = load_tokens(company.company_key, realm_id)
     if not tokens:
         return {
             "valid": False,
@@ -493,17 +497,39 @@ def resolve_overview_target_date(company_keys: list[str] | None = None) -> dict:
         artifacts = artifacts.filter(company_key__in=company_keys)
     latest = artifacts.select_related("run_job").order_by("-processed_at", "-imported_at", "-id").first()
     if latest is None or latest.target_date is None:
+        # No artifact yet: still try to show last successful run time (e.g. All Companies just finished)
+        latest_job = (
+            RunJob.objects.filter(status=RunJob.STATUS_SUCCEEDED)
+            .order_by("-finished_at", "-started_at", "-created_at")
+            .first()
+        )
+        last_successful_at = (latest_job.finished_at or latest_job.started_at or latest_job.created_at) if latest_job else None
         return {
             "target_date": None,
             "prev_target_date": None,
-            "last_successful_at": None,
+            "last_successful_at": last_successful_at,
             "has_data": False,
         }
+
+    artifact_time = latest.processed_at or latest.imported_at
+    # Include latest succeeded RunJob so "Last successful sync X ago" matches runs (including All Companies) even if artifact ingest is delayed
+    latest_succeeded_job = (
+        RunJob.objects.filter(status=RunJob.STATUS_SUCCEEDED)
+        .order_by("-finished_at", "-started_at", "-created_at")
+        .first()
+    )
+    job_time = None
+    if latest_succeeded_job:
+        job_time = latest_succeeded_job.finished_at or latest_succeeded_job.started_at or latest_succeeded_job.created_at
+    last_successful_at = max(
+        (t for t in (artifact_time, job_time) if t is not None),
+        key=lambda t: t,
+    ) if (artifact_time or job_time) else artifact_time
 
     return {
         "target_date": latest.target_date,
         "prev_target_date": latest.target_date - timedelta(days=1),
-        "last_successful_at": latest.processed_at or latest.imported_at,
+        "last_successful_at": last_successful_at,
         "has_data": True,
     }
 
@@ -540,9 +566,36 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     ):
         if artifact.company_key not in latest_artifacts:
             latest_artifacts[artifact.company_key] = artifact
-    for job in RunJob.objects.filter(company_key__in=company_keys).order_by("company_key", "-created_at"):
-        if job.company_key and job.company_key not in latest_jobs:
-            latest_jobs[job.company_key] = job
+
+    # Build "latest run" per company including All Companies runs (same logic as _company_runs_queryset).
+    # Jobs with company_key=company apply to that company; jobs with artifacts for a company also apply.
+    job_id_to_company_keys: dict = defaultdict(set)
+    for run_job_id, ck in RunArtifact.objects.filter(
+        company_key__in=company_keys
+    ).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
+        if run_job_id and ck:
+            job_id_to_company_keys[run_job_id].add(ck)
+    job_ids_with_artifacts = list(job_id_to_company_keys.keys())
+    # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
+    all_relevant_jobs = RunJob.objects.filter(
+        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts)
+    ).order_by("-finished_at", "-started_at", "-created_at")
+    for job in all_relevant_jobs:
+        candidates = []
+        if job.company_key and job.company_key in company_keys:
+            candidates.append(job.company_key)
+        candidates.extend(job_id_to_company_keys.get(job.id, []))
+        for ck in candidates:
+            if ck not in latest_jobs:
+                latest_jobs[ck] = job
+
+    ensure_db_initialized()
+    token_pairs = [
+        (c.company_key, ((c.config_json or {}).get("qbo") or {}).get("realm_id"))
+        for c in companies
+    ]
+    token_pairs = [(k, r) for k, r in token_pairs if r]
+    token_batch = load_tokens_batch(token_pairs)
 
     companies_context = []
     healthy_count = warning_count = critical_count = 0
@@ -550,7 +603,9 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     for company in companies:
         latest_artifact = latest_artifacts.get(company.company_key)
         latest_job = latest_jobs.get(company.company_key)
-        token_info = _company_token_health(company)
+        realm_id = ((company.config_json or {}).get("qbo") or {}).get("realm_id")
+        preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
+        token_info = _company_token_health(company, tokens=preloaded_tokens)
         status, summary = _status_for_company(company, latest_artifact, latest_job, token_info)
         latest_job_time = None
         if latest_job:
@@ -1013,27 +1068,27 @@ def logs_list(request):
     
     all_jobs_7d = RunJob.objects.filter(created_at__gte=since_7d)
     all_jobs_30d = RunJob.objects.filter(created_at__gte=since_30d)
-    
-    stats = {
-        "total_runs_7d": all_jobs_7d.count(),
-        "total_runs_30d": all_jobs_30d.count(),
-        "success_rate_7d": round(
-            (all_jobs_7d.filter(status=RunJob.STATUS_SUCCEEDED).count() * 100 / all_jobs_7d.count())
-            if all_jobs_7d.count() > 0 else 100.0,
-            1
-        ),
-        "error_count_7d": all_jobs_7d.filter(status=RunJob.STATUS_FAILED).count(),
-        "active_runs": RunJob.objects.filter(
-            status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
-        ).count(),
-    }
-    
-    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
-    
-    # Get active run IDs for polling
-    active_runs = RunJob.objects.filter(
+    total_7d = all_jobs_7d.count()
+    total_30d = all_jobs_30d.count()
+    succeeded_7d = all_jobs_7d.filter(status=RunJob.STATUS_SUCCEEDED).count()
+    failed_7d = all_jobs_7d.filter(status=RunJob.STATUS_FAILED).count()
+    active_runs_qs = RunJob.objects.filter(
         status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
-    ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
+    )
+    active_run_ids = list(active_runs_qs.values_list("id", flat=True)[:10])
+
+    stats = {
+        "total_runs_7d": total_7d,
+        "total_runs_30d": total_30d,
+        "success_rate_7d": round(
+            (succeeded_7d * 100 / total_7d) if total_7d > 0 else 100.0,
+            1,
+        ),
+        "error_count_7d": failed_7d,
+        "active_runs": len(active_run_ids),
+    }
+
+    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
     
     context = {
         "log_events": log_events,
@@ -1045,8 +1100,8 @@ def logs_list(request):
             "date_from": date_from,
             "date_to": date_to,
         },
-        "active_run_ids": [str(id) for id in active_runs],
-        "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
+        "active_run_ids": [str(i) for i in active_run_ids],
+        "active_run_ids_json": json.dumps([str(i) for i in active_run_ids]),
     }
     context.update(_nav_context())
     context.update(
@@ -1417,6 +1472,12 @@ def _company_runs_queryset(company_key: str):
     ).distinct()
 
 
+def _company_runs_queryset_ordered_by_latest(company_key: str):
+    """Runs for this company (single or All Companies with artifact), ordered for 'latest run'.
+    Ordering must match overview and companies list: -finished_at, -started_at, -created_at."""
+    return _company_runs_queryset(company_key).order_by("-finished_at", "-started_at", "-created_at")
+
+
 def _status_display_from_canonical(
     status_str: str,
     latest_run: RunJob | None,
@@ -1475,32 +1536,46 @@ def _get_company_issues_for_list(
 def _enrich_company_data(
     company: CompanyConfigRecord,
     latest_run: RunJob | None,
+    preloaded: dict | None = None,
 ) -> dict:
-    """Build enriched company dict for list/detail templates. Uses same status logic as Overview."""
-    latest_artifact = (
-        RunArtifact.objects.filter(company_key=company.company_key)
-        .order_by("-processed_at", "-imported_at")
-        .first()
-    )
-    # Receipts uploaded (Today): calendar day in dashboard TZ, same definition as overview KPIs
-    bounds = get_dashboard_date_bounds()
-    today_start_utc = bounds["today_start_utc"]
-    now_utc = bounds["now_utc"]
-    artifacts_today = (
-        RunArtifact.objects.filter(company_key=company.company_key)
-        .filter(
-            Q(processed_at__gte=today_start_utc, processed_at__lt=now_utc)
-            | Q(
-                processed_at__isnull=True,
-                imported_at__gte=today_start_utc,
-                imported_at__lt=now_utc,
-            )
+    """Build enriched company dict for list/detail templates. Uses same status logic as Overview.
+    When preloaded is provided (e.g. from companies_list batch), use it to avoid N+1 queries."""
+    if preloaded is not None:
+        latest_artifact = preloaded.get("latest_artifact")
+        artifacts_today = preloaded.get("artifacts_today") or []
+        token_info = preloaded.get("token_info") or _get_token_info_for_display(company)
+        latest_successful_artifact = preloaded.get("latest_successful_artifact")
+    else:
+        latest_artifact = (
+            RunArtifact.objects.filter(company_key=company.company_key)
+            .order_by("-processed_at", "-imported_at")
+            .first()
         )
-        .select_related("run_job")
-        .order_by("-processed_at", "-imported_at")
-    )
-    # Use canonical status from Overview so counts and labels match
-    token_info = _get_token_info_for_display(company)
+        bounds = get_dashboard_date_bounds()
+        today_start_utc = bounds["today_start_utc"]
+        now_utc = bounds["now_utc"]
+        artifacts_today = list(
+            RunArtifact.objects.filter(company_key=company.company_key)
+            .filter(
+                Q(processed_at__gte=today_start_utc, processed_at__lt=now_utc)
+                | Q(
+                    processed_at__isnull=True,
+                    imported_at__gte=today_start_utc,
+                    imported_at__lt=now_utc,
+                )
+            )
+            .select_related("run_job")
+            .order_by("-processed_at", "-imported_at")
+        )
+        token_info = _get_token_info_for_display(company)
+        latest_successful_artifact = (
+            RunArtifact.objects.filter(company_key=company.company_key)
+            .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+            .select_related("run_job")
+            .order_by("-processed_at", "-imported_at", "-id")
+            .first()
+        )
+
     status_str, _ = _status_for_company(company, latest_artifact, latest_run, token_info)
     status = _status_display_from_canonical(status_str, latest_run, latest_artifact)
     issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
@@ -1524,20 +1599,21 @@ def _enrich_company_data(
     else:
         last_activity_at = latest_run_time or latest_artifact_time
 
-    # Latest successful sync: receipt count and target date (aligned with overview)
-    latest_successful_artifact = (
-        RunArtifact.objects.filter(company_key=company.company_key)
-        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
-        .select_related("run_job")
-        .order_by("-processed_at", "-imported_at", "-id")
-        .first()
-    )
     if latest_successful_artifact:
         records_latest_sync = _artifact_uploaded_count(latest_successful_artifact)
         latest_sync_target_date = latest_successful_artifact.target_date
     else:
         records_latest_sync = 0
         latest_sync_target_date = None
+
+    # So templates can style the issue block by severity (amber/red), not overall status (which can be healthy)
+    issues_highest_severity = None
+    if issues:
+        severities = {i.get("severity") for i in issues}
+        if "red" in severities:
+            issues_highest_severity = "critical"
+        elif "amber" in severities:
+            issues_highest_severity = "warning"
 
     return {
         "company": company,
@@ -1546,6 +1622,7 @@ def _enrich_company_data(
         "latest_artifact": latest_artifact,
         "token_info": token_info,
         "issues": issues,
+        "issues_highest_severity": issues_highest_severity,
         "config_display": config_display,
         "records_24h": records_24h,
         "last_activity_at": last_activity_at,
@@ -1579,6 +1656,87 @@ def _calculate_companies_summary(companies_data: list) -> dict:
     return {"total": total, "healthy": healthy, "warning": warning, "critical": critical}
 
 
+def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | None], dict[str, RunArtifact | None], dict[str, list], dict[str, RunArtifact | None], dict[str, dict]]:
+    """Batch-fetch latest run, latest artifact, artifacts_today, latest_successful_artifact, and token_info per company_key.
+    Latest run per company includes All Companies runs that have an artifact for that company (same logic as overview)."""
+    company_keys = [c.company_key for c in companies]
+    if not company_keys:
+        return {}, {}, {}, {}, {}
+
+    # Latest run per company (include All Companies runs that produced an artifact for this company)
+    job_id_to_company_keys: dict = defaultdict(set)
+    for run_job_id, ck in RunArtifact.objects.filter(company_key__in=company_keys).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
+        if run_job_id and ck:
+            job_id_to_company_keys[run_job_id].add(ck)
+    job_ids_with_artifacts = list(job_id_to_company_keys.keys())
+    # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
+    all_relevant_jobs = RunJob.objects.filter(
+        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts)
+    ).order_by("-finished_at", "-started_at", "-created_at")
+    latest_runs_map: dict[str, RunJob | None] = {}
+    for job in all_relevant_jobs:
+        candidates = []
+        if job.company_key and job.company_key in company_keys:
+            candidates.append(job.company_key)
+        candidates.extend(job_id_to_company_keys.get(job.id, []))
+        for ck in candidates:
+            if ck not in latest_runs_map:
+                latest_runs_map[ck] = job
+
+    # Latest artifact per company
+    latest_artifacts_map: dict[str, RunArtifact | None] = {}
+    for art in RunArtifact.objects.filter(company_key__in=company_keys).order_by("company_key", "-processed_at", "-imported_at"):
+        if art.company_key not in latest_artifacts_map:
+            latest_artifacts_map[art.company_key] = art
+
+    bounds = get_dashboard_date_bounds()
+    today_start_utc = bounds["today_start_utc"]
+    now_utc = bounds["now_utc"]
+    artifacts_today_all = list(
+        RunArtifact.objects.filter(company_key__in=company_keys)
+        .filter(
+            Q(processed_at__gte=today_start_utc, processed_at__lt=now_utc)
+            | Q(
+                processed_at__isnull=True,
+                imported_at__gte=today_start_utc,
+                imported_at__lt=now_utc,
+            )
+        )
+        .select_related("run_job")
+        .order_by("company_key", "-processed_at", "-imported_at")
+    )
+    artifacts_today_by_key: dict[str, list] = {}
+    for art in artifacts_today_all:
+        artifacts_today_by_key.setdefault(art.company_key, []).append(art)
+
+    # Latest successful artifact per company
+    latest_successful_map: dict[str, RunArtifact | None] = {}
+    for art in (
+        RunArtifact.objects.filter(company_key__in=company_keys)
+        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .select_related("run_job")
+        .order_by("company_key", "-processed_at", "-imported_at", "-id")
+    ):
+        if art.company_key not in latest_successful_map:
+            latest_successful_map[art.company_key] = art
+
+    ensure_db_initialized()
+    token_pairs = [
+        (c.company_key, ((c.config_json or {}).get("qbo") or {}).get("realm_id"))
+        for c in companies
+    ]
+    token_pairs = [(k, r) for k, r in token_pairs if r]
+    token_batch = load_tokens_batch(token_pairs)
+
+    token_info_by_key: dict[str, dict] = {}
+    for company in companies:
+        realm_id = ((company.config_json or {}).get("qbo") or {}).get("realm_id")
+        preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
+        token_info_by_key[company.company_key] = _company_token_health(company, tokens=preloaded_tokens)
+
+    return latest_runs_map, latest_artifacts_map, artifacts_today_by_key, latest_successful_map, token_info_by_key
+
+
 @login_required
 def companies_list(request):
     """Companies management page with search, filter, sort; HTMX partial for list."""
@@ -1593,12 +1751,26 @@ def companies_list(request):
         companies = companies.filter(
             Q(display_name__icontains=search) | Q(company_key__icontains=search)
         )
+    companies = list(companies)
 
-    companies_data = []
-    for company in companies:
-        latest_run = _company_runs_queryset(company.company_key).order_by("-started_at", "-created_at").first()
-        company_data = _enrich_company_data(company, latest_run)
-        companies_data.append(company_data)
+    if not companies:
+        companies_data = []
+    else:
+        latest_runs_map, latest_artifacts_map, artifacts_today_by_key, latest_successful_map, token_info_by_key = _batch_preload_companies_data(companies)
+        companies_data = []
+        for company in companies:
+            preloaded = {
+                "latest_artifact": latest_artifacts_map.get(company.company_key),
+                "artifacts_today": artifacts_today_by_key.get(company.company_key, []),
+                "latest_successful_artifact": latest_successful_map.get(company.company_key),
+                "token_info": token_info_by_key.get(company.company_key),
+            }
+            company_data = _enrich_company_data(
+                company,
+                latest_runs_map.get(company.company_key),
+                preloaded=preloaded,
+            )
+            companies_data.append(company_data)
 
     if filter_status != "all":
         companies_data = [c for c in companies_data if c["status"]["level"] == filter_status]
@@ -1634,10 +1806,24 @@ def companies_list(request):
 def company_detail(request, company_key):
     """Detail view for a single company."""
     company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
-    recent_runs = list(_company_runs_queryset(company_key).order_by("-started_at", "-created_at")[:30])
+    recent_runs = list(_company_runs_queryset_ordered_by_latest(company_key)[:30])
     latest_run = recent_runs[0] if recent_runs else None
     company_data = _enrich_company_data(company, latest_run)
-    company_data.update(compute_sales_trend(company_key, now=timezone.now()))
+    # Sales from last successful run (not 7D aggregate)
+    latest_successful_artifact = (
+        RunArtifact.objects.filter(company_key=company_key)
+        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .select_related("run_job")
+        .order_by("-processed_at", "-imported_at", "-id")
+        .first()
+    )
+    if latest_successful_artifact:
+        amount = extract_amount_hybrid(latest_successful_artifact, prefer_reconcile=True)
+        company_data["sales_last_run_display"] = _metrics_format_currency(amount)
+        company_data["sales_last_run_target_date"] = latest_successful_artifact.target_date
+    else:
+        company_data["sales_last_run_display"] = "—"
+        company_data["sales_last_run_target_date"] = None
     company_data["config_json_pretty"] = json.dumps(company.config_json or {}, indent=2)
     recent_artifacts = RunArtifact.objects.filter(company_key=company_key).order_by("-processed_at")[:30]
 

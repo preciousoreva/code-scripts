@@ -66,7 +66,7 @@ class AuthAndPermissionsTests(TestCase):
         self.user.user_permissions.add(perm)
         self.client.login(username="operator", password="pw12345")
 
-        with mock.patch("apps.epos_qbo.views.start_run_job") as mocked_start:
+        with mock.patch("apps.epos_qbo.services.job_runner.start_run_job") as mocked_start:
             mocked_start.return_value = mock.Mock()
             response = self.client.post(
                 reverse("epos_qbo:run-trigger"),

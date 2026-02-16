@@ -42,13 +42,13 @@
     </div>
 
     {% if company_data.issues %}
-    <div class="bg-{{ company_data.status.color }}-50 dark:bg-{{ company_data.status.color }}-900/20 border border-{{ company_data.status.color }}-200 dark:border-{{ company_data.status.color }}-800 rounded-xl p-4">
+    <div class="rounded-xl p-4 {% if company_data.issues_highest_severity == 'critical' %}bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800{% elif company_data.issues_highest_severity == 'warning' %}bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800{% else %}bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800{% endif %}">
         <div class="flex items-start gap-3">
-            <iconify-icon icon="solar:danger-triangle-linear" width="24" class="text-{{ company_data.status.color }}-600 dark:text-{{ company_data.status.color }}-400 flex-shrink-0 mt-0.5"></iconify-icon>
+            <iconify-icon icon="solar:danger-triangle-linear" width="24" class="flex-shrink-0 mt-0.5 {% if company_data.issues_highest_severity == 'critical' %}text-red-600 dark:text-red-400{% else %}text-amber-600 dark:text-amber-400{% endif %}"></iconify-icon>
             <div class="flex-1">
-                <h3 class="font-semibold text-{{ company_data.status.color }}-900 dark:text-{{ company_data.status.color }}-300 mb-2">{{ company_data.issues|length }} Active Issue{{ company_data.issues|length|pluralize }}</h3>
-                <ul class="space-y-1.5">
-                    {% for issue in company_data.issues %}<li class="text-sm text-{{ company_data.status.color }}-800 dark:text-{{ company_data.status.color }}-300">• {{ issue.message }}</li>{% endfor %}
+                <h3 class="font-semibold mb-2 {% if company_data.issues_highest_severity == 'critical' %}text-red-900 dark:text-red-300{% else %}text-amber-900 dark:text-amber-300{% endif %}">{{ company_data.issues|length }} Active Issue{{ company_data.issues|length|pluralize }}</h3>
+                <ul class="space-y-1.5 {% if company_data.issues_highest_severity == 'critical' %}text-red-800 dark:text-red-300{% else %}text-amber-800 dark:text-amber-300{% endif %} text-sm">
+                    {% for issue in company_data.issues %}<li>• {{ issue.message }}</li>{% endfor %}
                 </ul>
             </div>
         </div>
@@ -66,13 +66,15 @@
         </div>
         <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
-                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">SALES SYNCED (7D)</p>
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Sales Synced (last run)</p>
                 <iconify-icon icon="solar:wallet-money-linear" width="20" class="text-slate-400 dark:text-slate-500"></iconify-icon>
             </div>
-            <p class="text-xl font-bold text-slate-900 dark:text-slate-100">{{ company_data.sales_7d_total_display }}</p>
-            <p class="text-xs mt-1 {% if company_data.sales_7d_trend_color == 'emerald' %}text-emerald-600 dark:text-emerald-400{% elif company_data.sales_7d_trend_color == 'red' %}text-red-600 dark:text-red-400{% else %}text-slate-500 dark:text-slate-400{% endif %}">
-                {{ company_data.sales_7d_trend_text }}
-            </p>
+            <p class="text-xl font-bold text-slate-900 dark:text-slate-100">{{ company_data.sales_last_run_display }}</p>
+            {% if company_data.sales_last_run_target_date %}
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Target: {{ company_data.sales_last_run_target_date|date:"M j, Y" }}</p>
+            {% else %}
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">No successful run yet</p>
+            {% endif %}
         </div>
         <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <div class="flex items-center justify-between mb-2">
