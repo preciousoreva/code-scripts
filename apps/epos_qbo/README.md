@@ -111,6 +111,28 @@ All routes require authentication.
 
 - Sidebar entries `Tools`, `Settings`, and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
 - Static JS (overview, companies, toasts) uses paths under `/epos-qbo/`. If the app is mounted at a different URL prefix, update `OVERVIEW_PANELS_URL` in `overview.js`, `currentCompaniesUrl()` in `companies.js`, and `ACTIVE_RUNS_URL` / `RUN_STATUS_URL_BASE` / toast links in `toasts.js`.
+- Tailwind is now served as compiled static CSS (`apps/epos_qbo/static/css/tailwind.css`) instead of runtime CDN injection.
+
+## Frontend CSS build
+
+- Tailwind config: `tailwind.config.cjs`
+- Source input: `apps/epos_qbo/static_src/css/tailwind.input.css`
+- Generated output: `apps/epos_qbo/static/css/tailwind.css`
+- Build command: `npm run build:css`
+- Watch mode: `npm run watch:css`
+- Content scanning includes `apps/**/*.html`, `apps/**/*.js`, and `templates/**/*.html` so utility classes in Django templates and JS are retained.
+- The built file `static/css/tailwind.css` is committed so the app works after clone without running Node. Run `npm run build:css` after changing Tailwind source or adding new templates/classes; run `npm run watch:css` during development.
+- Core app templates (login, home, coming_soon) use `{% static 'css/tailwind.css' %}`; Django serves it from `epos_qbo/static/`.
+
+## Remote SSH to Windows dev PC
+
+When you work on the repo via remote SSH (e.g. Cursor Remote-SSH) to your Windows machine:
+
+- **Python / Django:** Use the Windows venv. In **PowerShell/cmd** (Windows): `.venv\Scripts\python.exe`. In **WSL/bash** (Linux): use forward slashes — `.venv/Scripts/python.exe` — because backslashes are escape characters in bash and break the path.
+- **Tailwind (optional):** The compiled `static/css/tailwind.css` is committed, so the dashboard works without running Node. To rebuild CSS after changing templates or Tailwind source:
+  - From the repo root run `npm install` (once), then `npm run build:css`. The scripts use `npx tailwindcss` so the local CLI is used and paths with spaces (e.g. `Developer Projects`) work on Windows.
+  - If you use WSL for the repo, run `npm run build:css` from the repo root in WSL; Node/npm should be installed in WSL.
+- **Quick sanity check:** From repo root, `python manage.py check` (using your venv Python) and a quick click-through of the dashboard in the browser.
 
 ## Dashboard tuning (settings/env)
 

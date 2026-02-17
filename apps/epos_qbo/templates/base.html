@@ -72,11 +72,9 @@
             document.addEventListener('touchstart', maybePrefetch, { passive: true });
         })();
     </script>
-    <!-- Tailwind (CDN) -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = { darkMode: 'class' };
-    </script>
+    <!-- Tailwind (compiled static CSS) -->
+    <link rel="preload" href="{% static 'css/tailwind.css' %}" as="style">
+    <link rel="stylesheet" href="{% static 'css/tailwind.css' %}">
 
     <!-- Iconify Icons -->
     <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
@@ -95,7 +93,7 @@
         }
 
         /* Critical first-paint fallback so full-page navigation does not flash white
-           before Tailwind CDN utilities are available. */
+           before the compiled stylesheet has finished loading. */
         html,
         body {
             min-height: 100%;
