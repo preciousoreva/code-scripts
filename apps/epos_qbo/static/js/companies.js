@@ -1,41 +1,45 @@
-// Companies page auto-refresh on run completion
+// Companies page refreshes summary/list on run lifecycle events.
 (function () {
     'use strict';
 
-    const COMPANIES_REFRESH_DEBOUNCE_MS = 2000; // 2 seconds debounce
-    const COMPANIES_REFRESH_AFTER_COMPLETION_MS = 3000; // 3 seconds after completion
+    const COMPANIES_REFRESH_DEBOUNCE_MS = 2000;
+    const COMPANIES_COMPLETION_RETRY_DELAYS_MS = [3000, 9000, 18000];
 
-    let refreshTimerId = null;
-    let completionListenerBound = false;
+    let listenersBound = false;
+    let refreshInFlight = false;
+    let refreshQueued = false;
 
-    function refreshCompaniesList() {
-        const companyList = document.getElementById('company-list');
-        if (!companyList) return;
-
-        // Get current filter/search/sort state
+    function currentCompaniesUrl() {
         const searchInput = document.querySelector('input[name="search"]');
         const filterSelect = document.querySelector('select[name="filter"]');
         const sortSelect = document.querySelector('select[name="sort"]');
-        
+
         const search = searchInput ? searchInput.value : '';
         const filter = filterSelect ? filterSelect.value : 'all';
         const sort = sortSelect ? sortSelect.value : 'name';
 
-        // Build URL with current state
         const params = new URLSearchParams();
         if (search) params.set('search', search);
         if (filter !== 'all') params.set('filter', filter);
         if (sort !== 'name') params.set('sort', sort);
-        params.set('view', 'cards'); // Ensure cards view
-        
-        const url = `/epos-qbo/companies/?${params.toString()}`;
+        params.set('view', 'cards');
+        return `/epos-qbo/companies/?${params.toString()}`;
+    }
 
-        // Fetch full page HTML (not HTMX partial) to get both summary and list
-        fetch(url, {
+    function refreshCompaniesList() {
+        const companyList = document.getElementById('company-list');
+        if (!companyList) return Promise.resolve();
+
+        if (refreshInFlight) {
+            refreshQueued = true;
+            return Promise.resolve();
+        }
+        refreshInFlight = true;
+
+        const url = currentCompaniesUrl();
+        return fetch(url, {
             credentials: 'same-origin',
-            headers: {
-                Accept: 'text/html',
-            },
+            headers: { Accept: 'text/html' },
         })
             .then((response) => {
                 if (!response.ok) {
@@ -44,62 +48,72 @@
                 return response.text();
             })
             .then((html) => {
-                // Parse HTML to extract summary cards and company list
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
-                const summaryCards = doc.querySelector('.grid.grid-cols-2.md\\:grid-cols-4');
-                const newCompanyList = doc.querySelector('#company-list');
-                
-                // Update summary cards if found
-                if (summaryCards) {
-                    const currentSummary = document.querySelector('.grid.grid-cols-2.md\\:grid-cols-4');
-                    if (currentSummary && currentSummary.parentNode) {
-                        currentSummary.parentNode.replaceChild(
-                            document.importNode(summaryCards, true),
-                            currentSummary
-                        );
-                    }
+
+                const refreshedSummary = doc.querySelector('#companies-summary-cards');
+                const currentSummary = document.querySelector('#companies-summary-cards');
+                if (refreshedSummary && currentSummary && currentSummary.parentNode) {
+                    currentSummary.parentNode.replaceChild(
+                        document.importNode(refreshedSummary, true),
+                        currentSummary
+                    );
                 }
-                
-                // Update company list
-                if (newCompanyList) {
-                    companyList.innerHTML = newCompanyList.innerHTML;
+
+                const refreshedList = doc.querySelector('#company-list');
+                if (refreshedList) {
+                    companyList.innerHTML = refreshedList.innerHTML;
+                }
+
+                const refreshedEmpty = doc.querySelector('#companies-empty-state');
+                const currentEmpty = document.querySelector('#companies-empty-state');
+                if (refreshedEmpty) {
+                    const importedEmpty = document.importNode(refreshedEmpty, true);
+                    if (currentEmpty && currentEmpty.parentNode) {
+                        currentEmpty.parentNode.replaceChild(importedEmpty, currentEmpty);
+                    } else if (companyList.parentNode) {
+                        companyList.parentNode.insertBefore(importedEmpty, companyList.nextSibling);
+                    }
+                } else if (currentEmpty && currentEmpty.parentNode) {
+                    currentEmpty.remove();
                 }
             })
-            .catch((err) => {
-                console.error('Error refreshing companies page:', err);
+            .catch(() => {
+                // Keep current content on transient refresh failures.
+            })
+            .finally(() => {
+                refreshInFlight = false;
+                if (refreshQueued) {
+                    refreshQueued = false;
+                    refreshCompaniesList();
+                }
             });
     }
 
-    function scheduleCompaniesRefresh(delayMs) {
-        const delay = delayMs !== undefined ? delayMs : COMPANIES_REFRESH_DEBOUNCE_MS;
-        if (refreshTimerId) {
-            clearTimeout(refreshTimerId);
+    function bindCompaniesRefresh() {
+        if (listenersBound) return;
+
+        const runReactivity = window.OiatRunReactivity;
+        if (runReactivity && typeof runReactivity.bindRunLifecycleRefresh === 'function') {
+            runReactivity.bindRunLifecycleRefresh({
+                onRefresh: refreshCompaniesList,
+                startedDelayMs: COMPANIES_REFRESH_DEBOUNCE_MS,
+                completionDelaysMs: COMPANIES_COMPLETION_RETRY_DELAYS_MS,
+            });
+            listenersBound = true;
+            return;
         }
-        refreshTimerId = window.setTimeout(() => {
-            refreshCompaniesList();
-            refreshTimerId = null;
-        }, delay);
-    }
 
-    function bindCompletionRefresh() {
-        if (completionListenerBound) return;
-        
-        window.addEventListener('oiat:run-completed', () => {
-            scheduleCompaniesRefresh(COMPANIES_REFRESH_AFTER_COMPLETION_MS);
-        });
-        
+        window.addEventListener('oiat:run-completed', refreshCompaniesList);
         window.addEventListener('oiat:run-started', () => {
-            scheduleCompaniesRefresh(COMPANIES_REFRESH_DEBOUNCE_MS);
+            window.setTimeout(refreshCompaniesList, COMPANIES_REFRESH_DEBOUNCE_MS);
         });
-        
-        completionListenerBound = true;
+        listenersBound = true;
     }
 
-    // Initialize on DOM ready
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', bindCompletionRefresh);
+        document.addEventListener('DOMContentLoaded', bindCompaniesRefresh);
     } else {
-        bindCompletionRefresh();
+        bindCompaniesRefresh();
     }
 })();

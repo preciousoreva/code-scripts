@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from shlex import join as shlex_join
 
@@ -16,6 +18,8 @@ from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 from ..models import RunJob, RunLock
 from .artifact_ingestion import attach_recent_artifacts_to_job
 from .locking import release_run_lock
+
+logger = logging.getLogger(__name__)
 
 
 def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
@@ -108,17 +112,29 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
 
     if job is not None:
         try:
+            attached_artifacts = 0
+            attach_started = time.monotonic()
+            # Link artifacts before flipping the run out of RUNNING so dashboard completion
+            # events observe status only after overview data is ready to refresh.
+            attached_artifacts = attach_recent_artifacts_to_job(job)
+            attach_elapsed_ms = int((time.monotonic() - attach_started) * 1000)
+
             job.exit_code = exit_code
             job.finished_at = timezone.now()
             job.status = RunJob.STATUS_SUCCEEDED if exit_code == 0 else RunJob.STATUS_FAILED
             if exit_code != 0 and not job.failure_reason:
                 job.failure_reason = f"Subprocess exited with code {exit_code}"
             job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
-            attach_recent_artifacts_to_job(job)
+            logger.info(
+                "RunJob %s finalized: status=%s exit_code=%s attached_artifacts=%s attach_elapsed_ms=%s",
+                job_id,
+                job.status,
+                exit_code,
+                attached_artifacts,
+                attach_elapsed_ms,
+            )
         except Exception as exc:
             # Log error but don't crash - try to mark job as failed if status update failed
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Failed to update RunJob {job_id} status after process exit: {exc}", exc_info=True)
             try:
                 # Attempt to mark as failed if we couldn't update status normally
@@ -136,8 +152,6 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
         release_run_lock(run_job=job, force=True)
         dispatch_next_queued_job()
     except Exception as exc:
-        import logging
-        logger = logging.getLogger(__name__)
         logger.error(f"Error in post-completion cleanup for RunJob {job_id}: {exc}", exc_info=True)
 
 

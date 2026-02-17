@@ -7,7 +7,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="space-y-6" data-run-id="{{ job.id }}">
+<div class="space-y-6" data-run-id="{{ job.id }}" data-run-status="{{ job.status }}">
     <div>
         <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Run {{ job.display_label }}</h1>
         <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">ID:{{ job.id }}</p>
@@ -75,10 +75,10 @@
                         <th class="text-left px-3 py-2">Target Date</th>
                         <th class="text-left px-3 py-2">Processed</th>
                         <th class="text-left px-3 py-2">Rows Kept</th>
-                        <th class="text-left px-3 py-2" title="Receipts considered for upload">QBO Attempted</th>
-                        <th class="text-left px-3 py-2" title="New receipts created in QuickBooks">QBO Uploaded</th>
-                        <th class="text-left px-3 py-2" title="Receipts skipped (already existed in QuickBooks)">QBO Skipped</th>
-                        <th class="text-left px-3 py-2" title="Receipts that failed to upload">QBO Failed</th>
+                        <th class="text-left px-3 py-2" title="Sales Receipts considered for upload">QBO Attempted</th>
+                        <th class="text-left px-3 py-2" title="New Sales Receipts created in QuickBooks">QBO Uploaded</th>
+                        <th class="text-left px-3 py-2" title="Sales Receipts skipped (already existed in QuickBooks)">QBO Skipped</th>
+                        <th class="text-left px-3 py-2" title="Sales Receipts that failed to upload">QBO Failed</th>
                         <th class="text-left px-3 py-2">Metadata Source</th>
                     </tr>
                 </thead>
@@ -114,6 +114,8 @@
 {% endblock %}
 
 {% block body_extra %}
+{% load static %}
+<script src="{% static 'js/run_detail.js' %}"></script>
 <script>
     (function () {
         const logEl = document.getElementById("run-log");

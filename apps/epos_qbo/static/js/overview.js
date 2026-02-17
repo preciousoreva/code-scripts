@@ -1,11 +1,15 @@
 (function () {
     'use strict';
+
     const OVERVIEW_PANELS_URL = '/epos-qbo/dashboard/panels/';
     const OVERVIEW_REFRESH_DEBOUNCE_MS = 800;
-    const OVERVIEW_REFRESH_AFTER_COMPLETION_MS = 2000;
+    const OVERVIEW_COMPLETION_REFRESH_RETRY_DELAYS_MS = [2000, 6000, 12000, 20000];
+
     let revenueChart = null;
-    let refreshTimerId = null;
-    let completionListenerBound = false;
+    let refreshInFlight = false;
+    let refreshQueued = false;
+    let runRefreshBound = false;
+    let themeListenerBound = false;
 
     function initCompanyFilter(initialQuery) {
         const input = document.getElementById('overview-company-filter');
@@ -70,7 +74,7 @@
         }
     }
 
-    function updateRevenueSummary(totalAmount, matchedDays) {
+    function updateRevenueSummary(matchedDays) {
         const matchedDaysEl = document.getElementById('overview-revenue-matched-days');
         if (matchedDaysEl) {
             matchedDaysEl.textContent = `Matched days in period: ${matchedDays || 0}`;
@@ -115,7 +119,7 @@
         const labels = Array.isArray(payload.labels) ? payload.labels : [];
         const series = Array.isArray(payload.series) ? payload.series : [];
         if (!labels.length || !series.length) {
-            updateRevenueSummary(0, 0);
+            updateRevenueSummary(0);
             return;
         }
 
@@ -123,7 +127,7 @@
             ? series
             : series.filter((item) => item.company_key === companyKey);
         if (!filteredSeries.length) {
-            updateRevenueSummary(0, 0);
+            updateRevenueSummary(0);
             return;
         }
 
@@ -142,24 +146,24 @@
             };
         });
 
-        let totalAmount = 0;
         const dayTotals = Array(labels.length).fill(0);
         filteredSeries.forEach((item) => {
             const data = Array.isArray(item.data) ? item.data : [];
             data.forEach((value, idx) => {
                 const amount = Number(value || 0);
-                totalAmount += amount;
                 if (idx < dayTotals.length) {
                     dayTotals[idx] += amount;
                 }
             });
         });
         const matchedDays = dayTotals.reduce((count, amount) => (amount > 0 ? count + 1 : count), 0);
-        updateRevenueSummary(totalAmount, matchedDays);
+        updateRevenueSummary(matchedDays);
 
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        const colors = typeof window.getChartColors === 'function' ? window.getChartColors() : { textColor: '#64748b', gridColor: 'rgba(226, 232, 240, 0.5)' };
+        const colors = typeof window.getChartColors === 'function'
+            ? window.getChartColors()
+            : { textColor: '#64748b', gridColor: 'rgba(226, 232, 240, 0.5)' };
         revenueChart = new Chart(ctx, {
             type: 'line',
             data: { labels, datasets },
@@ -182,7 +186,9 @@
                         callbacks: {
                             label(context) {
                                 const label = context.dataset.label || 'Company';
-                                const value = context.parsed && typeof context.parsed.y === 'number' ? context.parsed.y : 0;
+                                const value = context.parsed && typeof context.parsed.y === 'number'
+                                    ? context.parsed.y
+                                    : 0;
                                 return `${label}: ${formatCurrency(value)}`;
                             },
                         },
@@ -220,22 +226,23 @@
 
     function refreshOverviewPanels() {
         const root = document.getElementById('overview-panels-root');
-        if (!root) return;
+        if (!root) return Promise.resolve();
+        if (refreshInFlight) {
+            refreshQueued = true;
+            return Promise.resolve();
+        }
+        refreshInFlight = true;
+
         const existingFilter = document.getElementById('overview-company-filter');
         const filterQuery = existingFilter ? existingFilter.value : '';
         const existingCompany = document.getElementById('overview-revenue-company');
         const revenueCompany = existingCompany ? existingCompany.value : 'all';
         const period = currentRevenuePeriod();
         const requestUrl = `${OVERVIEW_PANELS_URL}?revenue_period=${encodeURIComponent(period)}`;
-        // #region agent log
-        fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:221',message:'refreshOverviewPanels called',data:{url:requestUrl},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
-        // #endregion
 
-        fetch(requestUrl, {
+        return fetch(requestUrl, {
             credentials: 'same-origin',
-            headers: {
-                Accept: 'text/html',
-            },
+            headers: { Accept: 'text/html' },
         })
             .then((response) => {
                 if (!response.ok) {
@@ -244,69 +251,59 @@
                 return response.text();
             })
             .then((html) => {
-                // #region agent log
-                fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:243',message:'refreshOverviewPanels HTML received',data:{html_length:html.length},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
-                // #endregion
-                // Parse HTML to extract metric_basis_line from the response
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
                 const metricBasisData = doc.querySelector('#metric-basis-line-data');
-                
-                // Update the metric_basis_line in the header if found in response
                 if (metricBasisData) {
                     const headerMetricLine = document.getElementById('metric-basis-line');
                     if (headerMetricLine) {
                         headerMetricLine.textContent = metricBasisData.textContent.trim();
                     }
                 }
-                
-                // Update panels content (remove the hidden metric_basis_line-data div)
+
                 const tempDiv = document.createElement('div');
                 tempDiv.innerHTML = html;
                 const metricDataDiv = tempDiv.querySelector('#metric-basis-line-data');
                 if (metricDataDiv) {
                     metricDataDiv.remove();
                 }
+
                 root.innerHTML = tempDiv.innerHTML;
                 initOverview({ filterQuery, revenueCompany });
             })
-            .catch((err) => {
-                // #region agent log
-                fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:247',message:'refreshOverviewPanels failed',data:{error:String(err)},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
-                // #endregion
-                // Best-effort refresh: keep current panel content when request fails.
+            .catch(() => {
+                // Keep current panel content on transient fetch failure.
+            })
+            .finally(() => {
+                refreshInFlight = false;
+                if (refreshQueued) {
+                    refreshQueued = false;
+                    refreshOverviewPanels();
+                }
             });
     }
 
-    function scheduleOverviewRefresh(delayMs) {
-        const delay = delayMs !== undefined ? delayMs : OVERVIEW_REFRESH_DEBOUNCE_MS;
-        if (refreshTimerId) {
-            clearTimeout(refreshTimerId);
-        }
-        refreshTimerId = window.setTimeout(() => {
-            refreshOverviewPanels();
-            refreshTimerId = null;
-        }, delay);
-    }
+    function bindRunRefresh() {
+        if (runRefreshBound) return;
 
-    function bindCompletionRefresh() {
-        if (completionListenerBound) return;
-        window.addEventListener('oiat:run-completed', (event) => {
-            // #region agent log
-            fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:265',message:'oiat:run-completed event received',data:{detail:event.detail},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
-            // #endregion
-            scheduleOverviewRefresh(OVERVIEW_REFRESH_AFTER_COMPLETION_MS);
+        const runReactivity = window.OiatRunReactivity;
+        if (runReactivity && typeof runReactivity.bindRunLifecycleRefresh === 'function') {
+            runReactivity.bindRunLifecycleRefresh({
+                onRefresh: refreshOverviewPanels,
+                startedDelayMs: OVERVIEW_REFRESH_DEBOUNCE_MS,
+                completionDelaysMs: OVERVIEW_COMPLETION_REFRESH_RETRY_DELAYS_MS,
+            });
+            runRefreshBound = true;
+            return;
+        }
+
+        window.addEventListener('oiat:run-completed', () => {
+            refreshOverviewPanels();
         });
-        window.addEventListener('oiat:run-started', (event) => {
-            // #region agent log
-            fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:269',message:'oiat:run-started event received',data:{detail:event.detail},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
-            // #endregion
-            scheduleOverviewRefresh(OVERVIEW_REFRESH_DEBOUNCE_MS);
+        window.addEventListener('oiat:run-started', () => {
+            window.setTimeout(refreshOverviewPanels, OVERVIEW_REFRESH_DEBOUNCE_MS);
         });
-        completionListenerBound = true;
-        // #region agent log
-        fetch('http://localhost:7245/ingest/d47de936-96f2-4401-b426-fc69dd32d832',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'overview.js:272',message:'bindCompletionRefresh completed',data:{},timestamp:Date.now(),runId:'debug',hypothesisId:'H2'})}).catch(()=>{});
-        // #endregion
+        runRefreshBound = true;
     }
 
     function bindRevenuePeriodChange() {
@@ -322,18 +319,20 @@
     }
 
     function bindThemeChange() {
+        if (themeListenerBound) return;
         window.addEventListener('themeChange', () => {
             const companySelect = document.getElementById('overview-revenue-company');
             const company = companySelect ? companySelect.value : 'all';
             initRevenueChart(company);
         });
+        themeListenerBound = true;
     }
 
     function initOverview(options = {}) {
         initCompanyFilter(options.filterQuery || '');
         initRevenueChart(options.revenueCompany || 'all');
         bindRevenuePeriodChange();
-        bindCompletionRefresh();
+        bindRunRefresh();
         bindThemeChange();
     }
 

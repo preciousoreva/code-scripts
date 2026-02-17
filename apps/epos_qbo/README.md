@@ -59,6 +59,24 @@ All routes require authentication.
   - Access token state is informational; critical auth state is driven by refresh-token availability/expiry.
   - Re-auth guidance points operators to `code_scripts/store_tokens.py`.
 
+## Run lifecycle UI refresh system
+
+- Shared run-event orchestration is centralized in `static/js/run_reactivity.js` via `window.OiatRunReactivity.bindRunLifecycleRefresh(...)`.
+- Run events are emitted from `static/js/toasts.js`:
+  - `oiat:run-started` when newly active runs are discovered.
+  - `oiat:run-completed` on terminal statuses (`succeeded`, `failed`, `cancelled`), including first-observation terminal races.
+- Base template loads scripts in this order:
+  1. `static/js/charts.js`
+  2. `static/js/run_reactivity.js`
+  3. `static/js/toasts.js`
+- Page usage:
+  - `overview.js`: panel partial refresh with completion retries, preserving revenue/company filters.
+  - `runs.js`, `logs.js`, `company_detail.js`: full-page reload strategy.
+  - `companies.js`: targeted refresh of summary cards + company list using current filter/search/sort state.
+  - `run_detail.js`: refreshes only for the currently viewed active run ID.
+- Run detail polling guard:
+  - `toasts.js` only auto-tracks `[data-run-id]` when `data-run-status` is `queued|running` to avoid terminal run reload loops.
+
 ## Run execution and locking
 
 - `services/job_runner.py` builds subprocess commands for:
@@ -92,6 +110,7 @@ All routes require authentication.
 ## UI notes
 
 - Sidebar entries `Tools`, `Settings`, and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
+- Static JS (overview, companies, toasts) uses paths under `/epos-qbo/`. If the app is mounted at a different URL prefix, update `OVERVIEW_PANELS_URL` in `overview.js`, `currentCompaniesUrl()` in `companies.js`, and `ACTIVE_RUNS_URL` / `RUN_STATUS_URL_BASE` / toast links in `toasts.js`.
 
 ## Dashboard tuning (settings/env)
 

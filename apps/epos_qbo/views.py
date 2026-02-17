@@ -70,9 +70,9 @@ HEALTH_REASON_LABELS = {
     "RECON_MISMATCH": "Reconciliation mismatch above threshold",
     "NO_ARTIFACT_METADATA": "No successful sync yet",
 }
-# Run detail: message when run succeeded but 0 receipts uploaded (all skipped). {skipped} placeholder.
+# Run detail: message when run succeeded but 0 Sales Receipts uploaded (all skipped). {skipped} placeholder.
 RUN_DETAIL_ALL_SKIPPED_MESSAGE = (
-    "QuickBooks: 0 new receipts uploaded; {skipped} receipt(s) skipped (already in QuickBooks)."
+    "QuickBooks: 0 new Sales Receipts uploaded; {skipped} Sales Receipt(s) skipped (already in QuickBooks)."
 )
 EXIT_CODE_REFERENCE = [
     {"code": "0", "message": "Success."},
@@ -723,32 +723,11 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         if run_job_id and ck:
             job_id_to_company_keys[run_job_id].add(ck)
     job_ids_with_artifacts = list(job_id_to_company_keys.keys())
-    # #region agent log
-    import json as json_lib
-    from pathlib import Path
-    log_path = None
-    try:
-        log_path = Path(__file__).resolve().parents[2] / '.cursor' / 'debug.log'
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, 'a', encoding='utf-8') as log_file:
-            log_file.write(json_lib.dumps({"id":"log_overview_latest_jobs_start","timestamp":timezone.now().timestamp()*1000,"location":"views.py:722","message":"Building latest_jobs","data":{"company_keys":company_keys,"job_ids_with_artifacts_count":len(job_ids_with_artifacts)},"runId":"debug","hypothesisId":"H1"})+'\n')
-    except Exception:
-        pass
-    # #endregion
     # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
     # PRIORITIZE RUNNING/QUEUED JOBS: Query all relevant jobs, then process running/queued first
     all_relevant_jobs = list(RunJob.objects.filter(
         Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
     ).order_by("-finished_at", "-started_at", "-created_at"))
-    # #region agent log
-    active_jobs = [j for j in all_relevant_jobs if j.status in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED)]
-    try:
-        if log_path:
-            with open(log_path, 'a', encoding='utf-8') as log_file:
-                log_file.write(json_lib.dumps({"id":"log_overview_jobs_query","timestamp":timezone.now().timestamp()*1000,"location":"views.py:738","message":"Queried all_relevant_jobs","data":{"total_jobs":len(all_relevant_jobs),"active_jobs_count":len(active_jobs),"active_job_ids":[str(j.id) for j in active_jobs],"active_statuses":[j.status for j in active_jobs]},"runId":"debug","hypothesisId":"H1"})+'\n')
-    except Exception:
-        pass
-    # #endregion
     # First pass: prioritize running/queued jobs
     for job in all_relevant_jobs:
         if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
@@ -763,14 +742,6 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         for ck in candidates:
             if ck not in latest_jobs:
                 latest_jobs[ck] = job
-                # #region agent log
-                try:
-                    if log_path:
-                        with open(log_path, 'a', encoding='utf-8') as log_file:
-                            log_file.write(json_lib.dumps({"id":"log_overview_set_active_latest","timestamp":timezone.now().timestamp()*1000,"location":"views.py:763","message":"Set active job as latest","data":{"company_key":ck,"job_id":str(job.id),"job_status":job.status},"runId":"debug","hypothesisId":"H1"})+'\n')
-                except Exception:
-                    pass
-                # #endregion
     # Second pass: fill in completed jobs for companies without active runs
     for job in all_relevant_jobs:
         candidates = []
@@ -871,14 +842,6 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         status__in=[RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED]
     ).order_by("-created_at")
     active_run_count = active_runs.count()
-    # #region agent log
-    try:
-        if log_path:
-            with open(log_path, 'a', encoding='utf-8') as log_file:
-                log_file.write(json_lib.dumps({"id":"log_overview_active_runs","timestamp":timezone.now().timestamp()*1000,"location":"views.py:870","message":"Checked active runs","data":{"active_run_count":active_run_count,"active_run_ids":[str(j.id) for j in active_runs[:5]]},"runId":"debug","hypothesisId":"H4"})+'\n')
-    except Exception:
-        pass
-    # #endregion
 
     system_health = _classify_system_health(healthy_count, warning_count, critical_count)
     system_health_breakdown = _format_system_health_breakdown(
@@ -1990,28 +1953,10 @@ def _enrich_company_data(
         upload_skipped_latest_sync = _artifact_upload_stat(latest_successful_artifact, "skipped")
         if upload_skipped_latest_sync is None:
             upload_skipped_latest_sync = 0
-        # #region agent log
-        try:
-            _lp = "/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log"
-            _payload = {"hypothesisId": "H1", "location": "views.py:_enrich_company_data", "message": "latest_successful_artifact stats", "data": {"company_key": company.company_key, "records_latest_sync": records_latest_sync, "upload_skipped_latest_sync": upload_skipped_latest_sync, "upload_stats_keys": list((latest_successful_artifact.upload_stats_json or {}).keys())}, "timestamp": __import__("time").time() * 1000}
-            with open(_lp, "a", encoding="utf-8") as _f:
-                _f.write(__import__("json").dumps(_payload) + "\n")
-        except Exception:
-            pass
-        # #endregion
     else:
         records_latest_sync = 0
         latest_sync_target_date = None
         upload_skipped_latest_sync = 0
-        # #region agent log
-        try:
-            _lp = "/mnt/c/Users/MARVIN-DEV/Documents/Developer Projects/Oreva Innovations & Tech/epos_to_qbo_automation/code-scripts/.cursor/debug.log"
-            _payload = {"hypothesisId": "H2", "location": "views.py:_enrich_company_data", "message": "no latest_successful_artifact", "data": {"company_key": company.company_key}, "timestamp": __import__("time").time() * 1000}
-            with open(_lp, "a", encoding="utf-8") as _f:
-                _f.write(__import__("json").dumps(_payload) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
     # So templates can style the issue block by severity (amber/red), not overall status (which can be healthy)
     issues_highest_severity = None

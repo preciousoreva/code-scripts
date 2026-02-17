@@ -131,6 +131,46 @@ class MonitorProcessTests(TestCase):
     @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
     @patch("apps.epos_qbo.services.job_runner.release_run_lock")
     @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
+    def test_monitor_links_artifacts_before_marking_succeeded(
+        self,
+        attach_recent_artifacts_to_job_mock,
+        release_run_lock_mock,
+        dispatch_next_queued_job_mock,
+    ):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_RUNNING,
+        )
+        observed_status = {}
+
+        def _attach_side_effect(run_job):
+            latest = RunJob.objects.get(id=run_job.id)
+            observed_status["during_attach"] = latest.status
+            return 2
+
+        attach_recent_artifacts_to_job_mock.side_effect = _attach_side_effect
+
+        popen = Mock()
+        popen.wait.return_value = 0
+        log_handle = Mock()
+
+        _monitor_process(job.id, popen, log_handle)
+
+        job.refresh_from_db()
+        self.assertEqual(observed_status.get("during_attach"), RunJob.STATUS_RUNNING)
+        self.assertEqual(job.status, RunJob.STATUS_SUCCEEDED)
+        self.assertEqual(job.exit_code, 0)
+        attach_recent_artifacts_to_job_mock.assert_called_once()
+        release_run_lock_mock.assert_called_once()
+        release_kwargs = release_run_lock_mock.call_args.kwargs
+        self.assertTrue(release_kwargs["force"])
+        self.assertEqual(release_kwargs["run_job"].id, job.id)
+        dispatch_next_queued_job_mock.assert_called_once_with()
+
+    @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
+    @patch("apps.epos_qbo.services.job_runner.release_run_lock")
+    @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
     def test_monitor_releases_lock_and_dispatches_when_job_missing(
         self,
         attach_recent_artifacts_to_job_mock,

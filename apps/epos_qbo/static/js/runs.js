@@ -1,50 +1,40 @@
-// Runs page auto-refresh on run completion
+// Runs page auto-refresh on run lifecycle events.
 (function () {
     'use strict';
 
-    const RUNS_REFRESH_DEBOUNCE_MS = 2000; // 2 seconds debounce
-    const RUNS_REFRESH_AFTER_COMPLETION_MS = 3000; // 3 seconds after completion
+    const RUNS_REFRESH_DEBOUNCE_MS = 2000;
+    const RUNS_COMPLETION_RETRY_DELAYS_MS = [3000, 9000, 18000];
 
-    let refreshTimerId = null;
-    let completionListenerBound = false;
+    let listenersBound = false;
 
-    function refreshRunsTable() {
-        // Reload the page to get fresh run data
-        // This is simpler than trying to update the table rows individually
+    function refreshRunsPage() {
         window.location.reload();
     }
 
-    function scheduleRunsRefresh(delayMs) {
-        const delay = delayMs !== undefined ? delayMs : RUNS_REFRESH_DEBOUNCE_MS;
-        if (refreshTimerId) {
-            clearTimeout(refreshTimerId);
+    function bindRunsRefresh() {
+        if (listenersBound) return;
+
+        const runReactivity = window.OiatRunReactivity;
+        if (runReactivity && typeof runReactivity.bindRunLifecycleRefresh === 'function') {
+            runReactivity.bindRunLifecycleRefresh({
+                onRefresh: refreshRunsPage,
+                startedDelayMs: RUNS_REFRESH_DEBOUNCE_MS,
+                completionDelaysMs: RUNS_COMPLETION_RETRY_DELAYS_MS,
+            });
+            listenersBound = true;
+            return;
         }
-        refreshTimerId = window.setTimeout(() => {
-            refreshRunsTable();
-            refreshTimerId = null;
-        }, delay);
+
+        window.addEventListener('oiat:run-completed', refreshRunsPage);
+        window.addEventListener('oiat:run-started', () => {
+            window.setTimeout(refreshRunsPage, RUNS_REFRESH_DEBOUNCE_MS);
+        });
+        listenersBound = true;
     }
 
-    function bindCompletionRefresh() {
-        if (completionListenerBound) return;
-        
-        window.addEventListener('oiat:run-completed', (event) => {
-            // Always refresh on completion - runs page shows all runs
-            scheduleRunsRefresh(RUNS_REFRESH_AFTER_COMPLETION_MS);
-        });
-        
-        window.addEventListener('oiat:run-started', (event) => {
-            // Refresh when a run starts to show it in the table
-            scheduleRunsRefresh(RUNS_REFRESH_DEBOUNCE_MS);
-        });
-        
-        completionListenerBound = true;
-    }
-
-    // Initialize on DOM ready
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', bindCompletionRefresh);
+        document.addEventListener('DOMContentLoaded', bindRunsRefresh);
     } else {
-        bindCompletionRefresh();
+        bindRunsRefresh();
     }
 })();
