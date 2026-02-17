@@ -126,7 +126,7 @@
                     <iconify-icon :icon="showJson ? 'solar:alt-arrow-up-linear' : 'solar:alt-arrow-down-linear'" width="16"></iconify-icon>
                     <span x-text="showJson ? 'Hide' : 'Show'"></span> Full Configuration JSON
                 </button>
-                <div x-show="showJson" x-transition class="mt-3">
+                <div x-show="showJson" x-cloak x-transition class="mt-3">
                     <pre class="bg-slate-900 text-slate-100 p-4 rounded-lg text-xs overflow-x-auto font-mono">{{ company_data.config_json_pretty }}</pre>
                 </div>
             </div>

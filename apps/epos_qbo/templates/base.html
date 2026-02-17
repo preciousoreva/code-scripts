@@ -28,6 +28,50 @@
             };
         })();
     </script>
+    <script>
+        (function () {
+            var prefetched = new Set();
+
+            function isPrefetchable(anchor) {
+                if (!anchor || !anchor.href) return false;
+                if (anchor.dataset && anchor.dataset.noPrefetch === 'true') return false;
+                if (anchor.target && anchor.target !== '_self') return false;
+                if (anchor.hasAttribute('download')) return false;
+                var url;
+                try {
+                    url = new URL(anchor.href, window.location.href);
+                } catch (e) {
+                    return false;
+                }
+                if (url.origin !== window.location.origin) return false;
+                if (url.pathname === window.location.pathname && url.search === window.location.search) return false;
+                if (url.hash && (url.pathname + url.search) === (window.location.pathname + window.location.search)) return false;
+                return true;
+            }
+
+            function prefetchDocument(href) {
+                if (prefetched.has(href)) return;
+                prefetched.add(href);
+                var link = document.createElement('link');
+                link.rel = 'prefetch';
+                link.as = 'document';
+                link.href = href;
+                document.head.appendChild(link);
+            }
+
+            function maybePrefetch(event) {
+                var target = event.target;
+                if (!target || typeof target.closest !== 'function') return;
+                var anchor = target.closest('a[href]');
+                if (!isPrefetchable(anchor)) return;
+                prefetchDocument(anchor.href);
+            }
+
+            document.addEventListener('mouseover', maybePrefetch, { passive: true });
+            document.addEventListener('focusin', maybePrefetch);
+            document.addEventListener('touchstart', maybePrefetch, { passive: true });
+        })();
+    </script>
     <!-- Tailwind (CDN) -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -50,8 +94,46 @@
             --font-mono: 'JetBrains Mono', monospace;
         }
 
+        /* Critical first-paint fallback so full-page navigation does not flash white
+           before Tailwind CDN utilities are available. */
+        html,
+        body {
+            min-height: 100%;
+            margin: 0;
+        }
+
+        html {
+            background-color: #f8fafc;
+            color: #0f172a;
+        }
+
+        html.dark {
+            background-color: #0f172a;
+            color: #e2e8f0;
+        }
+
         body {
             font-family: var(--font-sans);
+            background-color: inherit;
+            color: inherit;
+        }
+
+        body>aside {
+            background-color: #ffffff;
+            border-right: 1px solid #e2e8f0;
+        }
+
+        html.dark body>aside {
+            background-color: #0f172a;
+            border-right-color: #334155;
+        }
+
+        body>main {
+            background-color: #f8fafc;
+        }
+
+        html.dark body>main {
+            background-color: #0f172a;
         }
 
         .font-mono {
