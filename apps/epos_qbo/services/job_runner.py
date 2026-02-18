@@ -45,8 +45,11 @@ def build_command(cleaned: dict) -> list[str]:
     scope = cleaned["scope"]
     date_mode = cleaned["date_mode"]
     
-    # Prefer project's venv Python if it exists, otherwise use sys.executable
-    venv_python = BASE_DIR / ".venv" / "bin" / "python"
+    # Prefer project's venv Python if it exists, otherwise use sys.executable (cross-platform)
+    if os.name == "nt":
+        venv_python = BASE_DIR / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_python = BASE_DIR / ".venv" / "bin" / "python"
     if venv_python.exists():
         python_exe = str(venv_python)
     else:
