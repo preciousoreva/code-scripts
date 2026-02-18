@@ -361,6 +361,15 @@ class TokenManager:
         self.company_key = company_key
         self.realm_id = realm_id
         self.access_token = get_access_token(company_key, realm_id)
+        self.request_stats: Dict[str, Any] = {
+            "request_count": 0,
+            "request_error_count": 0,
+            "request_duration_ms_total": 0.0,
+            "request_duration_ms_max": 0.0,
+            "request_status_counts": {},
+            "request_method_counts": {},
+            "token_refresh_count": 0,
+        }
     
     def get(self) -> str:
         """Get the current access token."""
@@ -370,7 +379,41 @@ class TokenManager:
         """Refresh the access token and update internal state."""
         tokens = refresh_access_token(self.company_key, self.realm_id)
         self.access_token = tokens["access_token"]
+        self.request_stats["token_refresh_count"] = int(self.request_stats.get("token_refresh_count", 0)) + 1
         return self.access_token
+
+    def record_request(self, method: str, status_code: int, elapsed_ms: float) -> None:
+        """Record one QBO request attempt for per-run metrics."""
+        stats = self.request_stats
+        stats["request_count"] = int(stats.get("request_count", 0)) + 1
+        stats["request_duration_ms_total"] = float(stats.get("request_duration_ms_total", 0.0)) + float(elapsed_ms)
+        stats["request_duration_ms_max"] = max(float(stats.get("request_duration_ms_max", 0.0)), float(elapsed_ms))
+
+        method_key = method.upper()
+        method_counts = stats.setdefault("request_method_counts", {})
+        method_counts[method_key] = int(method_counts.get(method_key, 0)) + 1
+
+        status_key = str(status_code)
+        status_counts = stats.setdefault("request_status_counts", {})
+        status_counts[status_key] = int(status_counts.get(status_key, 0)) + 1
+
+        if status_code >= 400:
+            stats["request_error_count"] = int(stats.get("request_error_count", 0)) + 1
+
+    def record_transport_error(self, method: str, elapsed_ms: float) -> None:
+        """Record a request attempt that failed before HTTP response."""
+        stats = self.request_stats
+        stats["request_count"] = int(stats.get("request_count", 0)) + 1
+        stats["request_error_count"] = int(stats.get("request_error_count", 0)) + 1
+        stats["request_duration_ms_total"] = float(stats.get("request_duration_ms_total", 0.0)) + float(elapsed_ms)
+        stats["request_duration_ms_max"] = max(float(stats.get("request_duration_ms_max", 0.0)), float(elapsed_ms))
+
+        method_key = method.upper()
+        method_counts = stats.setdefault("request_method_counts", {})
+        method_counts[method_key] = int(method_counts.get(method_key, 0)) + 1
+
+        status_counts = stats.setdefault("request_status_counts", {})
+        status_counts["transport_error"] = int(status_counts.get("transport_error", 0)) + 1
 
 
 
@@ -421,15 +464,20 @@ def _make_qbo_request(
 
     attempt = 0
     while True:
+        started_at = time.perf_counter()
         try:
             resp = _QBO_SESSION.request(method_upper, url, timeout=timeout, **kwargs)
         except (requests.Timeout, requests.ConnectionError):
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+            token_mgr.record_transport_error(method_upper, elapsed_ms)
             if attempt < max_retries and method_upper in QBO_SAFE_METHODS:
                 sleep_for = min(QBO_BACKOFF_MAX, QBO_BACKOFF_BASE * (2 ** attempt))
                 time.sleep(sleep_for)
                 attempt += 1
                 continue
             raise
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        token_mgr.record_request(method_upper, resp.status_code, elapsed_ms)
 
         # If we get a 401, refresh token and retry once
         if resp.status_code == 401 and attempt < max_retries:
@@ -1655,6 +1703,8 @@ def resolve_all_unique_items(
     target_date: Optional[str],
     item_result_by_name: Dict[str, Dict[str, Any]],
     patched_items: Set[str],
+    patch_existing_inventory: bool,
+    allow_wrong_type_autofix: bool,
     items_wrong_type: Optional[List[Dict[str, Any]]],
     items_autofixed: Optional[List[Dict[str, Any]]],
     items_patched_pricing_tax: Optional[List[Dict[str, Any]]],
@@ -1664,8 +1714,13 @@ def resolve_all_unique_items(
     Fills item_result_by_name and patched_items. Returns counts for logging.
     """
     default_item_id = config.get_qbo_config().get("default_item_id", "1")
-    auto_fix = getattr(config, "auto_fix_wrong_type_items", False)
-    stats = {"items_created": 0, "items_patched": 0, "lookups_from_prefetch": 0}
+    auto_fix = bool(allow_wrong_type_autofix and getattr(config, "auto_fix_wrong_type_items", False))
+    stats = {
+        "items_created": 0,
+        "items_patched": 0,
+        "lookups_from_prefetch": 0,
+        "existing_inventory_patch_skipped": 0,
+    }
 
     for name in unique_names:
         name = (name or "").strip()
@@ -1684,7 +1739,7 @@ def resolve_all_unique_items(
             item_id = existing.get("Id")
             item_type = (existing.get("Type") or "").strip()
             if item_type == "Inventory":
-                if item_id and item_id not in patched_items:
+                if patch_existing_inventory and item_id and item_id not in patched_items:
                     try:
                         get_url = f"{BASE_URL}/v3/company/{realm_id}/item/{item_id}?minorversion=70"
                         get_resp = _make_qbo_request("GET", get_url, token_mgr)
@@ -1774,6 +1829,8 @@ def resolve_all_unique_items(
                                         print(f"[WARN] Failed to PATCH item {item_id}: HTTP {patch_resp.status_code}")
                     except Exception as e:
                         print(f"[WARN] Failed to patch existing Inventory item {item_id}: {e}")
+                elif not patch_existing_inventory:
+                    stats["existing_inventory_patch_skipped"] += 1
                 item_result_by_name[name] = {"item_id": item_id, "created": False, "type_label": "existing_inventory", "fallback_reason": None}
                 continue
             if auto_fix and item_type:
@@ -2887,6 +2944,15 @@ def main():
         action="store_true",
         help="Enable verbose upload logging (line-item and full response dumps).",
     )
+    parser.add_argument(
+        "--inventory-sync-mode",
+        choices=["inline", "upload_fast"],
+        help=(
+            "Optional override for inventory sync mode: "
+            "'inline' (patch existing inventory items during upload) or "
+            "'upload_fast' (skip expensive existing-item patch path)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.verbose_logs:
@@ -2899,6 +2965,12 @@ def main():
     except Exception as e:
         print(f"Error: Failed to load company config for '{args.company}': {e}")
         sys.exit(1)
+
+    effective_inventory_sync_mode = (args.inventory_sync_mode or getattr(config, "inventory_sync_mode", "inline")).strip().lower()
+    if effective_inventory_sync_mode not in {"inline", "upload_fast"}:
+        effective_inventory_sync_mode = "inline"
+    patch_existing_inventory = effective_inventory_sync_mode == "inline"
+    allow_wrong_type_autofix = effective_inventory_sync_mode == "inline"
     
     # Safety check: verify realm_id matches tokens
     try:
@@ -2913,6 +2985,7 @@ def main():
     print(f"REALM ID: {config.realm_id}")
     print(f"DEPOSIT ACCOUNT: {config.deposit_account}")
     print(f"TAX MODE: {config.tax_mode}")
+    print(f"INVENTORY SYNC MODE: {effective_inventory_sync_mode}")
     print("=" * 60)
 
     inventory_enabled = bool(getattr(config, "inventory_enabled", False))
@@ -2938,6 +3011,7 @@ def main():
 
     grouped = df.groupby(GROUP_COL)
     print(f"Found {len(grouped)} distinct SalesReceiptNo groups")
+    upload_phase_started_at = time.perf_counter()
 
     # Bypass inventory start-date mode: load blockers, get-or-create Service item
     bypass_item_id: Optional[str] = None
@@ -3013,8 +3087,11 @@ def main():
     
     # Prefetch QBO items once (inventory mode only)
     existing_items_by_name: Dict[str, Dict[str, Any]] = {}
+    prefetch_duration_seconds = 0.0
     if inventory_enabled:
+        prefetch_started_at = time.perf_counter()
         existing_items_by_name = prefetch_all_items(token_mgr, config.realm_id)
+        prefetch_duration_seconds = time.perf_counter() - prefetch_started_at
         print(f"[INFO] Prefetch: {len(existing_items_by_name)} existing Items loaded from QBO")
 
     item_cache: Dict[str, str] = {}
@@ -3065,6 +3142,7 @@ def main():
         "skipped": 0,
         "uploaded": 0,
         "failed": 0,
+        "inventory_sync_mode": effective_inventory_sync_mode,
         "stale_ledger_entries_detected": len(stale_in_current_batch),
         "date_mismatches_detected": len(date_mismatches),
         "items_created_count": 0,
@@ -3076,6 +3154,9 @@ def main():
         "inventory_start_date_issues_count": inventory_start_date_issues_count,
         "inventory_start_date_report_path": inventory_start_date_report_path,
         "items_patched_count": 0,
+        "item_prefetch_duration_seconds": round(prefetch_duration_seconds, 3),
+        "item_resolution_duration_seconds": 0.0,
+        "upload_duration_seconds": 0.0,
     }
 
     items_wrong_type: List[Dict[str, Any]] = []
@@ -3094,6 +3175,7 @@ def main():
     patched_items: Set[str] = set()
 
     if inventory_enabled:
+        resolution_started_at = time.perf_counter()
         resolve_stats = resolve_all_unique_items(
             unique_names,
             desired_item_state,
@@ -3107,16 +3189,21 @@ def main():
             args.target_date,
             item_result_by_name,
             patched_items,
+            patch_existing_inventory,
+            allow_wrong_type_autofix,
             items_wrong_type,
             items_autofixed,
             items_patched_pricing_tax,
         )
+        stats["item_resolution_duration_seconds"] = round(time.perf_counter() - resolution_started_at, 3)
         print(
             f"[INFO] Item resolution summary: total_lines={len(df)} unique_items={len(item_result_by_name)} "
             f"items_created={resolve_stats['items_created']} items_patched={resolve_stats['items_patched']} "
-            f"item_lookups_from_prefetch={resolve_stats['lookups_from_prefetch']}"
+            f"item_lookups_from_prefetch={resolve_stats['lookups_from_prefetch']} "
+            f"existing_inventory_patch_skipped={resolve_stats['existing_inventory_patch_skipped']}"
         )
         stats["items_patched_count"] = resolve_stats["items_patched"]
+        stats["existing_inventory_patch_skipped"] = resolve_stats["existing_inventory_patch_skipped"]
     else:
         default_item_id = config.get_qbo_config().get("default_item_id", "1")
         for name in unique_names:
@@ -3127,6 +3214,7 @@ def main():
                 "fallback_reason": "inventory_disabled",
             }
         stats["items_patched_count"] = 0
+        stats["existing_inventory_patch_skipped"] = 0
         print("[INFO] Inventory disabled: default item will be used for all line items.")
 
     for group_key, group_df in grouped:
@@ -3297,6 +3385,19 @@ def main():
         print(f"  Date mismatches (wrong TxnDate in QBO): {len(date_mismatches)}")
     if stale_in_current_batch:
         print(f"  Stale ledger entries (in ledger, not in QBO): {len(stale_in_current_batch)}")
+
+    stats["upload_duration_seconds"] = round(time.perf_counter() - upload_phase_started_at, 3)
+    request_stats = getattr(token_mgr, "request_stats", {})
+    request_count = int(request_stats.get("request_count", 0))
+    request_total_ms = float(request_stats.get("request_duration_ms_total", 0.0))
+    stats["qbo_request_count"] = request_count
+    stats["qbo_request_error_count"] = int(request_stats.get("request_error_count", 0))
+    stats["qbo_request_duration_ms_total"] = round(request_total_ms, 2)
+    stats["qbo_request_duration_ms_max"] = round(float(request_stats.get("request_duration_ms_max", 0.0)), 2)
+    stats["qbo_request_duration_ms_avg"] = round((request_total_ms / request_count), 2) if request_count else 0.0
+    stats["qbo_request_method_counts"] = request_stats.get("request_method_counts", {})
+    stats["qbo_request_status_counts"] = request_stats.get("request_status_counts", {})
+    stats["qbo_token_refresh_count"] = int(request_stats.get("token_refresh_count", 0))
     
     # Write stats to metadata for Slack notification
     metadata_path = os.path.join(repo_root, config.metadata_file)

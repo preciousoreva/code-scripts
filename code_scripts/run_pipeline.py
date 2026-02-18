@@ -1080,6 +1080,7 @@ def main(
     to_date: Optional[str] = None,
     skip_download: bool = False,
     verbose_logs: bool = False,
+    inventory_sync_mode: Optional[str] = None,
 ) -> int:
     """
     Full pipeline for a specific company:
@@ -1109,6 +1110,7 @@ def main(
         from_date: Start date for range mode in YYYY-MM-DD format (must be used with to_date)
         to_date: End date for range mode in YYYY-MM-DD format (must be used with from_date)
         skip_download: If True, skip EPOS download and use existing split files in uploads/range_raw/ (range mode only)
+        inventory_sync_mode: Optional CLI override for qbo_upload inventory sync mode (inline/upload_fast)
     """
     # Load company configuration
     try:
@@ -1480,6 +1482,8 @@ def main(
                 qbo_upload_args = ["--company", company_key]
                 if config.trading_day_enabled:
                     qbo_upload_args.extend(["--target-date", day_date])
+                if inventory_sync_mode:
+                    qbo_upload_args.extend(["--inventory-sync-mode", inventory_sync_mode])
                 if verbose_logs:
                     qbo_upload_args.append("--verbose-logs")
                 run_step(
@@ -1801,6 +1805,8 @@ def main(
             qbo_upload_args = ["--company", company_key]
             if config.trading_day_enabled:
                 qbo_upload_args.extend(["--target-date", target_date])
+            if inventory_sync_mode:
+                qbo_upload_args.extend(["--inventory-sync-mode", inventory_sync_mode])
             if verbose_logs:
                 qbo_upload_args.append("--verbose-logs")
             run_step(
@@ -2084,6 +2090,14 @@ Examples:
         action="store_true",
         help="Enable verbose pipeline logs (line-level and full API responses).",
     )
+    parser.add_argument(
+        "--inventory-sync-mode",
+        choices=["inline", "upload_fast"],
+        help=(
+            "Optional qbo_upload override for inventory sync mode. "
+            "Use for single-company canary runs; default is company config/env."
+        ),
+    )
     args = parser.parse_args()
     
     if not args.company:
@@ -2111,5 +2125,6 @@ Examples:
                 args.to_date,
                 args.skip_download,
                 args.verbose_logs,
+                args.inventory_sync_mode,
             )
         )

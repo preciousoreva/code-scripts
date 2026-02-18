@@ -260,6 +260,21 @@ class CompanyConfig:
         return self._get_env_or_config(env_key, "auto_fix_wrong_type_items", False)
 
     @property
+    def inventory_sync_mode(self) -> str:
+        """Inventory sync mode for upload pipeline.
+
+        - "inline": preserve current behavior (patch existing inventory and optionally auto-fix wrong-type items inline)
+        - "upload_fast": skip expensive existing-item patch path during upload; still create missing inventory items
+
+        ENV override: {COMPANY_KEY}_INVENTORY_SYNC_MODE
+        """
+        env_key = f"{self.company_key.upper()}_INVENTORY_SYNC_MODE"
+        mode = str(self._get_env_or_config(env_key, "inventory_sync_mode", "inline")).strip().lower()
+        if mode not in {"inline", "upload_fast"}:
+            return "inline"
+        return mode
+
+    @property
     def use_item_hierarchy(self) -> bool:
         """Always True. SubItem/ParentRef (category hierarchy) is always used for inventory items.
         Config/ENV value is ignored; kept for backward compatibility only.

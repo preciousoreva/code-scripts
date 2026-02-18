@@ -72,6 +72,12 @@ The pipeline is designed to be run as a single command and take care of all phas
    python run_pipeline.py --company company_b --from-date 2025-01-29 --to-date 2025-01-31 --skip-download
    ```
 
+   **Single-company canary (faster inventory sync path):**
+
+   ```bash
+   python run_pipeline.py --company company_a --inventory-sync-mode upload_fast
+   ```
+
    > **Note:** `--skip-download` only works in range mode and uses existing split files from `uploads/range_raw/`. Useful when you already have CSV files and want to reprocess without re-downloading from EPOS.
 
 That's it! The pipeline will download, split, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
@@ -151,6 +157,8 @@ python run_all_companies.py --from-date 2025-01-29 --to-date 2025-01-31 --skip-d
 **Design note:**
 
 This script is intentionally thin — all business logic remains in `run_pipeline.py`. This makes it suitable for cron / Task Scheduler / daily automation where you want a single entry point that processes all companies sequentially.
+
+Inventory sync mode is intentionally **not** configurable on `run_all_companies.py`; each company uses its own config/env value.
 
 ### Scheduled runs via Task Scheduler
 
@@ -928,6 +936,7 @@ Add an optional `inventory` section to your company JSON config:
   "inventory": {
     "enable_inventory_items": false,
     "allow_negative_inventory": false,
+    "inventory_sync_mode": "inline",
     "inventory_start_date": "today",
     "default_qty_on_hand": 0,
     "product_mapping_file": "mappings/Product.Mapping.csv"
@@ -938,6 +947,7 @@ Add an optional `inventory` section to your company JSON config:
 **Fields:**
 - `enable_inventory_items`: Enable inventory item creation (default: `false`)
 - `allow_negative_inventory`: Allow negative inventory when posting SalesReceipts (default: `false`)
+- `inventory_sync_mode`: Inventory item sync path (default: `"inline"`). Allowed: `"inline"` or `"upload_fast"`
 - `inventory_start_date`: Start date for inventory tracking - use `"today"` or ISO date like `"2026-01-26"` (default: `"today"`)
 - `default_qty_on_hand`: Starting quantity for new inventory items (default: `0`)
 - `product_mapping_file`: Path to category mapping CSV (default: `"mappings/Product.Mapping.csv"`)
@@ -951,6 +961,7 @@ You can override inventory settings via environment variables:
 ```bash
 COMPANY_A_ENABLE_INVENTORY_ITEMS=true
 COMPANY_A_ALLOW_NEGATIVE_INVENTORY=true
+COMPANY_A_INVENTORY_SYNC_MODE=inline
 COMPANY_A_INVENTORY_START_DATE=2026-01-26  # or "today"
 COMPANY_A_DEFAULT_QTY_ON_HAND=0
 ```
@@ -1004,6 +1015,26 @@ If negative inventory is not enabled in QBO, SalesReceipts will be rejected with
 - Accounts are mapped from category using `mappings/Product.Mapping.csv` (categories → Inventory/Revenue/COGS accounts)
 - When items are created or patched, UnitPrice and PurchaseCost are set/updated from CSV (UnitPrice: when missing/0 or differs by >0.01; PurchaseCost: when missing/0)
 - Unit prices are set from EPOS CSV `NET Sales` column (per-unit); purchase costs from `Cost Price` column (per-unit)
+
+`inventory_sync_mode` controls how existing items are handled:
+- `inline` (default): patch existing inventory items inline (pricing/tax/category) and allow wrong-type auto-fix when enabled.
+- `upload_fast`: skip expensive existing-item patch path during upload; still create missing inventory items as `Type=Inventory`.
+
+Use `upload_fast` to reduce upload critical-path time, then run maintenance sync to apply catalog drift updates.
+
+### Inventory Catalog Maintenance Sync
+
+When using `upload_fast`, run catalog maintenance separately to sync existing inventory item pricing/tax/category:
+
+```bash
+python -m code_scripts.sync_inventory_catalog --company company_a
+```
+
+Optional explicit CSV/date:
+
+```bash
+python -m code_scripts.sync_inventory_catalog --company company_a --csv outputs/Akponora_Ventures_Ltd/file.csv --target-date 2026-02-17
+```
 
 **When `enable_inventory_items` is `false` (default):**
 - Missing products are created as **Service items** (existing behavior)
