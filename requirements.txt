@@ -9,6 +9,7 @@ playwright>=1.40.0
 
 # Data processing
 pandas>=2.0.0
+openpyxl>=3.1.0
 
 # HTTP client for QuickBooks API
 requests>=2.31.0

@@ -106,6 +106,7 @@
         No companies match this filter.
     </div>
 
+    <div id="overview-revenue-slot">
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm p-5 space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
             <div>
@@ -149,6 +150,7 @@
         </div>
         {% endif %}
         <p id="overview-revenue-matched-days" class="text-[11px] text-slate-400 dark:text-slate-500">Matched days in period: {{ revenue_matched_days }}</p>
+    </div>
     </div>
 
     {{ revenue_chart_payload|json_script:"overview-revenue-chart-data" }}

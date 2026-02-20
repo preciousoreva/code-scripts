@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+REPO_ROOT = BASE_DIR  # repo root (parent of code_scripts package)
 OPS_ROOT = BASE_DIR / "code_scripts"
 OPS_COMPANIES_DIR = OPS_ROOT / "companies"
 OPS_LOGS_DIR = OPS_ROOT / "logs"

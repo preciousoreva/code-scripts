@@ -1008,7 +1008,13 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     active_runs = RunJob.objects.filter(
         status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
-    
+
+    # Latest completed run id for overview freshness (terminal status + finished_at set)
+    latest_completed_run = RunJob.objects.filter(
+        status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
+    ).exclude(finished_at__isnull=True).order_by("-finished_at", "-created_at").first()
+    latest_run_id = str(latest_completed_run.id) if latest_completed_run else ""
+
     if has_overview_target_date and target_date_display and last_successful_sync_at:
         age_text = _format_relative_age((now - last_successful_sync_at).total_seconds())
         metric_basis_line = (
@@ -1086,6 +1092,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         "revenue_chart_payload": revenue_chart_payload,
         "active_run_ids": [str(id) for id in active_runs],
         "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
+        "latest_run_id": latest_run_id,
     }
 
 

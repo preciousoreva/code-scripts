@@ -6,6 +6,7 @@
     const OVERVIEW_COMPLETION_REFRESH_RETRY_DELAYS_MS = [2000, 6000, 12000, 20000];
 
     let revenueChart = null;
+    let lastChartDataHash = null;
     let refreshInFlight = false;
     let refreshQueued = false;
     let runRefreshBound = false;
@@ -93,33 +94,62 @@
         return select.value;
     }
 
-    function initRevenueChart(selectedCompanyKey) {
+    function chartDataHash(labels, filteredSeries) {
+        const key = JSON.stringify({
+            labels: labels,
+            series: filteredSeries.map((item) => ({
+                company_key: item.company_key,
+                name: item.name,
+                data: item.data,
+            })),
+        });
+        let hash = 0;
+        for (let i = 0; i < key.length; i += 1) {
+            hash = ((hash << 5) - hash) + key.charCodeAt(i);
+            hash |= 0;
+        }
+        return hash;
+    }
+
+    function initRevenueChart(selectedCompanyKey, payloadOverride) {
         const canvas = document.getElementById('overview-revenue-chart');
         const dataScript = document.getElementById('overview-revenue-chart-data');
         const companyKey = bindRevenueCompanyFilter(selectedCompanyKey);
-        if (!canvas || !dataScript || typeof Chart === 'undefined') {
+        if (!canvas || typeof Chart === 'undefined') {
             if (revenueChart) {
                 revenueChart.destroy();
                 revenueChart = null;
+                lastChartDataHash = null;
             }
             return;
         }
 
-        if (revenueChart) {
-            revenueChart.destroy();
-            revenueChart = null;
+        let payload = payloadOverride;
+        if (!payload && dataScript) {
+            try {
+                payload = JSON.parse(dataScript.textContent || '{}');
+            } catch (e) {
+                return;
+            }
         }
-
-        let payload = null;
-        try {
-            payload = JSON.parse(dataScript.textContent || '{}');
-        } catch (e) {
+        if (!payload) {
+            if (revenueChart) {
+                revenueChart.destroy();
+                revenueChart = null;
+                lastChartDataHash = null;
+            }
             return;
         }
+
         const labels = Array.isArray(payload.labels) ? payload.labels : [];
         const series = Array.isArray(payload.series) ? payload.series : [];
         if (!labels.length || !series.length) {
             updateRevenueSummary(0);
+            if (revenueChart) {
+                revenueChart.destroy();
+                revenueChart = null;
+                lastChartDataHash = null;
+            }
             return;
         }
 
@@ -128,6 +158,11 @@
             : series.filter((item) => item.company_key === companyKey);
         if (!filteredSeries.length) {
             updateRevenueSummary(0);
+            if (revenueChart) {
+                revenueChart.destroy();
+                revenueChart = null;
+                lastChartDataHash = null;
+            }
             return;
         }
 
@@ -158,6 +193,24 @@
         });
         const matchedDays = dayTotals.reduce((count, amount) => (amount > 0 ? count + 1 : count), 0);
         updateRevenueSummary(matchedDays);
+
+        const newHash = chartDataHash(labels, filteredSeries);
+        if (revenueChart && revenueChart.canvas === canvas) {
+            if (lastChartDataHash === newHash) {
+                return;
+            }
+            revenueChart.data.labels = labels;
+            revenueChart.data.datasets = datasets;
+            revenueChart.update('none');
+            lastChartDataHash = newHash;
+            return;
+        }
+
+        if (revenueChart) {
+            revenueChart.destroy();
+            revenueChart = null;
+            lastChartDataHash = null;
+        }
 
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
@@ -212,6 +265,7 @@
                 },
             },
         });
+        lastChartDataHash = newHash;
     }
 
     function currentRevenuePeriod() {
@@ -253,7 +307,9 @@
             .then((html) => {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
-                const metricBasisData = doc.querySelector('#metric-basis-line-data');
+                const parsedRoot = doc.body;
+
+                const metricBasisData = parsedRoot.querySelector('#metric-basis-line-data');
                 if (metricBasisData) {
                     const headerMetricLine = document.getElementById('metric-basis-line');
                     if (headerMetricLine) {
@@ -261,15 +317,47 @@
                     }
                 }
 
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = html;
-                const metricDataDiv = tempDiv.querySelector('#metric-basis-line-data');
-                if (metricDataDiv) {
-                    metricDataDiv.remove();
+                let chartPayload = null;
+                let matchedDaysText = '';
+                const chartDataScript = parsedRoot.querySelector('script#overview-revenue-chart-data');
+                if (chartDataScript) {
+                    try {
+                        chartPayload = JSON.parse(chartDataScript.textContent || '{}');
+                    } catch (e) {}
+                }
+                const matchedDaysEl = parsedRoot.querySelector('#overview-revenue-matched-days');
+                if (matchedDaysEl) {
+                    matchedDaysText = matchedDaysEl.textContent;
                 }
 
-                root.innerHTML = tempDiv.innerHTML;
-                initOverview({ filterQuery, revenueCompany });
+                const chartContainerLive = root.querySelector('#overview-revenue-matched-days')?.closest('.rounded-xl') || root.querySelector('#overview-revenue-chart')?.closest('.rounded-xl');
+                const slotInParsed = parsedRoot.querySelector('#overview-revenue-slot');
+                if (slotInParsed) {
+                    slotInParsed.innerHTML = '';
+                }
+
+                while (parsedRoot.firstChild) {
+                    root.appendChild(parsedRoot.firstChild);
+                }
+                if (chartContainerLive) {
+                    const slot = root.querySelector('#overview-revenue-slot');
+                    if (slot) {
+                        slot.appendChild(chartContainerLive);
+                    } else {
+                        root.appendChild(chartContainerLive);
+                    }
+                }
+
+                const liveMatchedDaysEl = document.getElementById('overview-revenue-matched-days');
+                if (liveMatchedDaysEl && matchedDaysText !== undefined) {
+                    liveMatchedDaysEl.textContent = matchedDaysText;
+                }
+
+                initCompanyFilter(filterQuery);
+                bindRevenuePeriodChange();
+                bindRunRefresh();
+                bindThemeChange();
+                initRevenueChart(revenueCompany, chartPayload);
             })
             .catch(() => {
                 // Keep current panel content on transient fetch failure.
@@ -283,6 +371,14 @@
             });
     }
 
+    function checkOverviewFreshness(completedJobId) {
+        const root = document.getElementById('overview-panels-root');
+        if (!root || !completedJobId) return false;
+        const el = root.querySelector('[data-latest-run-id]');
+        const latestRunId = el ? (el.getAttribute('data-latest-run-id') || '').trim() : '';
+        return latestRunId === String(completedJobId);
+    }
+
     function bindRunRefresh() {
         if (runRefreshBound) return;
 
@@ -292,6 +388,7 @@
                 onRefresh: refreshOverviewPanels,
                 startedDelayMs: OVERVIEW_REFRESH_DEBOUNCE_MS,
                 completionDelaysMs: OVERVIEW_COMPLETION_REFRESH_RETRY_DELAYS_MS,
+                checkFreshnessAfterRefresh: checkOverviewFreshness,
             });
             runRefreshBound = true;
             return;

@@ -31,11 +31,16 @@
         const shouldRefresh = typeof options.shouldRefresh === 'function'
             ? options.shouldRefresh
             : () => true;
+        const checkFreshnessAfterRefresh = typeof options.checkFreshnessAfterRefresh === 'function'
+            ? options.checkFreshnessAfterRefresh
+            : null;
 
         let startedTimerId = null;
         let completionTimerIds = [];
         let refreshInFlight = false;
         let refreshQueued = false;
+        let lastCompletedJobId = null;
+        let currentTriggerCompletionJobId = null;
 
         function clearCompletionTimers() {
             if (!completionTimerIds.length) return;
@@ -47,14 +52,17 @@
             if (startedTimerId) clearTimeout(startedTimerId);
             startedTimerId = window.setTimeout(() => {
                 startedTimerId = null;
+                currentTriggerCompletionJobId = null;
                 triggerRefresh();
             }, startedDelayMs);
         }
 
-        function scheduleCompletionRefreshes() {
+        function scheduleCompletionRefreshes(event) {
             clearCompletionTimers();
+            lastCompletedJobId = (event && event.detail && event.detail.jobId) ? event.detail.jobId : null;
             completionTimerIds = completionDelaysMs.map((delay) => (
                 window.setTimeout(() => {
+                    currentTriggerCompletionJobId = lastCompletedJobId;
                     triggerRefresh();
                 }, delay)
             ));
@@ -65,6 +73,7 @@
                 refreshQueued = true;
                 return;
             }
+            const completionJobId = currentTriggerCompletionJobId;
             refreshInFlight = true;
             Promise.resolve()
                 .then(() => onRefresh())
@@ -73,6 +82,14 @@
                 })
                 .finally(() => {
                     refreshInFlight = false;
+                    if (completionJobId && checkFreshnessAfterRefresh) {
+                        Promise.resolve(checkFreshnessAfterRefresh(completionJobId)).then(function (fresh) {
+                            if (fresh) {
+                                clearCompletionTimers();
+                            }
+                        });
+                    }
+                    currentTriggerCompletionJobId = null;
                     if (refreshQueued) {
                         refreshQueued = false;
                         triggerRefresh();
@@ -82,7 +99,7 @@
 
         function onCompleted(event) {
             if (!shouldRefresh('completed', event && event.detail ? event.detail : {})) return;
-            scheduleCompletionRefreshes();
+            scheduleCompletionRefreshes(event);
         }
 
         function onStarted(event) {
