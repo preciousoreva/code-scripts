@@ -1,0 +1,20 @@
+services:
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/scheduler/Dockerfile
+    container_name: oiat-scheduler
+    working_dir: /app
+    command: ["python", "-m", "code_scripts.scheduler_service"]
+    env_file:
+      - .env
+    environment:
+      SCHEDULE_CRON: ${SCHEDULE_CRON:-*/5 * * * *}
+      SCHEDULE_TZ: ${SCHEDULE_TZ:-Africa/Lagos}
+      RUN_CMD: ${RUN_CMD:-python manage.py run_scheduled_all_companies --parallel 2}
+      SCHEDULER_LOG_LEVEL: ${SCHEDULER_LOG_LEVEL:-INFO}
+      SCHEDULER_MISFIRE_GRACE_SECONDS: ${SCHEDULER_MISFIRE_GRACE_SECONDS:-300}
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    init: true
