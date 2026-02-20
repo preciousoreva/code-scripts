@@ -32,8 +32,22 @@ def get_global_lock_path(repo_root: Path) -> Path:
     return repo_root / "runtime" / "global_run.lock"
 
 
-def get_scheduled_log_path() -> Path:
-    """Log file path: %TEMP%\\epos_to_qbo_automation\\run_all_companies.log (append)."""
+def get_scheduled_log_path(repo_root: Path) -> Path:
+    """
+    Log file path for scheduler-triggered runs.
+
+    Resolution order:
+    1) OIAT_SCHEDULED_LOG_PATH (absolute, or relative to repo root)
+    2) Legacy %TEMP%/epos_to_qbo_automation/run_all_companies.log
+    """
+    configured = (os.environ.get("OIAT_SCHEDULED_LOG_PATH") or "").strip()
+    if configured:
+        configured_path = Path(os.path.expandvars(configured)).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = repo_root / configured_path
+        configured_path.parent.mkdir(parents=True, exist_ok=True)
+        return configured_path
+
     temp = os.environ.get("TEMP") or os.environ.get("TMP") or os.path.expandvars("%TEMP%")
     if not temp or not os.path.isabs(temp):
         temp = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Temp") if os.name == "nt" else "/tmp"
@@ -158,7 +172,8 @@ class Command(BaseCommand):
 
         repo_root = get_repo_root()
         lock_path = get_global_lock_path(repo_root)
-        log_path = get_scheduled_log_path()
+        # Keep runtime/global_run.lock behavior unchanged for now; verify containerized locking before refactor.
+        log_path = get_scheduled_log_path(repo_root)
 
         if not acquire_lock(lock_path):
             self.stderr.write("Another run is already active (lock file exists). Exiting.\n")
