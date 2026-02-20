@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Overview • EPOS → QBO Automation{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4" data-active-runs='{{ active_run_ids_json|safe }}'>
+    <div>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">System Overview</h1>
+        <p id="metric-basis-line" class="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+            {{ metric_basis_line|default:"" }}
+        </p>
+        <p class="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
+            Real-time monitoring of EPOS to QuickBooks Online synchronization.
+        </p>
+    </div>
+    <div class="flex items-center gap-3">
+        <a href="{% url 'epos_qbo:company-new' %}" class="btn btn-primary">
+            <iconify-icon icon="solar:add-circle-linear" width="16"></iconify-icon>
+            Add Company
+        </a>
+        <a href="{% url 'epos_qbo:runs' %}" class="btn btn-secondary">
+            <iconify-icon icon="solar:refresh-linear" width="16"></iconify-icon>
+            View Runs
+        </a>
+    </div>
+</div>
+
+<div id="overview-panels-root">
+    {% include "components/overview_refresh.html" %}
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script src="{% static 'js/overview.js' %}"></script>
+{% endblock %}

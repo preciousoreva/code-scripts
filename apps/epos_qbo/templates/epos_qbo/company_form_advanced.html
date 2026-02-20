@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}Advanced Company Settings • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 max-w-5xl">
+    <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Advanced Settings (Step 2/2)</h1>
+        <span class="text-sm text-slate-500 dark:text-slate-400">{{ record.display_name }} ({{ record.company_key }})</span>
+    </div>
+
+    <form method="post" class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm p-6 space-y-6">
+        {% csrf_token %}
+
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <h2 class="md:col-span-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Trading Day</h2>
+            <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                <input type="checkbox" name="trading_day_enabled" {% if form.trading_day_enabled.value %}checked{% endif %}>
+                Enable trading day
+            </label>
+            <div></div>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Start hour
+                <input type="number" min="0" max="23" name="trading_day_start_hour" value="{{ form.trading_day_start_hour.value|default:5 }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Start minute
+                <input type="number" min="0" max="59" name="trading_day_start_minute" value="{{ form.trading_day_start_minute.value|default:0 }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+        </section>
+
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <h2 class="md:col-span-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory</h2>
+            <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                <input type="checkbox" name="inventory_enabled" {% if form.inventory_enabled.value %}checked{% endif %}>
+                Enable inventory items
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                <input type="checkbox" name="allow_negative_inventory" {% if form.allow_negative_inventory.value %}checked{% endif %}>
+                Allow negative inventory
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Inventory start date
+                <input type="text" name="inventory_start_date" value="{{ form.inventory_start_date.value|default:'today' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Default qty on hand
+                <input type="number" name="default_qty_on_hand" value="{{ form.default_qty_on_hand.value|default:0 }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+        </section>
+
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <h2 class="md:col-span-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Tax and Mapping</h2>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Tax rate
+                <input type="number" step="0.0001" name="tax_rate" value="{{ form.tax_rate.value|default:'' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Tax code ID
+                <input type="text" name="tax_code_id" value="{{ form.tax_code_id.value|default:'' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Tax code name
+                <input type="text" name="tax_code_name" value="{{ form.tax_code_name.value|default:'' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Date format
+                <input type="text" name="date_format" value="{{ form.date_format.value|default:'%Y-%m-%d' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Receipt prefix
+                <input type="text" name="receipt_prefix" value="{{ form.receipt_prefix.value|default:'SR' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Receipt number format
+                <input type="text" name="receipt_number_format" value="{{ form.receipt_number_format.value|default:'date_tender_sequence' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400 md:col-span-2">
+                Group by (comma-separated)
+                <input type="text" name="group_by" value="{{ form.group_by.value|default:'date,tender' }}" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+        </section>
+
+        <div class="flex items-center justify-between">
+            <span class="text-xs text-slate-500 dark:text-slate-400">Saving this form updates DB config and syncs JSON atomically.</span>
+            <button type="submit" class="btn btn-primary">
+                Save Advanced Settings
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}

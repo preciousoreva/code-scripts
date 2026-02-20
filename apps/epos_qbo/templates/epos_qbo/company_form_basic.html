@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}New Company • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 max-w-4xl">
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Add Company (Step 1/2)</h1>
+    </div>
+
+    <form method="post" class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% csrf_token %}
+        {% for field in form %}
+        <label class="text-xs text-slate-600 dark:text-slate-400 {% if field.name == 'slack_webhook_env_key' %}md:col-span-2{% endif %}">
+            {{ field.label }}
+            {{ field.errors }}
+            <input
+                type="{% if field.name == 'realm_id' %}text{% elif field.name == 'company_key' %}text{% else %}text{% endif %}"
+                name="{{ field.name }}"
+                value="{{ field.value|default:'' }}"
+                class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100"
+            >
+            {% if field.help_text %}<span class="text-[11px] text-slate-400 dark:text-slate-500">{{ field.help_text }}</span>{% endif %}
+        </label>
+        {% endfor %}
+        <div class="md:col-span-2 flex justify-end">
+            <button type="submit" class="btn btn-primary">
+                Save and Continue
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}

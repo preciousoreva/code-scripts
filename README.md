@@ -72,6 +72,12 @@ The pipeline is designed to be run as a single command and take care of all phas
    python run_pipeline.py --company company_b --from-date 2025-01-29 --to-date 2025-01-31 --skip-download
    ```
 
+   **Single-company canary (faster inventory sync path):**
+
+   ```bash
+   python run_pipeline.py --company company_a --inventory-sync-mode upload_fast
+   ```
+
    > **Note:** `--skip-download` only works in range mode and uses existing split files from `uploads/range_raw/`. Useful when you already have CSV files and want to reprocess without re-downloading from EPOS.
 
 That's it! The pipeline will download, split, transform, upload, archive, and reconcile automatically. If `SLACK_WEBHOOK_URL` is configured, you'll receive notifications for pipeline start, success, failure events, and reconciliation results.
@@ -79,6 +85,36 @@ That's it! The pipeline will download, split, transform, upload, archive, and re
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
 >
 > **Note:** All examples use `python` for cross-platform compatibility. On macOS/Linux, use `python3` if `python` points to Python 2 or is missing.
+
+---
+
+## First-time setup (all in one)
+
+Use this sequence once per machine (or per new clone/venv) so both the pipeline and the OIAT Portal work, including **triggering runs from the dashboard**:
+
+1. **Create and activate a virtual environment** (recommended)
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # macOS/Linux
+   # .\.venv\Scripts\Activate.ps1   # Windows
+   ```
+
+2. **Install Python dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Install Playwright browser** (required for EPOS download; also needed if you trigger runs from the dashboard)
+   ```bash
+   playwright install chromium
+   ```
+
+4. **On Linux/WSL: install Playwright system dependencies** (avoids “libnspr4.so not found” and similar errors when Chromium starts)
+   ```bash
+   sudo playwright install-deps
+   ```
+
+5. **If you use the OIAT Portal:** run [Portal Setup](#portal-setup) (migrate, createsuperuser, sync companies, runserver).
 
 ---
 
@@ -121,6 +157,87 @@ python run_all_companies.py --from-date 2025-01-29 --to-date 2025-01-31 --skip-d
 **Design note:**
 
 This script is intentionally thin — all business logic remains in `run_pipeline.py`. This makes it suitable for cron / Task Scheduler / daily automation where you want a single entry point that processes all companies sequentially.
+
+Inventory sync mode is intentionally **not** configurable on `run_all_companies.py`; each company uses its own config/env value.
+
+### Scheduled runs via Task Scheduler
+
+Scheduled runs should call `run_all_companies.cmd` at the repo root. That script activates the virtual environment and runs the Django management command `run_scheduled_all_companies`, which acquires the global lock, writes logs to `%TEMP%\epos_to_qbo_automation\run_all_companies.log`, and creates/updates a **RunJob** record so the run is visible in the Django dashboard. Do not call `code_scripts.run_all_companies` directly from the scheduler; use:
+
+```batch
+python manage.py run_scheduled_all_companies --parallel 2
+```
+
+---
+
+## OIAT Portal (Django Dashboard)
+
+The OIAT Portal is a Django web application that provides a monitoring dashboard, run triggering, and company onboarding UI for the pipeline.
+
+> **Tracking:** Security, performance, and deployment notes (env vars, runserver defaults, migrations) are in [docs/PORTAL_IMPROVEMENTS_AND_TRACKING.md](docs/PORTAL_IMPROVEMENTS_AND_TRACKING.md).
+
+### Portal Setup
+
+Use the **same virtual environment** as the pipeline. If you have not already done so, run the [First-time setup (all in one)](#first-time-setup-all-in-one) steps (venv, `pip install -r requirements.txt`, `playwright install chromium`, and on Linux/WSL `sudo playwright install-deps`). That ensures the dashboard can trigger runs without missing dependencies (pandas, Playwright, Chromium system libs).
+
+Then run:
+
+```bash
+# 1. Apply database migrations
+python manage.py migrate
+
+# 2. Create an admin/operator user (required — there is no registration page)
+python manage.py createsuperuser
+
+# 3. Import existing company configs from JSON into the database
+python manage.py sync_companies_from_json
+
+# 4. (Optional) Backfill historical run artifacts from Uploaded/ metadata files
+python manage.py ingest_run_history --days 60
+
+# 5. Start the development server
+python manage.py runserver
+```
+
+Then open `http://127.0.0.1:8000/` in your browser and log in with the superuser credentials.
+
+- Template formatting rule: keep each Django variable tag on one line, for example `{{ value|default:"-" }}`. Do not wrap text inside `{{ ... }}` across lines.
+
+### Portal Permissions
+
+Two custom permissions control dashboard actions:
+
+- `can_trigger_runs` — allows triggering pipeline runs from the Runs page
+- `can_edit_companies` — allows creating/editing company configurations
+
+Assign these to users via Django Admin (`/admin/`). Superusers have all permissions by default.
+
+### Portal Management Commands
+
+| Command | Purpose |
+|---------|---------|
+| `python manage.py sync_companies_from_json` | Import company configs from JSON files into DB |
+| `python manage.py sync_companies_to_json` | Export DB company configs back to JSON files |
+| `python manage.py check_company_config_drift` | Detect mismatches between DB and JSON configs |
+| `python manage.py ingest_run_history --days 60` | Import historical run metadata from Uploaded/ |
+| `python manage.py reconcile_run_jobs` | Mark stuck running jobs as failed (reaper) |
+| `python manage.py run_scheduled_all_companies --parallel 2` | Run all companies under global lock and log to %TEMP%; creates RunJob for dashboard (used by Task Scheduler) |
+
+### Portal Dashboard Tuning (Environment Variables)
+
+These optional env vars tune portal defaults/thresholds without code edits:
+
+| Variable | Default | Purpose |
+|---------|---------|---------|
+| `OIAT_DASHBOARD_TIMEZONE` | `TIME_ZONE` (UTC) | Timezone for non-overview dashboard calendar-day displays (e.g. runs/receipts "today"). |
+| `OIAT_BUSINESS_TIMEZONE` | `Africa/Lagos` | Canonical business timezone used for overview target trading date and Quick Sync default date. |
+| `OIAT_BUSINESS_DAY_CUTOFF_HOUR` | `5` | Trading-day cutoff hour in business timezone. Before cutoff, overview target date rolls back an extra day. |
+| `OIAT_BUSINESS_DAY_CUTOFF_MINUTE` | `0` | Trading-day cutoff minute in business timezone. |
+| `OIAT_DASHBOARD_DEFAULT_PARALLEL` | `2` | Default worker count for all-company run trigger form |
+| `OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS` | `2` | Default stagger interval for all-company run trigger form |
+| `OIAT_DASHBOARD_STALE_HOURS_WARNING` | `48` | Hours since last run before company sync-stale warning appears |
+| `OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS` | `7` | Refresh-token warning threshold (in days) |
+| `OIAT_DASHBOARD_REAUTH_GUIDANCE` | Built-in guidance text | Operator-facing re-auth instructions shown in dashboard token health states |
 
 ---
 
@@ -685,11 +802,7 @@ Ensure these are ignored:
 To catch hardcoded secrets before committing, you can enable pre-commit hooks:
 
 ```bash
-# Install pre-commit (or use requirements-dev.txt)
-pip install -r requirements-dev.txt
-# OR: pip install pre-commit
-
-# Install the git hooks
+# Pre-commit is included in requirements.txt. Install the git hooks:
 pre-commit install
 
 # Run on all files (optional, to check existing code)
@@ -823,6 +936,7 @@ Add an optional `inventory` section to your company JSON config:
   "inventory": {
     "enable_inventory_items": false,
     "allow_negative_inventory": false,
+    "inventory_sync_mode": "inline",
     "inventory_start_date": "today",
     "default_qty_on_hand": 0,
     "product_mapping_file": "mappings/Product.Mapping.csv"
@@ -833,6 +947,7 @@ Add an optional `inventory` section to your company JSON config:
 **Fields:**
 - `enable_inventory_items`: Enable inventory item creation (default: `false`)
 - `allow_negative_inventory`: Allow negative inventory when posting SalesReceipts (default: `false`)
+- `inventory_sync_mode`: Inventory item sync path (default: `"inline"`). Allowed: `"inline"` or `"upload_fast"`
 - `inventory_start_date`: Start date for inventory tracking - use `"today"` or ISO date like `"2026-01-26"` (default: `"today"`)
 - `default_qty_on_hand`: Starting quantity for new inventory items (default: `0`)
 - `product_mapping_file`: Path to category mapping CSV (default: `"mappings/Product.Mapping.csv"`)
@@ -846,6 +961,7 @@ You can override inventory settings via environment variables:
 ```bash
 COMPANY_A_ENABLE_INVENTORY_ITEMS=true
 COMPANY_A_ALLOW_NEGATIVE_INVENTORY=true
+COMPANY_A_INVENTORY_SYNC_MODE=inline
 COMPANY_A_INVENTORY_START_DATE=2026-01-26  # or "today"
 COMPANY_A_DEFAULT_QTY_ON_HAND=0
 ```
@@ -899,6 +1015,26 @@ If negative inventory is not enabled in QBO, SalesReceipts will be rejected with
 - Accounts are mapped from category using `mappings/Product.Mapping.csv` (categories → Inventory/Revenue/COGS accounts)
 - When items are created or patched, UnitPrice and PurchaseCost are set/updated from CSV (UnitPrice: when missing/0 or differs by >0.01; PurchaseCost: when missing/0)
 - Unit prices are set from EPOS CSV `NET Sales` column (per-unit); purchase costs from `Cost Price` column (per-unit)
+
+`inventory_sync_mode` controls how existing items are handled:
+- `inline` (default): patch existing inventory items inline (pricing/tax/category) and allow wrong-type auto-fix when enabled.
+- `upload_fast`: skip expensive existing-item patch path during upload; still create missing inventory items as `Type=Inventory`.
+
+Use `upload_fast` to reduce upload critical-path time, then run maintenance sync to apply catalog drift updates.
+
+### Inventory Catalog Maintenance Sync
+
+When using `upload_fast`, run catalog maintenance separately to sync existing inventory item pricing/tax/category:
+
+```bash
+python -m code_scripts.sync_inventory_catalog --company company_a
+```
+
+Optional explicit CSV/date:
+
+```bash
+python -m code_scripts.sync_inventory_catalog --company company_a --csv outputs/Akponora_Ventures_Ltd/file.csv --target-date 2026-02-17
+```
 
 **When `enable_inventory_items` is `false` (default):**
 - Missing products are created as **Service items** (existing behavior)

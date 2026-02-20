@@ -1,0 +1,223 @@
+{% for company_data in companies_data %}
+<div class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm mb-4 overflow-hidden hover:shadow-md transition-shadow" x-data="{ expanded: false }">
+    <div class="p-6 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors" @click="expanded = !expanded">
+        <div class="flex items-center justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-3 mb-2">
+                    <h3 class="text-lg font-semibold text-slate-900 dark:text-slate-100 truncate">{{ company_data.company.display_name }}</h3>
+                    {% if company_data.status.color == 'emerald' %}
+                    <span class="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 text-xs font-medium rounded-full flex items-center gap-1.5 flex-shrink-0">
+                        <span class="w-2 h-2 bg-emerald-500 rounded-full"></span>
+                        {{ company_data.status.label }}
+                    </span>
+                    {% elif company_data.status.color == 'red' %}
+                    <span class="px-2 py-1 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 text-xs font-medium rounded-full flex items-center gap-1.5 flex-shrink-0">
+                        <span class="w-2 h-2 bg-red-500 rounded-full"></span>
+                        {{ company_data.status.label }}
+                    </span>
+                    {% else %}
+                    <span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium rounded-full flex items-center gap-1.5 flex-shrink-0">
+                        <span class="w-2 h-2 bg-amber-500 rounded-full"></span>
+                        {{ company_data.status.label }}
+                    </span>
+                    {% endif %}
+                </div>
+                <div class="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-400">
+                    <span class="flex items-center gap-1.5">
+                        <iconify-icon icon="solar:clock-circle-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
+                        {{ company_data.last_run_display }}
+                    </span>
+                    {% if company_data.run_activity %}
+                    <span class="flex items-center gap-1.5 {% if company_data.run_activity.color == 'blue' %}text-blue-600 dark:text-blue-400{% else %}text-amber-600 dark:text-amber-400{% endif %}">
+                        <iconify-icon icon="{{ company_data.run_activity.icon }}" width="16"></iconify-icon>
+                        {{ company_data.run_activity.label }}
+                    </span>
+                    {% endif %}
+                    <span class="flex items-center gap-1.5">
+                        <iconify-icon icon="solar:document-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
+                        <span title="Sales Receipts uploaded in the most recent successful sync; date is the business date of the data’s.">{% if company_data.latest_sync_target_date %}{{ company_data.records_latest_sync|default:0 }} Sales Receipts from latest sync ({{ company_data.latest_sync_target_date|date:"M j, Y" }}){% elif company_data.records_latest_sync %}{{ company_data.records_latest_sync }} Sales Receipts from latest sync{% else %}No sync yet{% endif %}{% if company_data.records_latest_sync == 0 and company_data.upload_skipped_latest_sync > 0 %} — {{ company_data.upload_skipped_latest_sync }} skipped (already in QBO){% endif %}</span>
+                    </span>
+                    <span class="flex items-center gap-1.5">
+                        <iconify-icon icon="solar:key-minimalistic-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
+                        Token: <span class="{% if company_data.token_info.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company_data.token_info.severity == 'warning' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">{{ company_data.token_info.display_label }}</span>
+                    </span>
+                </div>
+                {% if company_data.issues %}
+                <div class="mt-3 flex items-center gap-2 text-sm">
+                    {% if company_data.issues_highest_severity == 'critical' %}
+                    <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-red-500 dark:text-red-400 flex-shrink-0"></iconify-icon>
+                    <span class="text-red-700 dark:text-red-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
+                    {% elif company_data.issues_highest_severity == 'warning' %}
+                    <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-amber-500 dark:text-amber-400 flex-shrink-0"></iconify-icon>
+                    <span class="text-amber-700 dark:text-amber-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
+                    {% else %}
+                    <iconify-icon icon="solar:danger-triangle-linear" width="16" class="text-amber-500 dark:text-amber-400 flex-shrink-0"></iconify-icon>
+                    <span class="text-amber-700 dark:text-amber-400 font-medium">{{ company_data.issues|length }} issue{{ company_data.issues|length|pluralize }}</span>
+                    {% endif %}
+                </div>
+                {% endif %}
+                {% if company_data.health_reason_labels %}
+                <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">{{ company_data.health_reason_labels|join:", " }}</p>
+                {% endif %}
+                {% if company_data.status.level == 'unknown' and 'NO_ARTIFACT_METADATA' in company_data.health.reason_codes and perms.epos_qbo.can_trigger_runs %}
+                <div class="mt-3">
+                    <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="inline-flex" @click.stop>
+                        {% csrf_token %}
+                        <input type="hidden" name="scope" value="single_company">
+                        <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
+                        <input type="hidden" name="date_mode" value="yesterday">
+                        <button type="submit" class="text-xs font-medium px-2 py-1 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50">
+                            Trigger Sync
+                        </button>
+                    </form>
+                </div>
+                {% endif %}
+            </div>
+            <div class="flex items-center self-center gap-1 flex-shrink-0">
+                {% if perms.epos_qbo.can_trigger_runs %}
+                <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="inline" @click.stop>
+                    {% csrf_token %}
+                    <input type="hidden" name="scope" value="single_company">
+                    <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
+                    <input type="hidden" name="date_mode" value="yesterday">
+                    <button type="submit" class="btn-icon group inline-flex h-9 w-9 items-center justify-center" title="Trigger sync">
+                        <iconify-icon icon="solar:play-circle-linear" width="20" class="text-slate-400 dark:text-slate-500 group-hover:text-blue-600 dark:group-hover:text-blue-400"></iconify-icon>
+                    </button>
+                </form>
+                {% endif %}
+                <span class="inline-flex h-9 w-9 items-center justify-center text-slate-400 dark:text-slate-500">
+                    <iconify-icon :icon="expanded ? 'solar:alt-arrow-up-linear' : 'solar:alt-arrow-down-linear'" width="20"></iconify-icon>
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="expanded" x-cloak x-transition class="border-t border-slate-100 dark:border-slate-700">
+        {% if company_data.issues %}
+        <div class="p-6 bg-slate-50 dark:bg-slate-700/30">
+            <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3 flex items-center gap-2">
+                <iconify-icon icon="solar:danger-triangle-linear" width="16"></iconify-icon>
+                Active Issues
+            </h4>
+            <div class="space-y-2">
+                {% for issue in company_data.issues %}
+                <div class="flex items-start gap-2 p-3 bg-white dark:bg-slate-800 rounded-lg border {% if issue.severity == 'red' %}border-red-200 dark:border-red-800{% elif issue.severity == 'amber' %}border-amber-200 dark:border-amber-800{% else %}border-slate-200 dark:border-slate-600{% endif %}">
+                    <iconify-icon icon="{{ issue.icon }}" class="{% if issue.severity == 'red' %}text-red-500 dark:text-red-400{% elif issue.severity == 'amber' %}text-amber-500 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %} mt-0.5 flex-shrink-0" width="16"></iconify-icon>
+                    <div class="flex-1 min-w-0"><p class="text-sm text-slate-700 dark:text-slate-300">{{ issue.message }}</p></div>
+                    {% if issue.action == 'view_run' and company_data.latest_run %}
+                    <a href="{% url 'epos_qbo:run-detail' job_id=company_data.latest_run.id %}" class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium whitespace-nowrap">View →</a>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="p-6 {% if not company_data.issues %}bg-slate-50 dark:bg-slate-700/30{% endif %}">
+            <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4 flex items-center gap-2">
+                <iconify-icon icon="solar:settings-linear" width="16"></iconify-icon>
+                Configuration
+            </h4>
+            <div class="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                <div class="flex items-center justify-between">
+                    <span class="text-slate-500 dark:text-slate-400">Inventory:</span>
+                    <span class="text-slate-900 dark:text-slate-100 font-medium">
+                        {% if company_data.config_display.inventory_enabled %}<span class="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400"><iconify-icon icon="solar:check-circle-linear" width="14"></iconify-icon>Enabled</span>{% else %}<span class="text-slate-400 dark:text-slate-500">Disabled</span>{% endif %}
+                    </span>
+                </div>
+                <div class="flex items-center justify-between">
+                    <span class="text-slate-500 dark:text-slate-400">Tax rate:</span>
+                    <span class="text-slate-900 dark:text-slate-100 font-medium">{{ company_data.config_display.tax_rate|default:"—" }}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                    <span class="text-slate-500 dark:text-slate-400">Deposit Account:</span>
+                    <span class="text-slate-900 dark:text-slate-100 font-medium truncate ml-2" title="{{ company_data.config_display.deposit_account }}">{{ company_data.config_display.deposit_account|truncatechars:20 }}</span>
+                </div>
+                <div class="flex items-center justify-between col-span-2">
+                    <span class="text-slate-500 dark:text-slate-400">QBO Realm ID:</span>
+                    <span class="text-slate-600 dark:text-slate-400 font-mono text-xs">{{ company_data.config_display.realm_id }}</span>
+                </div>
+            </div>
+        </div>
+
+        {% if company_data.latest_run %}
+        <div class="p-6 border-t border-slate-100 dark:border-slate-700">
+            <div class="flex items-center justify-between mb-3">
+                <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+                    <iconify-icon icon="solar:history-linear" width="16"></iconify-icon>
+                    Latest Run
+                </h4>
+                <a href="{% url 'epos_qbo:runs' %}?company={{ company_data.company.company_key }}" class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium">View All Runs →</a>
+            </div>
+            <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-slate-600 dark:text-slate-300">Run #{{ company_data.latest_run.id|slice:":8" }}</span>
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium
+                        {% if company_data.latest_run.status == 'succeeded' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400
+                        {% elif company_data.latest_run.status == 'failed' %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400
+                        {% elif company_data.latest_run.status == 'running' %}bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400
+                        {% else %}bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-300{% endif %}">
+                        {{ company_data.latest_run.get_status_display }}
+                    </span>
+                </div>
+                <div class="text-xs text-slate-500 dark:text-slate-400">
+                    {{ company_data.latest_run.started_at|date:"M d, Y g:i A" }}
+                    {% if company_data.latest_run.target_date %} • Target: {{ company_data.latest_run.target_date|date:"Y-m-d" }}{% endif %}
+                </div>
+                {% if company_data.latest_run.status == 'succeeded' %}
+                <div class="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                    {{ company_data.records_latest_sync|default:0 }} Sales Receipts uploaded{% if company_data.upload_skipped_latest_sync|default:0 > 0 %}, {{ company_data.upload_skipped_latest_sync }} skipped (already in QBO){% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="p-6 bg-slate-50 dark:bg-slate-700/30 border-t border-slate-100 dark:border-slate-700 flex flex-wrap items-center gap-3">
+            <a href="{% url 'epos_qbo:company-detail' company_data.company.company_key %}" class="btn btn-secondary">
+                <iconify-icon icon="solar:eye-linear" width="16"></iconify-icon>
+                View Details
+            </a>
+            {% if perms.epos_qbo.can_trigger_runs %}
+            <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="inline">
+                {% csrf_token %}
+                <input type="hidden" name="scope" value="single_company">
+                <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
+                <input type="hidden" name="date_mode" value="yesterday">
+                <button type="submit" class="btn btn-primary">
+                    <iconify-icon icon="solar:play-circle-linear" width="16"></iconify-icon>
+                    Trigger Sync
+                </button>
+            </form>
+            {% endif %}
+            {% if company_data.token_info.expiring_soon %}
+            <span class="px-4 py-2 bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 rounded-lg text-sm font-medium flex items-center gap-2">
+                <iconify-icon icon="solar:refresh-linear" width="16"></iconify-icon>
+                Token expiring soon
+            </span>
+            {% endif %}
+            {% if perms.epos_qbo.can_edit_companies %}
+            <a href="{% url 'epos_qbo:company-advanced' company_data.company.company_key %}" class="btn btn-secondary">
+                <iconify-icon icon="solar:settings-linear" width="16"></iconify-icon>
+                Edit Config
+            </a>
+            <div class="ml-auto relative" x-data="{ open: false }">
+                <button type="button" @click="open = !open" class="btn-icon border border-transparent hover:border-slate-200 dark:hover:border-slate-600">
+                    <iconify-icon icon="solar:menu-dots-linear" width="20" class="text-slate-600 dark:text-slate-400"></iconify-icon>
+                </button>
+                <div x-show="open" x-cloak @click.outside="open = false" x-transition class="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-10">
+                    <form method="post" action="{% url 'epos_qbo:company-sync-json' company_data.company.company_key %}" class="block">
+                        {% csrf_token %}
+                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Force Sync to JSON</button>
+                    </form>
+                    <form method="post" action="{% url 'epos_qbo:company-toggle-active' company_data.company.company_key %}" class="block">
+                        {% csrf_token %}
+                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">{{ company_data.company.is_active|yesno:"Deactivate,Activate" }} Company</button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endfor %}

@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Logs • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6" data-active-runs='{{ active_run_ids_json|safe }}'>
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Logs</h1>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">View run events and activity logs</p>
+    </div>
+
+    <!-- Statistics Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">Runs (7d)</p>
+                    <p class="text-2xl font-semibold text-slate-900 dark:text-slate-100 mt-1">{{ stats.total_runs_7d }}</p>
+                </div>
+                <iconify-icon icon="solar:play-circle-linear" width="32" class="text-slate-300 dark:text-slate-500"></iconify-icon>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">Success Rate</p>
+                    <p class="text-2xl font-semibold text-emerald-600 dark:text-emerald-400 mt-1">{{ stats.success_rate_7d }}%</p>
+                </div>
+                <iconify-icon icon="solar:check-circle-linear" width="32" class="text-emerald-300 dark:text-emerald-500"></iconify-icon>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">Errors (7d)</p>
+                    <p class="text-2xl font-semibold text-red-600 dark:text-red-400 mt-1">{{ stats.error_count_7d }}</p>
+                </div>
+                <iconify-icon icon="solar:close-circle-linear" width="32" class="text-red-300 dark:text-red-500"></iconify-icon>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wider">Active Runs</p>
+                    <p class="text-2xl font-semibold text-blue-600 dark:text-blue-400 mt-1">{{ stats.active_runs }}</p>
+                </div>
+                <iconify-icon icon="solar:refresh-linear" width="32" class="text-blue-300 dark:text-blue-500"></iconify-icon>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-4">Filters</h2>
+        <form method="get" action="{% url 'epos_qbo:logs' %}" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Company
+                <select name="company" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                    <option value="">All Companies</option>
+                    {% for company in companies %}
+                    <option value="{{ company.company_key }}" {% if filters.company == company.company_key %}selected{% endif %}>
+                        {{ company.display_name }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                Status
+                <select name="status" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                    <option value="">All Statuses</option>
+                    <option value="queued" {% if filters.status == 'queued' %}selected{% endif %}>Queued</option>
+                    <option value="running" {% if filters.status == 'running' %}selected{% endif %}>Running</option>
+                    <option value="succeeded" {% if filters.status == 'succeeded' %}selected{% endif %}>Succeeded</option>
+                    <option value="failed" {% if filters.status == 'failed' %}selected{% endif %}>Failed</option>
+                    <option value="cancelled" {% if filters.status == 'cancelled' %}selected{% endif %}>Cancelled</option>
+                </select>
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                From Date
+                <input type="date" name="date_from" value="{{ filters.date_from }}"
+                    class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <label class="text-xs text-slate-600 dark:text-slate-400">
+                To Date
+                <input type="date" name="date_to" value="{{ filters.date_to }}"
+                    class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            </label>
+            <div class="md:col-span-4 flex gap-2">
+                <button type="submit" class="btn btn-primary">Apply Filters</button>
+                <a href="{% url 'epos_qbo:logs' %}" class="btn btn-secondary">Clear</a>
+            </div>
+        </form>
+    </section>
+
+    <!-- Log Events Timeline -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Event Timeline</h2>
+            <span class="text-xs text-slate-500 dark:text-slate-400">{{ log_events|length }} event{{ log_events|length|pluralize }}</span>
+        </div>
+        <div class="space-y-0 relative">
+            <div class="absolute left-1.5 top-1.5 bottom-1.5 w-px bg-slate-100 dark:bg-slate-600"></div>
+            {% for event in log_events %}
+            <div class="relative pl-6 pb-4 last:pb-0 group">
+                <div class="absolute left-0 top-1.5 w-3 h-3 rounded-full border-2 border-white dark:border-slate-800
+                    {% if event.level == 'success' %}
+                        bg-emerald-500
+                    {% elif event.level == 'warning' %}
+                        bg-amber-500
+                    {% elif event.level == 'error' %}
+                        bg-red-500
+                    {% else %}
+                        bg-blue-500
+                    {% endif %}
+                    ring-1 ring-slate-100 dark:ring-slate-600"></div>
+                <div class="flex items-start justify-between gap-4">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            <p class="text-xs text-slate-900 dark:text-slate-100 font-medium">{{ event.message }}</p>
+                            {% if event.duration %}
+                            <span class="text-[10px] text-slate-400 dark:text-slate-500 font-mono bg-slate-50 dark:bg-slate-700 px-1.5 py-0.5 rounded">
+                                {{ event.duration }}
+                            </span>
+                            {% endif %}
+                        </div>
+                        <div class="flex items-center gap-3 text-[10px] text-slate-500 dark:text-slate-400">
+                            <span class="font-mono">{{ event.timestamp|date:"Y-m-d H:i:s" }}</span>
+                            <span class="text-slate-300 dark:text-slate-500">•</span>
+                            <span>{{ event.company_name }}</span>
+                            <span class="text-slate-300 dark:text-slate-500">•</span>
+                            <span class="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-600 text-slate-600 dark:text-slate-200 font-medium">
+                                {{ event.job.status }}
+                            </span>
+                        </div>
+                        {% if event.job.failure_reason and event.level == 'error' %}
+                        <div class="mt-2 text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-md p-2">
+                            {{ event.job.failure_reason|truncatewords:30 }}
+                        </div>
+                        {% endif %}
+                    </div>
+                    <a href="{% url 'epos_qbo:run-detail' job_id=event.job.id %}"
+                        class="text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                        View Run →
+                    </a>
+                </div>
+            </div>
+            {% empty %}
+            <div class="pl-6 text-sm text-slate-500 dark:text-slate-400 py-4">
+                No log events found{% if filters.company or filters.status or filters.date_from or filters.date_to %}
+                matching the selected filters{% endif %}.
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+{% load static %}
+<script src="{% static 'js/logs.js' %}"></script>
+{% endblock %}

@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Companies • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+            <h1 class="text-2xl md:text-3xl font-bold text-slate-900 dark:text-slate-100">Companies</h1>
+            <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Manage company configurations and monitor sync status</p>
+        </div>
+        {% if perms.epos_qbo.can_edit_companies %}
+        <a href="{% url 'epos_qbo:company-new' %}" class="btn btn-primary">
+            <iconify-icon icon="solar:add-circle-linear" width="20"></iconify-icon>
+            Add Company
+        </a>
+        {% endif %}
+    </div>
+
+    <div id="companies-summary-cards" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Total</p>
+                    <p class="text-2xl font-bold text-slate-900 dark:text-slate-100 mt-1">{{ summary.total }}</p>
+                </div>
+                <div class="w-10 h-10 bg-slate-100 dark:bg-slate-700 rounded-lg flex items-center justify-center">
+                    <iconify-icon icon="solar:buildings-2-linear" width="24" class="text-slate-600 dark:text-slate-300"></iconify-icon>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Healthy</p>
+                    <p class="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">{{ summary.healthy }}</p>
+                </div>
+                <div class="w-10 h-10 bg-emerald-100 dark:bg-emerald-900/30 rounded-lg flex items-center justify-center">
+                    <iconify-icon icon="solar:check-circle-linear" width="24" class="text-emerald-600 dark:text-emerald-400"></iconify-icon>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Warnings</p>
+                    <p class="text-2xl font-bold {% if summary.warning %}text-amber-600 dark:text-amber-400{% else %}text-slate-400 dark:text-slate-500{% endif %} mt-1">
+                        {{ summary.warning }}
+                    </p>
+                </div>
+                <div class="w-10 h-10 rounded-lg flex items-center justify-center {% if summary.warning %}bg-amber-100 dark:bg-amber-900/30{% else %}bg-slate-100 dark:bg-slate-700{% endif %}">
+                    <iconify-icon
+                        icon="solar:danger-triangle-linear"
+                        width="24"
+                        class="{% if summary.warning %}text-amber-600 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %}"
+                    ></iconify-icon>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Critical</p>
+                    <p class="text-2xl font-bold {% if summary.critical %}text-red-600 dark:text-red-400{% else %}text-slate-400 dark:text-slate-500{% endif %} mt-1">
+                        {{ summary.critical }}
+                    </p>
+                </div>
+                <div class="w-10 h-10 rounded-lg flex items-center justify-center {% if summary.critical %}bg-red-100 dark:bg-red-900/30{% else %}bg-slate-100 dark:bg-slate-700{% endif %}">
+                    <iconify-icon
+                        icon="solar:close-circle-linear"
+                        width="24"
+                        class="{% if summary.critical %}text-red-600 dark:text-red-400{% else %}text-slate-500 dark:text-slate-400{% endif %}"
+                    ></iconify-icon>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+        <div class="flex flex-wrap items-center gap-4">
+            <div class="flex-1 min-w-[200px]">
+                <div class="relative">
+                    <iconify-icon icon="solar:magnifer-linear" width="20" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500"></iconify-icon>
+                    <input type="text" name="search" placeholder="Search companies..." value="{{ search }}"
+                           class="w-full pl-10 pr-4 py-2 border border-slate-200 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500 focus:border-transparent"
+                           hx-get="{% url 'epos_qbo:companies-list' %}" hx-trigger="keyup changed delay:300ms"
+                           hx-target="#company-list" hx-swap="innerHTML" hx-include="[name='filter'], [name='sort']">
+                </div>
+            </div>
+            <select name="filter" class="px-3 py-2 border border-slate-200 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500"
+                    hx-get="{% url 'epos_qbo:companies-list' %}" hx-trigger="change" hx-target="#company-list" hx-swap="innerHTML"
+                    hx-include="[name='search'], [name='sort']">
+                <option value="all" {% if filter_status == 'all' %}selected{% endif %}>All</option>
+                <option value="healthy" {% if filter_status == 'healthy' %}selected{% endif %}>Healthy</option>
+                <option value="warning" {% if filter_status == 'warning' %}selected{% endif %}>Warning</option>
+                <option value="critical" {% if filter_status == 'critical' %}selected{% endif %}>Critical</option>
+                <option value="unknown" {% if filter_status == 'unknown' %}selected{% endif %}>Unknown</option>
+            </select>
+            <select name="sort" class="px-3 py-2 border border-slate-200 dark:border-slate-600 rounded-lg text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500"
+                    hx-get="{% url 'epos_qbo:companies-list' %}" hx-trigger="change" hx-target="#company-list" hx-swap="innerHTML"
+                    hx-include="[name='search'], [name='filter']">
+                <option value="name" {% if sort_by == 'name' %}selected{% endif %}>Sort: Name</option>
+                <option value="last_run" {% if sort_by == 'last_run' %}selected{% endif %}>Sort: Last Run</option>
+                <option value="status" {% if sort_by == 'status' %}selected{% endif %}>Sort: Status</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="company-list">
+        {% include "components/company_cards.html" %}
+    </div>
+
+    {% if not companies_data %}
+    <div id="companies-empty-state" class="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-12 text-center">
+        <div class="w-16 h-16 mx-auto mb-4 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center">
+            <iconify-icon icon="solar:buildings-2-linear" width="32" class="text-slate-400 dark:text-slate-500"></iconify-icon>
+        </div>
+        {% if search or filter_status != 'all' %}
+        <h3 class="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-2">No companies found</h3>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">Try adjusting your search or filters</p>
+        <a href="{% url 'epos_qbo:companies-list' %}" class="btn btn-secondary btn-sm">Clear filters</a>
+        {% else %}
+        <h3 class="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-2">No companies configured</h3>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-6">Add your first company to get started</p>
+        {% if perms.epos_qbo.can_edit_companies %}
+        <a href="{% url 'epos_qbo:company-new' %}" class="btn btn-primary">
+            <iconify-icon icon="solar:add-circle-linear" width="20"></iconify-icon>
+            Add Company
+        </a>
+        {% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script src="{% static 'js/companies.js' %}"></script>
+{% endblock %}

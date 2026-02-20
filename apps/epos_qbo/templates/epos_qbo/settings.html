@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Settings • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Settings</h1>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Dashboard defaults and appearance</p>
+    </div>
+
+    <!-- Dashboard (read-only) -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">Dashboard</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">These values are read from environment variables. Change them in <code class="font-mono text-xs bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 rounded">.env</code> and restart the server to apply.</p>
+        <dl class="space-y-4">
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Timezone</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">Data in <strong>{{ dashboard_timezone_display }}</strong> ({{ dashboard_timezone_name }})</dd>
+                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_TIMEZONE={{ dashboard_timezone_name }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Default parallel workers</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ default_parallel }}</dd>
+                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_DEFAULT_PARALLEL={{ default_parallel }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Stagger (seconds)</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ default_stagger_seconds }}</dd>
+                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS={{ default_stagger_seconds }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Stale warning (hours)</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ stale_hours_warning }}</dd>
+                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_STALE_HOURS_WARNING={{ stale_hours_warning }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Refresh token expiring (days)</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ refresh_expiring_days }}</dd>
+                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS={{ refresh_expiring_days }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Reconcile warning threshold</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ reconcile_diff_warning }}</dd>
+                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_RECON_DIFF_WARNING={{ reconcile_diff_warning }}</dd>
+            </div>
+        </dl>
+    </section>
+</div>
+{% endblock %}

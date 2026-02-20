@@ -7,6 +7,7 @@ It downloads the appropriate binary for the platform (macOS/Windows/Linux) on fi
 """
 
 import os
+import shutil
 import sys
 import platform
 import subprocess
@@ -113,12 +114,21 @@ def download_gitleaks():
         # Clean up archive
         archive_path.unlink()
         
+        # GitHub release archives may extract to a subdirectory (e.g. gitleaks_8.18.0_linux_amd64/gitleaks)
+        if not binary_path.exists():
+            found = None
+            for path in BIN_DIR.rglob(binary_name):
+                if path.is_file():
+                    found = path
+                    break
+            if found is None:
+                raise RuntimeError(f"Binary not found after extraction: {binary_path}")
+            # Move to expected location for consistent lookup on next run
+            shutil.move(str(found), str(binary_path))
+        
         # Make binary executable on Unix-like systems
         if platform_name != "windows":
             binary_path.chmod(0o755)
-        
-        if not binary_path.exists():
-            raise RuntimeError(f"Binary not found after extraction: {binary_path}")
         
         print(f"✓ gitleaks downloaded to {binary_path}")
         return binary_path

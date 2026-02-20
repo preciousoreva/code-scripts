@@ -1,0 +1,31 @@
+<div class="space-y-6">
+    <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Live Log</h3>
+            <a href="{% url 'epos_qbo:runs' %}" class="text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300">View runs</a>
+        </div>
+        <div class="space-y-0 relative">
+            <div class="absolute left-1.5 top-1.5 bottom-1.5 w-px bg-slate-100 dark:bg-slate-700"></div>
+            {% for event in live_log %}
+            <div class="relative pl-6 pb-4 last:pb-0">
+                <div class="absolute left-0 top-1.5 w-3 h-3 rounded-full border-2 border-white dark:border-slate-800
+                    {% if event.level == 'success' %}
+                        bg-emerald-500
+                    {% elif event.level == 'warning' %}
+                        bg-amber-500
+                    {% elif event.level == 'error' %}
+                        bg-red-500
+                    {% else %}
+                        bg-slate-400
+                    {% endif %}
+                    ring-1 ring-slate-100 dark:ring-slate-600"></div>
+                <p class="text-xs text-slate-900 dark:text-slate-100"><span class="font-medium">{{ event.message }}</span></p>
+                <span class="text-[10px] text-slate-400 dark:text-slate-500 font-mono">{{ event.timestamp|date:"H:i:s" }}</span>
+            </div>
+            {% empty %}
+            <div class="pl-6 text-xs text-slate-500 dark:text-slate-400 py-2">No recent events.</div>
+            {% endfor %}
+        </div>
+    </div>
+
+</div>

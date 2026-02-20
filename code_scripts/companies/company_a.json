@@ -1,0 +1,50 @@
+{
+  "company_key": "company_a",
+  "display_name": "AKPONORA VENTURES LTD.",
+  "qbo": {
+    "realm_id": "9341455406194328",
+    "deposit_account": "100900 - Undeposited Funds",
+    "tax_mode": "vat_inclusive_7_5",
+    "tax_code_id": "2",
+    "tax_rate_id": "2",
+    "tax_rate": 0.075,
+    "default_item_id": "1",
+    "default_income_account_id": "1",
+    "default_department_id": "2"
+  },
+  "epos": {
+    "username_env_key": "EPOS_USERNAME_A",
+    "password_env_key": "EPOS_PASSWORD_A"
+  },
+  "transform": {
+    "group_by": ["date", "tender"],
+    "date_format": "%Y-%m-%d",
+    "receipt_prefix": "SR",
+    "receipt_number_format": "date_tender_sequence",
+    "location_mapping": {}
+  },
+  "output": {
+    "csv_prefix": "single_sales_receipts",
+    "metadata_file": "last_epos_transform.json",
+    "uploaded_docnumbers_file": "uploaded_docnumbers.json"
+  },
+  "slack": {
+    "webhook_url_env_key": "SLACK_WEBHOOK_URL_A"
+  },
+  "trading_day": {
+    "enabled": true,
+    "start_hour": 5,
+    "start_minute": 0
+  },
+  "inventory": {
+    "enable_inventory_items": true,
+    "allow_negative_inventory": true,
+    "inventory_start_date": "today",
+    "inv_start_date_floor": "2025-01-01",
+    "inventory_sync_mode": "upload_fast",
+    "default_qty_on_hand": 0,
+    "auto_fix_wrong_type_items": true,
+    "auto_fix_inv_start_date_blockers": true,
+    "use_item_hierarchy": true
+  }
+}

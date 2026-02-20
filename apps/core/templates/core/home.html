@@ -1,0 +1,30 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OIAT Portal</title>
+    <link rel="stylesheet" href="{% static 'css/tailwind.css' %}">
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-900">
+    <header class="max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
+        <h1 class="text-xl font-semibold">OIAT Solutions Portal</h1>
+        <div class="flex items-center gap-4 text-sm">
+            <span>{{ request.user.username }}</span>
+            <a class="text-blue-600 hover:underline" href="{% url 'logout' %}">Logout</a>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-6 pb-10">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {% for solution in solutions %}
+            <a href="{{ solution.href }}" class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm hover:shadow-md transition">
+                <h2 class="text-lg font-semibold">{{ solution.name }}</h2>
+                <p class="text-sm text-slate-600 mt-2">{{ solution.description }}</p>
+            </a>
+            {% endfor %}
+        </div>
+    </main>
+</body>
+</html>

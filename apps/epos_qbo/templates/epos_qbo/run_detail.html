@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block title %}Run {{ job.display_label }} • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6" data-run-id="{{ job.id }}" data-run-status="{{ job.status }}">
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Run {{ job.display_label }}</h1>
+        <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">ID:{{ job.id }}</p>
+    </div>
+
+    <section
+        class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+        <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Scope</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.scope }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Company</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.company_key|default:"all" }}</span></div>
+        <div>
+            <span class="text-slate-500 dark:text-slate-400 block">Exit Code</span>
+            <span class="font-medium text-slate-900 dark:text-slate-100">{{ job.exit_code|default:"-" }}</span>
+            {% if exit_code_info %}
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ exit_code_info.label }}: {{ exit_code_info.description }}</p>
+            {% endif %}
+        </div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Started</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.started_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Finished</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.finished_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
+        <div class="md:col-span-2 lg:col-span-2">
+            <span class="text-slate-500 dark:text-slate-400 block">Command</span>
+            <code class="font-mono text-xs break-all text-slate-900 dark:text-slate-200">{{ job.command_display|default:"-" }}</code>
+        </div>
+        {% if job.failure_reason %}
+        <div class="md:col-span-2 lg:col-span-4 text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-md p-3">
+            {{ job.failure_reason }}
+        </div>
+        {% endif %}
+        {% if run_attention_message %}
+        <div class="md:col-span-2 lg:col-span-4 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 flex items-start gap-3">
+            <iconify-icon icon="solar:danger-triangle-linear" class="text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" width="20"></iconify-icon>
+            <p class="text-sm text-amber-800 dark:text-amber-200">{{ run_attention_message }}</p>
+        </div>
+        {% endif %}
+        {% if job.exit_code != None and job.exit_code != 0 %}
+        <div class="md:col-span-2 lg:col-span-4 text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-600 rounded-md p-3">
+            <p class="text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-400 mb-2">Exit Code Guide</p>
+            <ul class="text-xs space-y-1">
+                {% for item in exit_code_reference %}
+                <li><span class="font-mono text-slate-900 dark:text-slate-100">{{ item.code }}</span>: {{ item.message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Live Log</h2>
+        <pre id="run-log"
+            class="bg-slate-900 text-slate-100 text-xs p-4 rounded-md h-80 overflow-auto whitespace-pre-wrap"></pre>
+    </section>
+
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Artifacts</h2>
+        {% if run_upload_summary_message %}
+        <div class="mb-3 rounded-md border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 px-4 py-3 text-sm text-slate-700 dark:text-slate-300">
+            {{ run_upload_summary_message }}
+        </div>
+        {% endif %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm min-w-max">
+                <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
+                    <tr>
+                        <th class="text-left px-3 py-2">Company</th>
+                        <th class="text-left px-3 py-2">Target Date</th>
+                        <th class="text-left px-3 py-2">Processed</th>
+                        <th class="text-left px-3 py-2">Rows Kept</th>
+                        <th class="text-left px-3 py-2" title="Sales Receipts considered for upload">QBO Attempted</th>
+                        <th class="text-left px-3 py-2" title="New Sales Receipts created in QuickBooks">QBO Uploaded</th>
+                        <th class="text-left px-3 py-2" title="Sales Receipts skipped (already existed in QuickBooks)">QBO Skipped</th>
+                        <th class="text-left px-3 py-2" title="Sales Receipts that failed to upload">QBO Failed</th>
+                        <th class="text-left px-3 py-2">Metadata Source</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-700 text-slate-900 dark:text-slate-200">
+                    {% for artifact in artifacts %}
+                    <tr>
+                        <td class="px-3 py-2">{{ artifact.company_key }}</td>
+                        <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.rows_kept|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.attempted|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.uploaded|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.skipped|default:"-" }}</td>
+                        <td class="px-3 py-2">{{ artifact.upload_stats_json.failed|default:"-" }}</td>
+                        <td class="px-3 py-2">
+                            {% if artifact.reliability_status == 'warning' %}
+                            <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Rolling (last_*)</span>
+                            {% else %}
+                            <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">Snapshot (dated)</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="9" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+{% load static %}
+<script src="{% static 'js/run_detail.js' %}"></script>
+<script>
+    (function () {
+        const logEl = document.getElementById("run-log");
+        if (!logEl) return;
+        let offset = 0;
+        const logsUrl = "{% url 'epos_qbo:run-logs' job_id=job.id %}";
+
+        const tick = () => {
+            fetch(`${logsUrl}?offset=${offset}`, { credentials: "same-origin" })
+                .then((res) => res.json())
+                .then((data) => {
+                    if (data.chunk) {
+                        logEl.textContent += data.chunk;
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+                    offset = data.next_offset;
+                    if (data.status === "running" || data.status === "queued") {
+                        setTimeout(tick, 1500);
+                    }
+                })
+                .catch(() => setTimeout(tick, 3000));
+        };
+        tick();
+    })();
+</script>
+{% endblock %}
