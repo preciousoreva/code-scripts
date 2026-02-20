@@ -160,13 +160,35 @@ This script is intentionally thin — all business logic remains in `run_pipelin
 
 Inventory sync mode is intentionally **not** configurable on `run_all_companies.py`; each company uses its own config/env value.
 
-### Scheduled runs via Task Scheduler
+### Scheduled runs via Docker scheduler service
 
-Scheduled runs should call `run_all_companies.cmd` at the repo root. That script activates the virtual environment and runs the Django management command `run_scheduled_all_companies`, which acquires the global lock, writes logs to `%TEMP%\epos_to_qbo_automation\run_all_companies.log`, and creates/updates a **RunJob** record so the run is visible in the Django dashboard. Do not call `code_scripts.run_all_companies` directly from the scheduler; use:
+Use the in-repo scheduler service (APScheduler) through Docker Compose. It executes this command on cron:
 
-```batch
+```bash
 python manage.py run_scheduled_all_companies --parallel 2
 ```
+
+This keeps scheduled runs visible in the Django dashboard (`RunJob`) while preserving all existing manual CLI workflows.
+
+```bash
+# Build scheduler image
+docker compose build scheduler
+
+# Start scheduler in background
+docker compose up -d scheduler
+
+# Tail scheduler logs
+docker compose logs -f scheduler
+```
+
+Scheduler env vars:
+
+- `SCHEDULE_CRON` (required): cron expression, for example `*/5 * * * *`
+- `SCHEDULE_TZ` (default `Africa/Lagos`)
+- `RUN_CMD` (default `python manage.py run_scheduled_all_companies --parallel 2`)
+- `SCHEDULER_LOG_LEVEL` (default `INFO`)
+- `SCHEDULER_MISFIRE_GRACE_SECONDS` (default `300`)
+- `OIAT_SCHEDULED_LOG_PATH` (optional): absolute path, or repo-relative path such as `code_scripts/logs/run_all_companies_scheduled.log`
 
 ---
 
@@ -221,7 +243,7 @@ Assign these to users via Django Admin (`/admin/`). Superusers have all permissi
 | `python manage.py check_company_config_drift` | Detect mismatches between DB and JSON configs |
 | `python manage.py ingest_run_history --days 60` | Import historical run metadata from Uploaded/ |
 | `python manage.py reconcile_run_jobs` | Mark stuck running jobs as failed (reaper) |
-| `python manage.py run_scheduled_all_companies --parallel 2` | Run all companies under global lock and log to %TEMP%; creates RunJob for dashboard (used by Task Scheduler) |
+| `python manage.py run_scheduled_all_companies --parallel 2` | Run all companies under global lock; creates RunJob for dashboard (used by scheduler service and can be run manually) |
 
 ### Portal Dashboard Tuning (Environment Variables)
 

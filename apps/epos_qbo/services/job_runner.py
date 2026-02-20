@@ -241,7 +241,9 @@ def dispatch_next_queued_job() -> tuple[RunJob | None, str]:
 def read_log_chunk(job: RunJob, offset: int, max_bytes: int = 65536) -> tuple[str, int]:
     if not job.log_file_path:
         return "", offset
-    path = Path(job.log_file_path)
+    path = Path(os.path.expandvars(job.log_file_path)).expanduser()
+    if not path.is_absolute():
+        path = BASE_DIR / path
     if not path.exists():
         return "", offset
     try:
