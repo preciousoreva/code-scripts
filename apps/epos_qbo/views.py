@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -11,7 +13,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.db.models import Q
-from django.http import Http404, JsonResponse
+from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -19,8 +21,24 @@ from django.views.decorators.http import require_GET, require_POST
 
 from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
 
-from .forms import CompanyAdvancedForm, CompanyBasicForm, RunTriggerForm
-from .models import CompanyConfigRecord, RunArtifact, RunJob
+from .forms import (
+    CompanyAdvancedForm,
+    CompanyBasicForm,
+    PortalSettingsForm,
+    RunScheduleForm,
+    RunTriggerForm,
+    UserPreferencesForm,
+)
+from .models import (
+    CompanyConfigRecord,
+    DashboardUserPreference,
+    PortalSettings,
+    RunArtifact,
+    RunJob,
+    RunSchedule,
+    RunScheduleEvent,
+)
+from . import portal_settings
 from .services.config_sync import (
     apply_advanced_payload,
     build_basic_payload,
@@ -29,7 +47,8 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
-from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display, get_dashboard_timezone_name
+from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
+from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
     get_business_day_cutoff,
     get_business_timezone_display,
@@ -83,53 +102,6 @@ EXIT_CODE_REFERENCE = [
     {"code": "126", "message": "Subprocess command invoked but not executable."},
     {"code": "127", "message": "Subprocess command/dependency not found."},
 ]
-
-
-def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = getattr(settings, name, default)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    if value < minimum:
-        return default
-    return value
-
-
-def _decimal_setting(name: str, default: Decimal, *, minimum: Decimal | None = None) -> Decimal:
-    raw = getattr(settings, name, default)
-    try:
-        value = Decimal(str(raw))
-    except Exception:
-        return default
-    if minimum is not None and value < minimum:
-        return default
-    return value
-
-
-def _dashboard_default_parallel() -> int:
-    return _int_setting("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
-
-
-def _dashboard_default_stagger_seconds() -> int:
-    return _int_setting("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
-
-
-def _dashboard_stale_hours_warning() -> int:
-    return _int_setting("OIAT_DASHBOARD_STALE_HOURS_WARNING", 48, minimum=1)
-
-
-def _dashboard_refresh_expiring_days() -> int:
-    return _int_setting("OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS", 7, minimum=1)
-
-
-def _dashboard_reconcile_diff_warning_threshold() -> Decimal:
-    return _decimal_setting("OIAT_DASHBOARD_RECON_DIFF_WARNING", Decimal("1.0"), minimum=Decimal("0"))
-
-
-def _reauth_guidance() -> str:
-    text = str(getattr(settings, "OIAT_DASHBOARD_REAUTH_GUIDANCE", DEFAULT_REAUTH_GUIDANCE)).strip()
-    return text or DEFAULT_REAUTH_GUIDANCE
 
 
 def _health_reason_labels(reason_codes: list[str] | None) -> list[str]:
@@ -206,6 +178,19 @@ def _normalize_revenue_period(value: str | None) -> str:
     return selected if selected in REVENUE_PERIOD_DAYS else "7d"
 
 
+def _get_user_overview_defaults(request):
+    """Return (default_company_key, default_revenue_period) for the current user."""
+    try:
+        pref = DashboardUserPreference.objects.get(user=request.user)
+    except DashboardUserPreference.DoesNotExist:
+        return (None, "7d")
+    period = (pref.default_revenue_period or "").strip() or "7d"
+    if period not in REVENUE_PERIOD_DAYS:
+        period = "7d"
+    company = (pref.default_overview_company_key or "").strip() or None
+    return (company, period)
+
+
 def _quick_sync_default_target_date(*, now: datetime | None = None) -> str:
     return get_target_trading_date(now=now).isoformat()
 
@@ -257,7 +242,7 @@ def _exit_code_info(exit_code: int | None) -> dict | None:
 
 
 def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = None) -> dict:
-    guidance = _reauth_guidance()
+    guidance = portal_settings.get_reauth_guidance()
     cfg = company.config_json or {}
     realm_id = (cfg.get("qbo") or {}).get("realm_id")
     if not realm_id:
@@ -389,7 +374,7 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
     if (
         refresh_expires_at is not None
         and refresh_seconds_left is not None
-        and refresh_seconds_left <= _dashboard_refresh_expiring_days() * 86400
+        and refresh_seconds_left <= portal_settings.get_refresh_expiring_days() * 86400
     ):
         days_left = _format_day_count(refresh_seconds_left)
         message = f"Refresh token expires in {days_left} day{'s' if days_left != 1 else ''}"
@@ -528,7 +513,7 @@ def _company_health_snapshot(
                 "run_activity": run_activity,
             }
         reconcile_diff = latest_artifact.reconcile_difference
-        if reconcile_diff is not None and abs(reconcile_diff) > _dashboard_reconcile_diff_warning_threshold():
+        if reconcile_diff is not None and abs(reconcile_diff) > portal_settings.get_reconcile_diff_warning():
             return {
                 "level": "warning",
                 "summary": "Reconciliation mismatch above threshold.",
@@ -681,7 +666,7 @@ def resolve_overview_target_date(company_keys: list[str] | None = None) -> dict:
     }
 
 
-def _overview_context(revenue_period: str = "7d") -> dict:
+def _overview_context(revenue_period: str = "7d", company_key: str | None = None) -> dict:
     now = timezone.now()
     target_date = None
     prev_target_date = None
@@ -693,8 +678,15 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     since_7d = now - timedelta(days=7)
     revenue_period = _normalize_revenue_period(revenue_period)
 
-    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
+    all_companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
+    selected_company = next(
+        (company for company in all_companies if company_key and company.company_key == company_key),
+        None,
+    )
+    companies = [selected_company] if selected_company else all_companies
     company_keys = [company.company_key for company in companies]
+    revenue_companies = all_companies
+    revenue_company_keys = [company.company_key for company in revenue_companies]
     date_resolution = resolve_overview_target_date(company_keys)
     has_overview_target_date = bool(date_resolution["has_data"])
     target_date = date_resolution["target_date"]
@@ -947,13 +939,13 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         revenue_dates = []
     revenue_labels = [d.strftime("%b %d") for d in revenue_dates]
     revenue_index_by_date = {date: idx for idx, date in enumerate(revenue_dates)}
-    revenue_series_map = {company.company_key: [0.0] * len(revenue_dates) for company in companies}
-    revenue_totals_by_company = {company.company_key: 0.0 for company in companies}
+    revenue_series_map = {company.company_key: [0.0] * len(revenue_dates) for company in revenue_companies}
+    revenue_totals_by_company = {company.company_key: 0.0 for company in revenue_companies}
     latest_reconciled_artifacts: dict[tuple[str, object], RunArtifact] = {}
 
-    if company_keys and revenue_days > 0 and revenue_start_date is not None and revenue_end_date is not None:
+    if revenue_company_keys and revenue_days > 0 and revenue_start_date is not None and revenue_end_date is not None:
         reconciled_qs = RunArtifact.objects.filter(
-            company_key__in=company_keys,
+            company_key__in=revenue_company_keys,
             target_date__isnull=False,
             target_date__gte=revenue_start_date,
             target_date__lte=revenue_end_date,
@@ -981,7 +973,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             "name": company.display_name,
             "data": [round(v, 2) for v in revenue_series_map.get(company.company_key, [])],
         }
-        for company in companies
+        for company in revenue_companies
     ]
     revenue_company_totals = sorted(
         [
@@ -990,7 +982,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "name": company.display_name,
                 "total": round(revenue_totals_by_company.get(company.company_key, 0.0), 2),
             }
-            for company in companies
+            for company in revenue_companies
             if revenue_totals_by_company.get(company.company_key, 0.0) > 0
         ],
         key=lambda item: item["total"],
@@ -1004,16 +996,21 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         "series": revenue_series if has_reconciled_revenue_data else [],
     }
 
+    # Latest completed run for overview freshness
+    latest_completed_run = (
+        RunJob.objects.filter(
+            status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
+            finished_at__isnull=False,
+        )
+        .order_by("-finished_at", "-created_at")
+        .first()
+    )
+    latest_run_id = str(latest_completed_run.id) if latest_completed_run else ""
+
     # Get active run IDs for polling
     active_runs = RunJob.objects.filter(
         status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
-
-    # Latest completed run id for overview freshness (terminal status + finished_at set)
-    latest_completed_run = RunJob.objects.filter(
-        status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
-    ).exclude(finished_at__isnull=True).order_by("-finished_at", "-created_at").first()
-    latest_run_id = str(latest_completed_run.id) if latest_completed_run else ""
 
     if has_overview_target_date and target_date_display and last_successful_sync_at:
         age_text = _format_relative_age((now - last_successful_sync_at).total_seconds())
@@ -1082,6 +1079,10 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             {"value": value, "label": label, "selected": value == revenue_period}
             for value, label in REVENUE_PERIOD_OPTIONS
         ],
+        "revenue_company_options": [
+            {"company_key": company.company_key, "name": company.display_name}
+            for company in revenue_companies
+        ],
         "revenue_labels": revenue_labels,
         "revenue_series": revenue_series,
         "revenue_start_date_display": revenue_start_date_display,
@@ -1093,14 +1094,22 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         "active_run_ids": [str(id) for id in active_runs],
         "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
         "latest_run_id": latest_run_id,
+        "overview_company_options": [{"value": "", "label": "All companies"}] + [{"value": c.company_key, "label": c.display_name} for c in all_companies],
+        "overview_selected_company": selected_company.company_key if selected_company else "",
     }
 
 
 @login_required
 def overview(request):
     _ensure_company_records()
-    revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
-    context = _overview_context(revenue_period)
+    revenue_period_param = request.GET.get("revenue_period")
+    company_param = request.GET.get("company")
+    if (revenue_period_param or "").strip() or (company_param or "").strip():
+        revenue_period = _normalize_revenue_period(revenue_period_param)
+        company_key = (company_param or "").strip() or None
+    else:
+        company_key, revenue_period = _get_user_overview_defaults(request)
+    context = _overview_context(revenue_period, company_key=company_key)
     context["quick_sync_target_date"] = _quick_sync_default_target_date()
     context["quick_sync_timezone"] = context.get("business_timezone_display", get_business_timezone_display())
     context["dashboard_timezone_display"] = get_dashboard_timezone_display()
@@ -1121,24 +1130,98 @@ def overview(request):
 @require_GET
 def overview_panels(request):
     _ensure_company_records()
-    revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
-    context = _overview_context(revenue_period)
-    return render(request, "components/overview_refresh.html", context)
+    revenue_period_param = request.GET.get("revenue_period")
+    company_param = request.GET.get("company")
+    if (revenue_period_param or "").strip() or (company_param or "").strip():
+        revenue_period = _normalize_revenue_period(revenue_period_param)
+        company_key = (company_param or "").strip() or None
+    else:
+        company_key, revenue_period = _get_user_overview_defaults(request)
+    context = _overview_context(revenue_period, company_key=company_key)
+    response = render(request, "components/overview_refresh.html", context)
+    response["Cache-Control"] = "no-store"
+    response["Pragma"] = "no-cache"
+    return response
+
+
+def _scheduler_env_for_display():
+    """Build read-only scheduler/env key-value dict for Settings page."""
+    return {
+        "OIAT_SCHEDULER_POLL_SECONDS": os.environ.get("OIAT_SCHEDULER_POLL_SECONDS", "(default 15)"),
+        "OIAT_SCHEDULER_ENABLE_ENV_FALLBACK": os.environ.get("OIAT_SCHEDULER_ENABLE_ENV_FALLBACK", "(default 1)"),
+        "OIAT_BUSINESS_TIMEZONE": getattr(settings, "OIAT_BUSINESS_TIMEZONE", os.environ.get("OIAT_BUSINESS_TIMEZONE", "(default Africa/Lagos)")),
+        "OIAT_BUSINESS_DAY_CUTOFF_HOUR": os.environ.get("OIAT_BUSINESS_DAY_CUTOFF_HOUR") or getattr(settings, "OIAT_BUSINESS_DAY_CUTOFF_HOUR", "(default 5)"),
+        "OIAT_BUSINESS_DAY_CUTOFF_MINUTE": os.environ.get("OIAT_BUSINESS_DAY_CUTOFF_MINUTE") or getattr(settings, "OIAT_BUSINESS_DAY_CUTOFF_MINUTE", "(default 0)"),
+        "SCHEDULE_CRON": os.environ.get("SCHEDULE_CRON", "(default 0 18 * * *)"),
+        "SCHEDULE_TZ": os.environ.get("SCHEDULE_TZ", "(default from OIAT_BUSINESS_TIMEZONE)"),
+    }
 
 
 @login_required
-@require_GET
 def settings_page(request):
-    """Settings page: dashboard tuning (read-only) and appearance (theme)."""
+    """Settings page: portal defaults (editable with can_manage_portal_settings), my preferences, dashboard and scheduler read-only."""
+    can_edit_portal = request.user.has_perm("epos_qbo.can_manage_portal_settings")
+    portal_form = None
+    user_prefs_form = None
+
+    active_companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    if request.method == "POST":
+        if request.POST.get("save_portal") and not can_edit_portal:
+            return HttpResponseForbidden("You do not have permission to edit portal defaults.")
+        if can_edit_portal and request.POST.get("save_portal"):
+            portal_form = PortalSettingsForm(request.POST)
+            if portal_form.is_valid():
+                portal_form.save(request.user)
+                messages.success(request, "Portal defaults saved.")
+                return redirect("epos_qbo:settings")
+        elif request.POST.get("save_preferences"):
+            user_prefs_form = UserPreferencesForm(request.POST)
+            user_prefs_form.fields["default_overview_company_key"].choices = [("", "All companies")] + [(c.company_key, c.display_name) for c in active_companies]
+            if user_prefs_form.is_valid():
+                user_prefs_form.save(request.user)
+                messages.success(request, "Your preferences saved.")
+                return redirect("epos_qbo:settings")
+
+    if portal_form is None:
+        row = PortalSettings.objects.filter(pk=1).first()
+        initial_portal = {}
+        if row:
+            initial_portal = {
+                "default_parallel": row.default_parallel,
+                "default_stagger_seconds": row.default_stagger_seconds,
+                "stale_hours_warning": row.stale_hours_warning,
+                "refresh_expiring_days": row.refresh_expiring_days,
+                "reconcile_diff_warning": row.reconcile_diff_warning,
+                "reauth_guidance": row.reauth_guidance or "",
+                "dashboard_timezone": row.dashboard_timezone or "",
+            }
+        portal_form = PortalSettingsForm(initial=initial_portal)
+
+    if user_prefs_form is None:
+        try:
+            pref = DashboardUserPreference.objects.get(user=request.user)
+            initial_prefs = {
+                "default_revenue_period": pref.default_revenue_period or "7d",
+                "default_overview_company_key": pref.default_overview_company_key or "",
+            }
+        except DashboardUserPreference.DoesNotExist:
+            initial_prefs = {"default_revenue_period": "7d", "default_overview_company_key": ""}
+        user_prefs_form = UserPreferencesForm(initial=initial_prefs)
+
+    user_prefs_form.fields["default_overview_company_key"].choices = [("", "All companies")] + [(c.company_key, c.display_name) for c in active_companies]
     context = {
+        "can_edit_portal": can_edit_portal,
+        "portal_form": portal_form,
+        "user_prefs_form": user_prefs_form,
         "dashboard_timezone_display": get_dashboard_timezone_display(),
-        "dashboard_timezone_name": get_dashboard_timezone_name(),
-        "default_parallel": _dashboard_default_parallel(),
-        "default_stagger_seconds": _dashboard_default_stagger_seconds(),
-        "stale_hours_warning": _dashboard_stale_hours_warning(),
-        "refresh_expiring_days": _dashboard_refresh_expiring_days(),
-        "reconcile_diff_warning": _dashboard_reconcile_diff_warning_threshold(),
-        "reauth_guidance": _reauth_guidance(),
+        "dashboard_timezone_name": portal_settings.get_dashboard_timezone_name(),
+        "default_parallel": portal_settings.get_default_parallel(),
+        "default_stagger_seconds": portal_settings.get_default_stagger_seconds(),
+        "stale_hours_warning": portal_settings.get_stale_hours_warning(),
+        "refresh_expiring_days": portal_settings.get_refresh_expiring_days(),
+        "reconcile_diff_warning": portal_settings.get_reconcile_diff_warning(),
+        "reauth_guidance": portal_settings.get_reauth_guidance(),
+        "scheduler_env": _scheduler_env_for_display(),
     }
     context.update(_nav_context())
     context.update(
@@ -1150,6 +1233,215 @@ def settings_page(request):
         )
     )
     return render(request, "epos_qbo/settings.html", context)
+
+
+def _schedule_default_timezone_name() -> str:
+    return str(
+        getattr(
+            settings,
+            "OIAT_BUSINESS_TIMEZONE",
+            getattr(settings, "TIME_ZONE", "UTC"),
+        )
+    )
+
+
+def _schedule_create_initial() -> dict:
+    return {
+        "enabled": True,
+        "scope": RunJob.SCOPE_ALL,
+        "cron_expr": "0 18 * * *",
+        "timezone_name": _schedule_default_timezone_name(),
+        "target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        "parallel": portal_settings.get_default_parallel(),
+        "stagger_seconds": portal_settings.get_default_stagger_seconds(),
+        "continue_on_failure": False,
+    }
+
+
+def _form_error_text(form: RunScheduleForm) -> str:
+    parts: list[str] = []
+    for field_name, errors in form.errors.items():
+        label = "General" if field_name == "__all__" else field_name
+        joined = ", ".join([str(err) for err in errors])
+        parts.append(f"{label}: {joined}")
+    return "; ".join(parts)
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_GET
+def schedules_page(request):
+    _ensure_company_records()
+    schedules = list(RunSchedule.objects.order_by("-is_system_managed", "name", "created_at"))
+    recent_events = list(
+        RunScheduleEvent.objects.select_related("schedule", "run_job", "run_job__scheduled_by")
+        .order_by("-created_at")[:60]
+    )
+    active_run_ids = list(
+        RunJob.objects.filter(
+            scheduled_by__isnull=False,
+            status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING],
+        )
+        .order_by("-created_at")
+        .values_list("id", flat=True)[:20]
+    )
+    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    context = {
+        "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
+        "schedules": schedules,
+        "recent_events": recent_events,
+        "companies": companies,
+        "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
+        "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        "single_scope": RunJob.SCOPE_SINGLE,
+        "all_scope": RunJob.SCOPE_ALL,
+        "scheduler_status": get_scheduler_status(),
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Schedules", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/schedules.html", context)
+
+
+@login_required
+@require_GET
+def schedule_status_api(request):
+    """Return current scheduler status as JSON for live polling on the Schedules page."""
+    status = get_scheduler_status()
+    return JsonResponse({
+        "running": status["running"],
+        "message": status.get("message", ""),
+    })
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_create(request):
+    form = RunScheduleForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        return redirect("epos_qbo:schedules")
+
+    schedule: RunSchedule = form.save(commit=False)
+    schedule.created_by = request.user
+    schedule.updated_by = request.user
+    if schedule.enabled:
+        try:
+            schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
+        except Exception as exc:
+            messages.error(request, f"Unable to compute next fire time: {exc}")
+            return redirect("epos_qbo:schedules")
+    else:
+        schedule.next_fire_at = None
+    schedule.save()
+    messages.success(request, f"Schedule created: {schedule.name}")
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_update(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be edited.")
+        return redirect("epos_qbo:schedules")
+
+    form = RunScheduleForm(request.POST, instance=schedule)
+    if not form.is_valid():
+        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        return redirect("epos_qbo:schedules")
+
+    schedule = form.save(commit=False)
+    schedule.updated_by = request.user
+    if schedule.enabled:
+        try:
+            schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
+        except Exception as exc:
+            messages.error(request, f"Unable to compute next fire time: {exc}")
+            return redirect("epos_qbo:schedules")
+    else:
+        schedule.next_fire_at = None
+    schedule.save()
+    messages.success(request, f"Schedule updated: {schedule.name}")
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_toggle(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be toggled manually.")
+        return redirect("epos_qbo:schedules")
+
+    schedule.enabled = not schedule.enabled
+    schedule.updated_by = request.user
+    if schedule.enabled:
+        try:
+            schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
+        except Exception as exc:
+            messages.error(request, f"Could not enable schedule: {exc}")
+            return redirect("epos_qbo:schedules")
+        message = f"Schedule enabled: {schedule.name}"
+    else:
+        schedule.next_fire_at = None
+        message = f"Schedule disabled: {schedule.name}"
+    schedule.save(update_fields=["enabled", "next_fire_at", "updated_by", "updated_at"])
+    messages.success(request, message)
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_run_now(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
+        messages.error(request, "Single-company schedule is missing company key.")
+        return redirect("epos_qbo:schedules")
+
+    job, result = enqueue_run_for_schedule(schedule, now=timezone.now(), source="manual")
+    if job is None and result == RunScheduleEvent.TYPE_SKIPPED_OVERLAP:
+        messages.warning(request, "Schedule already has a queued/running run. Manual enqueue skipped.")
+        return redirect("epos_qbo:schedules")
+    if job is None:
+        messages.error(request, "Could not queue run for schedule.")
+        return redirect("epos_qbo:schedules")
+
+    dispatch_next_queued_job()
+    job.refresh_from_db()
+    if job.status == RunJob.STATUS_RUNNING:
+        messages.success(request, f"Scheduled run started: {job.display_label}")
+        return redirect("epos_qbo:run-detail", job_id=job.id)
+
+    messages.success(request, f"Scheduled run queued: {job.display_label}")
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_delete(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be deleted.")
+        return redirect("epos_qbo:schedules")
+
+    schedule_name = schedule.name
+    schedule.delete()
+    messages.success(request, f"Schedule deleted: {schedule_name}")
+    return redirect("epos_qbo:schedules")
 
 
 def _reconciliation_label_for_job(job_id: str, artifacts_by_job: dict) -> str:
@@ -1185,8 +1477,8 @@ def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
 @login_required
 def runs_list(request):
     _ensure_company_records()
-    default_parallel = _dashboard_default_parallel()
-    default_stagger_seconds = _dashboard_default_stagger_seconds()
+    default_parallel = portal_settings.get_default_parallel()
+    default_stagger_seconds = portal_settings.get_default_stagger_seconds()
     jobs = list(RunJob.objects.order_by("-created_at")[:100])
     job_ids = [j.id for j in jobs]
     # Reconcile status per run (from artifacts)
@@ -1491,8 +1783,8 @@ def trigger_run(request):
         from_date=cleaned.get("from_date"),
         to_date=cleaned.get("to_date"),
         skip_download=bool(cleaned.get("skip_download")),
-        parallel=int(cleaned.get("parallel") or _dashboard_default_parallel()),
-        stagger_seconds=int(cleaned.get("stagger_seconds") or _dashboard_default_stagger_seconds()),
+        parallel=int(cleaned.get("parallel") or portal_settings.get_default_parallel()),
+        stagger_seconds=int(cleaned.get("stagger_seconds") or portal_settings.get_default_stagger_seconds()),
         continue_on_failure=bool(cleaned.get("continue_on_failure")),
         requested_by=request.user,
         status=RunJob.STATUS_QUEUED,
@@ -1848,7 +2140,7 @@ def _get_company_issues_for_list(
         })
     if latest_run and latest_run.started_at:
         hours_since = (timezone.now() - latest_run.started_at).total_seconds() / 3600
-        if hours_since > _dashboard_stale_hours_warning():
+        if hours_since > portal_settings.get_stale_hours_warning():
             issues.append({
                 "severity": "amber",
                 "icon": "solar:clock-circle-linear",
@@ -2267,3 +2559,154 @@ def company_toggle_active(request, company_key):
     msg = f"Company {company.display_name} has been {'activated' if company.is_active else 'deactivated'}."
     messages.success(request, msg)
     return redirect("epos_qbo:companies-list")
+
+
+# ---------------------------------------------------------------------------
+# Tools page
+# ---------------------------------------------------------------------------
+
+def _tools_venv_python() -> str:
+    """Resolve Python executable: prefer project venv, fall back to sys.executable."""
+    from oiat_portal.paths import BASE_DIR
+    venv_python = BASE_DIR / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+    return sys.executable
+
+
+def _tools_subprocess_env() -> dict:
+    """Build env dict for tool subprocesses (mirrors job_runner)."""
+    from oiat_portal.paths import BASE_DIR
+    env = dict(os.environ)
+    pythonpath = str(BASE_DIR)
+    env["PYTHONPATH"] = pythonpath + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
+TOOLS_QUERY_MAX_LENGTH = 2000
+TOOLS_SUBPROCESS_TIMEOUT = 30
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+def tools_page(request):
+    """Tools page: QBO query, verify mappings, and other script tools."""
+    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    company_options = [{"value": c.company_key, "label": c.display_name} for c in companies]
+    context = {
+        "company_options": company_options,
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Tools", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/tools.html", context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def tools_qbo_query_api(request):
+    """Execute a QBO SQL-like query via subprocess and return JSON."""
+    from oiat_portal.paths import BASE_DIR
+
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"success": False, "error": "Invalid JSON body."}, status=400)
+
+    company_key = (body.get("company_key") or "").strip()
+    query = (body.get("query") or "").strip()
+
+    if not company_key:
+        return JsonResponse({"success": False, "error": "Company is required."}, status=400)
+    if not CompanyConfigRecord.objects.filter(company_key=company_key, is_active=True).exists():
+        return JsonResponse({"success": False, "error": f"Unknown or inactive company: {company_key}"}, status=400)
+    if not query:
+        return JsonResponse({"success": False, "error": "Query is required."}, status=400)
+    if len(query) > TOOLS_QUERY_MAX_LENGTH:
+        return JsonResponse({"success": False, "error": f"Query exceeds {TOOLS_QUERY_MAX_LENGTH} character limit."}, status=400)
+
+    script_path = str(BASE_DIR / "code_scripts" / "scripts" / "qbo_queries" / "qbo_query.py")
+    cmd = [_tools_venv_python(), script_path, "--company", company_key, "query", query, "--raw-json"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=_tools_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=TOOLS_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return JsonResponse({"success": False, "error": "Query timed out (30s limit)."}, status=504)
+    except Exception as exc:
+        return JsonResponse({"success": False, "error": f"Failed to run query: {exc}"}, status=500)
+
+    if result.returncode != 0:
+        error_msg = (result.stderr or result.stdout or "Unknown error").strip()
+        if len(error_msg) > 1000:
+            error_msg = error_msg[:1000] + "..."
+        return JsonResponse({"success": False, "error": error_msg}, status=502)
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "Script returned non-JSON output.", "raw": result.stdout[:2000]}, status=502)
+
+    return JsonResponse({"success": True, "data": data})
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def tools_verify_mapping_api(request):
+    """Run verify-mapping-accounts script for a company and return JSON."""
+    from oiat_portal.paths import BASE_DIR
+
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"success": False, "error": "Invalid JSON body."}, status=400)
+
+    company_key = (body.get("company_key") or "").strip()
+    if not company_key:
+        return JsonResponse({"success": False, "error": "Company is required."}, status=400)
+    if not CompanyConfigRecord.objects.filter(company_key=company_key, is_active=True).exists():
+        return JsonResponse({"success": False, "error": f"Unknown or inactive company: {company_key}"}, status=400)
+
+    script_path = str(BASE_DIR / "code_scripts" / "scripts" / "qbo_queries" / "qbo_verify_mapping_accounts.py")
+    cmd = [_tools_venv_python(), script_path, "--company", company_key]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=_tools_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return JsonResponse({"success": False, "error": "Verification timed out (60s limit)."}, status=504)
+    except Exception as exc:
+        return JsonResponse({"success": False, "error": f"Failed to run verification: {exc}"}, status=500)
+
+    output = (result.stdout or "").strip()
+    error_output = (result.stderr or "").strip()
+
+    if result.returncode != 0:
+        combined = (output + "\n" + error_output).strip()
+        if len(combined) > 2000:
+            combined = combined[:2000] + "..."
+        return JsonResponse({"success": False, "error": combined or "Verification failed."}, status=502)
+
+    return JsonResponse({"success": True, "output": output})

@@ -1,12 +1,12 @@
 <div x-data="{ navOpen: false }">
     <header class="min-h-16 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-700 sticky top-0 z-40 px-4 md:px-8 flex items-center justify-between gap-4">
         <div class="flex items-center gap-3 min-w-0">
-            <!-- Mobile menu button -->
+            <!-- Mobile menu button (square ratio to match theme toggle and other icon buttons) -->
             <button type="button"
-                    class="md:hidden btn-icon text-slate-600 dark:text-slate-300"
+                    class="md:hidden btn-icon inline-flex items-center justify-center w-9 h-9 text-slate-600 dark:text-slate-300"
                     aria-label="Open navigation"
                     @click="navOpen = true">
-                <iconify-icon icon="solar:hamburger-menu-linear" width="20"></iconify-icon>
+                <iconify-icon icon="solar:hamburger-menu-linear" width="20" height="20"></iconify-icon>
             </button>
 
             <div class="flex items-center gap-4 min-w-0">
@@ -136,14 +136,19 @@
                     Runs
                 </a>
 
-                <a href="{% url 'core-coming-soon' feature='tools' %}"
-                    class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
+                <a href="{% url 'epos_qbo:schedules' %}"
+                    class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'schedules' %}bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 border border-slate-100 dark:border-slate-600{% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 transition-colors{% endif %}">
+                    <iconify-icon icon="solar:calendar-linear"
+                        class="{% if request.resolver_match.url_name == 'schedules' %}text-slate-500 dark:text-slate-400{% else %}text-slate-400 dark:text-slate-500 group-hover:text-slate-900 dark:group-hover:text-slate-100{% endif %} transition-colors"
+                        width="20"></iconify-icon>
+                    Schedules
+                </a>
+
+                <a href="{% url 'epos_qbo:tools' %}"
+                    class="group flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md {% if request.resolver_match.url_name == 'tools' or request.resolver_match.url_name == 'tools-qbo-query' or request.resolver_match.url_name == 'tools-verify-mapping' %}bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 border border-slate-100 dark:border-slate-600{% else %}text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100 transition-colors{% endif %}">
                     <iconify-icon icon="solar:programming-linear"
-                        class="text-slate-400 dark:text-slate-500 group-hover:text-slate-900 dark:group-hover:text-slate-100 transition-colors" width="20"></iconify-icon>
+                        class="{% if request.resolver_match.url_name == 'tools' or request.resolver_match.url_name == 'tools-qbo-query' or request.resolver_match.url_name == 'tools-verify-mapping' %}text-slate-500 dark:text-slate-400{% else %}text-slate-400 dark:text-slate-500 group-hover:text-slate-900 dark:group-hover:text-slate-100{% endif %} transition-colors" width="20"></iconify-icon>
                     Tools
-                    <span
-                        class="ml-auto inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.04em] leading-none text-slate-500 dark:text-slate-400">Coming
-                        Soon</span>
                 </a>
 
                 <a href="{% url 'epos_qbo:logs' %}"

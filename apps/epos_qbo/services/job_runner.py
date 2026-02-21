@@ -9,36 +9,17 @@ import time
 from pathlib import Path
 from shlex import join as shlex_join
 
-from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
 from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 
-from ..models import RunJob, RunLock
+from .. import portal_settings
+from ..models import RunJob, RunLock, RunScheduleEvent
 from .artifact_ingestion import attach_recent_artifacts_to_job
 from .locking import release_run_lock
 
 logger = logging.getLogger(__name__)
-
-
-def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = getattr(settings, name, default)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    if value < minimum:
-        return default
-    return value
-
-
-def _default_parallel() -> int:
-    return _int_setting("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
-
-
-def _default_stagger_seconds() -> int:
-    return _int_setting("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
 
 
 def build_command(cleaned: dict) -> list[str]:
@@ -59,8 +40,8 @@ def build_command(cleaned: dict) -> list[str]:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_pipeline.py"), "--company", cleaned["company_key"]]
     else:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_all_companies.py")]
-        cmd.extend(["--parallel", str(int(cleaned.get("parallel") or _default_parallel()))])
-        cmd.extend(["--stagger-seconds", str(int(cleaned.get("stagger_seconds") or _default_stagger_seconds()))])
+        cmd.extend(["--parallel", str(int(cleaned.get("parallel") or portal_settings.get_default_parallel()))])
+        cmd.extend(["--stagger-seconds", str(int(cleaned.get("stagger_seconds") or portal_settings.get_default_stagger_seconds()))])
         if cleaned.get("continue_on_failure"):
             cmd.append("--continue-on-failure")
 
@@ -128,6 +109,32 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
             if exit_code != 0 and not job.failure_reason:
                 job.failure_reason = f"Subprocess exited with code {exit_code}"
             job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
+            if job.scheduled_by_id:
+                schedule = job.scheduled_by
+                event_type = (
+                    RunScheduleEvent.TYPE_RUN_SUCCEEDED
+                    if job.status == RunJob.STATUS_SUCCEEDED
+                    else RunScheduleEvent.TYPE_RUN_FAILED
+                )
+                message = (
+                    f"Run completed with status={job.status} exit_code={exit_code}"
+                    if exit_code is not None
+                    else f"Run completed with status={job.status}"
+                )
+                payload_json = {
+                    "status": job.status,
+                    "exit_code": exit_code,
+                }
+                if schedule is not None:
+                    payload_json["schedule_id"] = str(schedule.id)
+                    payload_json["schedule_name"] = schedule.name
+                RunScheduleEvent.objects.create(
+                    schedule=schedule,
+                    run_job=job,
+                    event_type=event_type,
+                    message=message,
+                    payload_json=payload_json,
+                )
             logger.info(
                 "RunJob %s finalized: status=%s exit_code=%s attached_artifacts=%s attach_elapsed_ms=%s",
                 job_id,
@@ -244,7 +251,9 @@ def dispatch_next_queued_job() -> tuple[RunJob | None, str]:
 def read_log_chunk(job: RunJob, offset: int, max_bytes: int = 65536) -> tuple[str, int]:
     if not job.log_file_path:
         return "", offset
-    path = Path(job.log_file_path)
+    path = Path(os.path.expandvars(job.log_file_path)).expanduser()
+    if not path.is_absolute():
+        path = BASE_DIR / path
     if not path.exists():
         return "", offset
     try:

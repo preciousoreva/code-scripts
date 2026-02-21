@@ -201,20 +201,25 @@
                 <iconify-icon icon="solar:settings-linear" width="16"></iconify-icon>
                 Edit Config
             </a>
-            <div class="ml-auto relative" x-data="{ open: false }">
-                <button type="button" @click="open = !open" class="btn-icon border border-transparent hover:border-slate-200 dark:hover:border-slate-600">
-                    <iconify-icon icon="solar:menu-dots-linear" width="20" class="text-slate-600 dark:text-slate-400"></iconify-icon>
+            <div class="ml-auto" x-data="{ open: false, menuX: 0, menuY: 0 }"
+                 @click="open = !open; if (open) { $nextTick(() => { const r = $refs.companyMenuBtn.getBoundingClientRect(); menuX = r.right - 192; menuY = r.bottom + 4 }) }">
+                <button type="button" x-ref="companyMenuBtn" class="flex items-center justify-center w-8 h-8 rounded-lg border border-slate-300 dark:border-slate-500 bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500 shrink-0">
+                    <iconify-icon icon="solar:menu-dots-linear" width="18" class="text-slate-600 dark:text-slate-200"></iconify-icon>
                 </button>
-                <div x-show="open" x-cloak @click.outside="open = false" x-transition class="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-10">
-                    <form method="post" action="{% url 'epos_qbo:company-sync-json' company_data.company.company_key %}" class="block">
-                        {% csrf_token %}
-                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Force Sync to JSON</button>
-                    </form>
-                    <form method="post" action="{% url 'epos_qbo:company-toggle-active' company_data.company.company_key %}" class="block">
-                        {% csrf_token %}
-                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">{{ company_data.company.is_active|yesno:"Deactivate,Activate" }} Company</button>
-                    </form>
-                </div>
+                <template x-teleport="body">
+                    <div x-show="open" x-cloak @click.outside="open = false" x-transition
+                         :style="'position: fixed; top: ' + menuY + 'px; left: ' + menuX + 'px;'"
+                         class="w-48 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-[100]">
+                        <form method="post" action="{% url 'epos_qbo:company-sync-json' company_data.company.company_key %}" class="block">
+                            {% csrf_token %}
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Force Sync to JSON</button>
+                        </form>
+                        <form method="post" action="{% url 'epos_qbo:company-toggle-active' company_data.company.company_key %}" class="block">
+                            {% csrf_token %}
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">{{ company_data.company.is_active|yesno:"Deactivate,Activate" }} Company</button>
+                        </form>
+                    </div>
+                </template>
             </div>
             {% endif %}
         </div>

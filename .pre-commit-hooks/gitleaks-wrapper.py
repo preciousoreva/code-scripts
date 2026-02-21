@@ -17,16 +17,12 @@ import zipfile
 import tarfile
 from pathlib import Path
 
-# Try to import certifi for SSL certificate verification
 try:
     import certifi
 except ImportError:
     certifi = None
 
-# Gitleaks version to use
 GITLEAKS_VERSION = "v8.18.0"
-
-# Directory to store the gitleaks binary (gitignored)
 HOOKS_DIR = Path(__file__).resolve().parent
 BIN_DIR = HOOKS_DIR / ".bin"
 BIN_DIR.mkdir(exist_ok=True)
@@ -36,11 +32,8 @@ def get_platform_info():
     """Determine platform and architecture for gitleaks binary."""
     system = platform.system().lower()
     machine = platform.machine().lower()
-    
-    # Map platform to gitleaks release naming
-    # GitHub releases use format: gitleaks_8.18.0_darwin_arm64.tar.gz (version without 'v' prefix)
-    version_num = GITLEAKS_VERSION.lstrip('v')  # Remove 'v' prefix for filename
-    
+    version_num = GITLEAKS_VERSION.lstrip('v')
+
     if system == "darwin":
         if machine in ("arm64", "aarch64"):
             return "darwin", "arm64", "gitleaks_{}_darwin_arm64.tar.gz".format(version_num)
@@ -65,30 +58,23 @@ def download_gitleaks():
     platform_name, arch, filename = get_platform_info()
     binary_name = "gitleaks.exe" if platform_name == "windows" else "gitleaks"
     binary_path = BIN_DIR / binary_name
-    
-    # If binary already exists, use it
     if binary_path.exists():
         return binary_path
-    
-    # Download URL
+
     url = f"https://github.com/gitleaks/gitleaks/releases/download/{GITLEAKS_VERSION}/{filename}"
     
     print(f"Downloading gitleaks {GITLEAKS_VERSION} for {platform_name}/{arch}...")
     print(f"URL: {url}")
-    
-    # Create SSL context with certifi certificates if available
+
     ssl_context = ssl.create_default_context()
     if certifi:
         try:
             ssl_context.load_verify_locations(certifi.where())
         except Exception:
-            # If certifi fails, use default context (may fail on some systems)
             pass
-    
-    # Download the release archive
+
     archive_path = BIN_DIR / filename
     try:
-        # Use urlopen with SSL context for certificate verification
         with urllib.request.urlopen(url, context=ssl_context) as response:
             with open(archive_path, 'wb') as out_file:
                 out_file.write(response.read())
@@ -99,8 +85,7 @@ def download_gitleaks():
             print("  python3 -m pip install --upgrade certifi", file=sys.stderr)
             print("  Or on macOS: /Applications/Python\\ 3.*/Install\\ Certificates.command", file=sys.stderr)
         sys.exit(1)
-    
-    # Extract the archive
+
     try:
         if filename.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
@@ -110,11 +95,9 @@ def download_gitleaks():
                 tar_ref.extractall(BIN_DIR)
         else:
             raise RuntimeError(f"Unknown archive format: {filename}")
-        
-        # Clean up archive
+
         archive_path.unlink()
-        
-        # GitHub release archives may extract to a subdirectory (e.g. gitleaks_8.18.0_linux_amd64/gitleaks)
+        # GitHub release archives may extract to a subdirectory
         if not binary_path.exists():
             found = None
             for path in BIN_DIR.rglob(binary_name):
@@ -123,10 +106,8 @@ def download_gitleaks():
                     break
             if found is None:
                 raise RuntimeError(f"Binary not found after extraction: {binary_path}")
-            # Move to expected location for consistent lookup on next run
             shutil.move(str(found), str(binary_path))
-        
-        # Make binary executable on Unix-like systems
+
         if platform_name != "windows":
             binary_path.chmod(0o755)
         
@@ -141,10 +122,7 @@ def download_gitleaks():
 def main():
     """Run gitleaks on staged files."""
     try:
-        # Download gitleaks if needed
         gitleaks_bin = download_gitleaks()
-        
-        # Run gitleaks protect on staged files
         cmd = [
             str(gitleaks_bin),
             "protect",

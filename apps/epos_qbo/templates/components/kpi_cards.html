@@ -1,15 +1,15 @@
 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
     <!-- System Health Card -->
     <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col justify-between min-h-[7.5rem] relative overflow-hidden group transition-colors {% if kpis.system_health_color == 'red' %}hover:border-red-200 dark:hover:border-red-800{% elif kpis.system_health_color == 'amber' %}hover:border-amber-200 dark:hover:border-amber-800{% else %}hover:border-emerald-200 dark:hover:border-emerald-800{% endif %}">
-        <div class="flex justify-between items-start">
+        <div class="flex justify-between items-center">
             <span class="text-sm font-medium text-slate-500 dark:text-slate-400">System Health</span>
-            <div class="p-1.5 rounded-md {% if kpis.system_health_color == 'red' %}bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400{% elif kpis.system_health_color == 'amber' %}bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400{% else %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400{% endif %}">
+            <div class="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 {% if kpis.system_health_color == 'red' %}bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400{% elif kpis.system_health_color == 'amber' %}bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400{% else %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400{% endif %}">
                 {% if kpis.system_health_severity == "critical" %}
-                <iconify-icon icon="solar:close-circle-linear" width="20"></iconify-icon>
+                <iconify-icon icon="solar:close-circle-linear" width="16"></iconify-icon>
                 {% elif kpis.system_health_severity == "warning" %}
-                <iconify-icon icon="solar:danger-triangle-linear" width="20"></iconify-icon>
+                <iconify-icon icon="solar:danger-triangle-linear" width="16"></iconify-icon>
                 {% else %}
-                <iconify-icon icon="solar:shield-check-linear" width="20"></iconify-icon>
+                <iconify-icon icon="solar:shield-check-linear" width="16"></iconify-icon>
                 {% endif %}
             </div>
         </div>
@@ -28,10 +28,10 @@
 
     <!-- Run Success Card -->
     <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col justify-between min-h-[7.5rem] relative overflow-hidden group hover:border-blue-200 dark:hover:border-blue-800 transition-colors">
-        <div class="flex justify-between items-start">
+        <div class="flex justify-between items-center">
             <span class="text-sm font-medium text-slate-500 dark:text-slate-400" title="Run outcomes for the target trading date. Count uses runs linked to artifacts for that target date.">Run Success</span>
-            <div class="p-1.5 rounded-md bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
-                <iconify-icon icon="solar:checklist-minimalistic-linear" width="20"></iconify-icon>
+            <div class="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
+                <iconify-icon icon="solar:checklist-minimalistic-linear" width="16"></iconify-icon>
             </div>
         </div>
         <div>
@@ -43,10 +43,10 @@
 
     <!-- Avg Runtime Card -->
     <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col justify-between min-h-[7.5rem] relative overflow-hidden group hover:border-indigo-200 dark:hover:border-indigo-800 transition-colors">
-        <div class="flex justify-between items-start">
+        <div class="flex justify-between items-center">
             <span class="text-sm font-medium text-slate-500 dark:text-slate-400" title="Average duration of runs that uploaded Sales Receipts for this data target date vs previous target date (excludes skip-only runs for consistent comparison).">Avg Runtime</span>
-            <div class="p-1.5 rounded-md bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400">
-                <iconify-icon icon="solar:stopwatch-linear" width="20"></iconify-icon>
+            <div class="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400">
+                <iconify-icon icon="solar:stopwatch-linear" width="16"></iconify-icon>
             </div>
         </div>
         <div>
@@ -60,10 +60,10 @@
 
     <!-- Sales Synced Card -->
     <div class="bg-white dark:bg-slate-800 p-5 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col justify-between min-h-[7.5rem] relative overflow-hidden group hover:border-emerald-200 dark:hover:border-emerald-800 transition-colors">
-        <div class="flex justify-between items-start">
+        <div class="flex justify-between items-center">
             <span class="text-sm font-medium text-slate-500 dark:text-slate-400" title="Reconciled total for this data target date vs previous target date.">Sales Synced</span>
-            <div class="p-1.5 rounded-md bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400">
-                <iconify-icon icon="solar:wallet-money-linear" width="20"></iconify-icon>
+            <div class="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400">
+                <iconify-icon icon="solar:wallet-money-linear" width="16"></iconify-icon>
             </div>
         </div>
         <div>

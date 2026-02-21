@@ -1,3 +1,6 @@
-<div id="metric-basis-line-data" style="display: none;" data-latest-run-id="{{ latest_run_id|default:'' }}">{{ metric_basis_line|default:"" }}</div>
+<div data-latest-run-id="{{ latest_run_id|default:'' }}">
+<div id="metric-basis-line-data" style="display: none;">{{ metric_basis_line|default:"" }}</div>
 {% include "components/kpi_cards.html" %}
 {% include "components/overview_panels.html" %}
+</div>
+

@@ -183,6 +183,12 @@
             background-color: rgb(37 99 235);
         }
 
+        .btn-primary:disabled,
+        .btn-primary[disabled] {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
         .btn-secondary {
             background-color: white;
             border: 1px solid rgb(226 232 240);
@@ -201,6 +207,35 @@
 
         .dark .btn-secondary:hover {
             background-color: rgb(71 85 105);
+        }
+
+        .btn-danger {
+            background-color: rgb(254 242 242);
+            border: 1px solid rgb(254 202 202);
+            color: rgb(185 28 28);
+        }
+
+        .dark .btn-danger {
+            background-color: rgba(153, 27, 27, 0.25);
+            border-color: rgba(252, 165, 165, 0.35);
+            color: rgb(254 202 202);
+        }
+
+        .btn-danger:hover {
+            background-color: rgb(254 226 226);
+            border-color: rgb(252 165 165);
+            color: rgb(153 27 27);
+        }
+
+        .dark .btn-danger:hover {
+            background-color: rgba(185, 28, 28, 0.35);
+            border-color: rgba(252, 165, 165, 0.55);
+            color: rgb(254 226 226);
+        }
+
+        .btn-danger:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
         }
 
         .btn-tertiary {
@@ -363,7 +398,7 @@
     <main class="flex-1 md:ml-64 overflow-y-auto h-screen bg-slate-50 dark:bg-slate-900">
         {% block topbar %}{% endblock %}
 
-        <div class="p-8 max-w-7xl mx-auto space-y-8">
+        <div class="py-12 px-6 md:px-8 max-w-7xl mx-auto space-y-8">
             {% if messages %}
             <div class="space-y-2">
                 {% for message in messages %}

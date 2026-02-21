@@ -77,9 +77,7 @@
             refreshInFlight = true;
             Promise.resolve()
                 .then(() => onRefresh())
-                .catch(() => {
-                    // Best effort; page should remain usable on transient failures.
-                })
+                .catch(() => {})
                 .finally(() => {
                     refreshInFlight = false;
                     if (completionJobId && checkFreshnessAfterRefresh) {
