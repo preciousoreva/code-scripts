@@ -1,7 +1,7 @@
 (function () {
     'use strict';
 
-    const OVERVIEW_PANELS_URL = '/epos-qbo/dashboard/panels/';
+    const OVERVIEW_PANELS_URL_FALLBACK = '/epos-qbo/dashboard/panels/';
     const OVERVIEW_REFRESH_DEBOUNCE_MS = 800;
     const OVERVIEW_COMPLETION_REFRESH_RETRY_DELAYS_MS = [2000, 6000, 12000, 20000];
 
@@ -10,6 +10,12 @@
     let refreshQueued = false;
     let runRefreshBound = false;
     let themeListenerBound = false;
+
+    function overviewPanelsUrl() {
+        const root = document.getElementById('overview-panels-root');
+        const configured = root ? (root.dataset.panelsUrl || '').trim() : '';
+        return configured || OVERVIEW_PANELS_URL_FALLBACK;
+    }
 
     function initCompanyFilter(initialQuery) {
         const input = document.getElementById('overview-company-filter');
@@ -237,10 +243,16 @@
         const filterQuery = existingFilter ? existingFilter.value : '';
         const existingCompany = document.getElementById('overview-revenue-company');
         const revenueCompany = existingCompany ? existingCompany.value : 'all';
+        const kpiCompanyEl = document.getElementById('overview-kpi-company');
+        const kpiCompany = kpiCompanyEl ? kpiCompanyEl.value : '';
         const period = currentRevenuePeriod();
-        const requestUrl = `${OVERVIEW_PANELS_URL}?revenue_period=${encodeURIComponent(period)}`;
+        const requestUrl = new URL(overviewPanelsUrl(), window.location.origin);
+        requestUrl.searchParams.set('revenue_period', period);
+        if (kpiCompany) {
+            requestUrl.searchParams.set('company', kpiCompany);
+        }
 
-        return fetch(requestUrl, {
+        return fetch(requestUrl.toString(), {
             credentials: 'same-origin',
             headers: { Accept: 'text/html' },
         })
@@ -271,7 +283,9 @@
                 root.innerHTML = tempDiv.innerHTML;
                 initOverview({ filterQuery, revenueCompany });
             })
-            .catch(() => {})
+            .catch((error) => {
+                console.error('Failed to refresh overview panels:', error);
+            })
             .finally(() => {
                 refreshInFlight = false;
                 if (refreshQueued) {
@@ -325,6 +339,22 @@
         };
     }
 
+    function bindKpiCompanyChange() {
+        const select = document.getElementById('overview-kpi-company');
+        if (!select) return;
+        select.onchange = () => {
+            const url = new URL(window.location.href);
+            const value = (select.value || '').trim();
+            if (value) {
+                url.searchParams.set('company', value);
+            } else {
+                url.searchParams.delete('company');
+            }
+            history.replaceState(null, '', url.pathname + (url.search || ''));
+            refreshOverviewPanels();
+        };
+    }
+
     function bindThemeChange() {
         if (themeListenerBound) return;
         window.addEventListener('themeChange', () => {
@@ -339,6 +369,7 @@
         initCompanyFilter(options.filterQuery || '');
         initRevenueChart(options.revenueCompany || 'all');
         bindRevenuePeriodChange();
+        bindKpiCompanyChange();
         bindRunRefresh();
         bindThemeChange();
     }

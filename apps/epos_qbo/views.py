@@ -688,7 +688,7 @@ def resolve_overview_target_date(company_keys: list[str] | None = None) -> dict:
     }
 
 
-def _overview_context(revenue_period: str = "7d") -> dict:
+def _overview_context(revenue_period: str = "7d", company_key: str | None = None) -> dict:
     now = timezone.now()
     target_date = None
     prev_target_date = None
@@ -700,8 +700,15 @@ def _overview_context(revenue_period: str = "7d") -> dict:
     since_7d = now - timedelta(days=7)
     revenue_period = _normalize_revenue_period(revenue_period)
 
-    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
+    all_companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key"))
+    selected_company = next(
+        (company for company in all_companies if company_key and company.company_key == company_key),
+        None,
+    )
+    companies = [selected_company] if selected_company else all_companies
     company_keys = [company.company_key for company in companies]
+    revenue_companies = all_companies
+    revenue_company_keys = [company.company_key for company in revenue_companies]
     date_resolution = resolve_overview_target_date(company_keys)
     has_overview_target_date = bool(date_resolution["has_data"])
     target_date = date_resolution["target_date"]
@@ -954,13 +961,13 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         revenue_dates = []
     revenue_labels = [d.strftime("%b %d") for d in revenue_dates]
     revenue_index_by_date = {date: idx for idx, date in enumerate(revenue_dates)}
-    revenue_series_map = {company.company_key: [0.0] * len(revenue_dates) for company in companies}
-    revenue_totals_by_company = {company.company_key: 0.0 for company in companies}
+    revenue_series_map = {company.company_key: [0.0] * len(revenue_dates) for company in revenue_companies}
+    revenue_totals_by_company = {company.company_key: 0.0 for company in revenue_companies}
     latest_reconciled_artifacts: dict[tuple[str, object], RunArtifact] = {}
 
-    if company_keys and revenue_days > 0 and revenue_start_date is not None and revenue_end_date is not None:
+    if revenue_company_keys and revenue_days > 0 and revenue_start_date is not None and revenue_end_date is not None:
         reconciled_qs = RunArtifact.objects.filter(
-            company_key__in=company_keys,
+            company_key__in=revenue_company_keys,
             target_date__isnull=False,
             target_date__gte=revenue_start_date,
             target_date__lte=revenue_end_date,
@@ -988,7 +995,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             "name": company.display_name,
             "data": [round(v, 2) for v in revenue_series_map.get(company.company_key, [])],
         }
-        for company in companies
+        for company in revenue_companies
     ]
     revenue_company_totals = sorted(
         [
@@ -997,7 +1004,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
                 "name": company.display_name,
                 "total": round(revenue_totals_by_company.get(company.company_key, 0.0), 2),
             }
-            for company in companies
+            for company in revenue_companies
             if revenue_totals_by_company.get(company.company_key, 0.0) > 0
         ],
         key=lambda item: item["total"],
@@ -1094,6 +1101,10 @@ def _overview_context(revenue_period: str = "7d") -> dict:
             {"value": value, "label": label, "selected": value == revenue_period}
             for value, label in REVENUE_PERIOD_OPTIONS
         ],
+        "revenue_company_options": [
+            {"company_key": company.company_key, "name": company.display_name}
+            for company in revenue_companies
+        ],
         "revenue_labels": revenue_labels,
         "revenue_series": revenue_series,
         "revenue_start_date_display": revenue_start_date_display,
@@ -1105,6 +1116,8 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         "active_run_ids": [str(id) for id in active_runs],
         "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
         "latest_run_id": latest_run_id,
+        "overview_company_options": [{"value": "", "label": "All companies"}] + [{"value": c.company_key, "label": c.display_name} for c in all_companies],
+        "overview_selected_company": selected_company.company_key if selected_company else "",
     }
 
 
@@ -1112,7 +1125,8 @@ def _overview_context(revenue_period: str = "7d") -> dict:
 def overview(request):
     _ensure_company_records()
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
-    context = _overview_context(revenue_period)
+    company_key = (request.GET.get("company") or "").strip() or None
+    context = _overview_context(revenue_period, company_key=company_key)
     context["quick_sync_target_date"] = _quick_sync_default_target_date()
     context["quick_sync_timezone"] = context.get("business_timezone_display", get_business_timezone_display())
     context["dashboard_timezone_display"] = get_dashboard_timezone_display()
@@ -1134,7 +1148,8 @@ def overview(request):
 def overview_panels(request):
     _ensure_company_records()
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
-    context = _overview_context(revenue_period)
+    company_key = (request.GET.get("company") or "").strip() or None
+    context = _overview_context(revenue_period, company_key=company_key)
     response = render(request, "components/overview_refresh.html", context)
     response["Cache-Control"] = "no-store"
     response["Pragma"] = "no-cache"
