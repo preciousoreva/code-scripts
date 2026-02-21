@@ -271,9 +271,7 @@
                 root.innerHTML = tempDiv.innerHTML;
                 initOverview({ filterQuery, revenueCompany });
             })
-            .catch(() => {
-                // Keep current panel content on transient fetch failure.
-            })
+            .catch(() => {})
             .finally(() => {
                 refreshInFlight = false;
                 if (refreshQueued) {
@@ -281,6 +279,14 @@
                     refreshOverviewPanels();
                 }
             });
+    }
+
+    function checkOverviewFreshness(completedJobId) {
+        const root = document.getElementById('overview-panels-root');
+        if (!root) return false;
+        const el = root.querySelector('[data-latest-run-id]');
+        const latestRunId = el ? (el.dataset.latestRunId || '') : '';
+        return latestRunId !== '' && latestRunId === String(completedJobId);
     }
 
     function bindRunRefresh() {
@@ -292,6 +298,7 @@
                 onRefresh: refreshOverviewPanels,
                 startedDelayMs: OVERVIEW_REFRESH_DEBOUNCE_MS,
                 completionDelaysMs: OVERVIEW_COMPLETION_REFRESH_RETRY_DELAYS_MS,
+                checkFreshnessAfterRefresh: checkOverviewFreshness,
             });
             runRefreshBound = true;
             return;

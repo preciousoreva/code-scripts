@@ -12,6 +12,12 @@ It does not replace the pipeline scripts in `code_scripts/`; it wraps and monito
 - `GET /epos-qbo/runs/<uuid:job_id>/logs?offset=<int>`: log tail polling endpoint
 - `GET /epos-qbo/api/runs/status?job_ids=<uuid,...>`: run status polling for toasts/live state
 - `GET /epos-qbo/logs/`: structured log/events page with filters
+- `GET /epos-qbo/schedules/`: schedule manager page
+- `POST /epos-qbo/schedules/create`: create DB schedule
+- `POST /epos-qbo/schedules/<uuid:schedule_id>/update`: update DB schedule
+- `POST /epos-qbo/schedules/<uuid:schedule_id>/toggle`: enable/disable schedule
+- `POST /epos-qbo/schedules/<uuid:schedule_id>/run-now`: enqueue run immediately from schedule
+- `POST /epos-qbo/schedules/<uuid:schedule_id>/delete`: delete schedule (non-system schedules only)
 - `GET /epos-qbo/companies/`: company management page (search/filter/sort)
 - `GET /epos-qbo/companies/new`: company onboarding (basic form)
 - `GET|POST /epos-qbo/companies/<company_key>/advanced`: advanced company settings
@@ -25,6 +31,7 @@ All routes require authentication.
 
 - `epos_qbo.can_trigger_runs`: required for triggering runs.
 - `epos_qbo.can_edit_companies`: required for creating/editing companies, syncing JSON, and toggling active state.
+- `epos_qbo.can_manage_schedules`: required for schedule management and run-now actions.
 
 ## Core models
 
@@ -32,6 +39,8 @@ All routes require authentication.
 - `RunJob`: requested/queued/running/completed run lifecycle record.
 - `RunArtifact`: ingested metadata artifacts linked to runs and companies.
 - `RunLock`: DB lock row used to serialize run dispatch.
+- `RunSchedule`: DB-backed cron schedule definition.
+- `RunScheduleEvent`: scheduler event/audit stream.
 
 ## Current behavior highlights
 
@@ -84,6 +93,7 @@ All routes require authentication.
   - `code_scripts/run_all_companies.py` (all companies)
 - `code_scripts/run_pipeline.py` now persists reconciliation payload (`status`, totals, counts, difference) into metadata before archive move.
 - Dispatch is serialized through `RunLock` and post-exit reconciliation releases lock and attaches artifacts.
+- DB schedules enqueue `RunJob` through `services/schedule_worker.py` and reuse the same dispatcher/lock path as manual dashboard runs.
 - Polling helpers:
   - `run_logs` streams log chunks by byte offset.
   - `run_status_check` returns compact JSON status for active runs.
@@ -100,6 +110,8 @@ All routes require authentication.
   - writes DB company config back to JSON files.
 - `python manage.py check_company_config_drift`
   - compares DB payloads vs JSON files and exits non-zero when drift exists.
+- `python manage.py run_schedule_worker [--poll-seconds N] [--once]`
+  - runs DB schedule evaluation loop, enqueues due jobs, supports env fallback schedule when enabled.
 
 ## Tests
 
@@ -109,7 +121,7 @@ All routes require authentication.
 
 ## UI notes
 
-- Sidebar entries `Tools`, `Settings`, and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
+- Sidebar entries `Tools` and `API Tokens` route to shared placeholder pages (`/coming-soon/<feature>/`) and are marked `Coming Soon`.
 - Static JS (overview, companies, toasts) uses paths under `/epos-qbo/`. If the app is mounted at a different URL prefix, update `OVERVIEW_PANELS_URL` in `overview.js`, `currentCompaniesUrl()` in `companies.js`, and `ACTIVE_RUNS_URL` / `RUN_STATUS_URL_BASE` / toast links in `toasts.js`.
 - Tailwind is now served as compiled static CSS (`apps/epos_qbo/static/css/tailwind.css`) instead of runtime CDN injection.
 

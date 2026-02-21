@@ -162,13 +162,13 @@ Inventory sync mode is intentionally **not** configurable on `run_all_companies.
 
 ### Scheduled runs via Docker scheduler service
 
-Use the in-repo scheduler service (APScheduler) through Docker Compose. It executes this command on cron:
+Use the in-repo scheduler worker through Docker Compose. The worker reads DB schedules from the `Schedules` page and enqueues `RunJob` records.
 
-```bash
-python manage.py run_scheduled_all_companies --parallel 2
-```
+Execution path:
 
-This keeps scheduled runs visible in the Django dashboard (`RunJob`) while preserving all existing manual CLI workflows.
+- `RunSchedule` (DB row) becomes due
+- worker enqueues `RunJob` (queued)
+- existing dispatcher starts the run and applies normal lock protections
 
 ```bash
 # Build scheduler image
@@ -183,12 +183,10 @@ docker compose logs -f scheduler
 
 Scheduler env vars:
 
-- `SCHEDULE_CRON` (required): cron expression, for example `*/5 * * * *`
-- `SCHEDULE_TZ` (default `Africa/Lagos`)
-- `RUN_CMD` (default `python manage.py run_scheduled_all_companies --parallel 2`)
-- `SCHEDULER_LOG_LEVEL` (default `INFO`)
-- `SCHEDULER_MISFIRE_GRACE_SECONDS` (default `300`)
-- `OIAT_SCHEDULED_LOG_PATH` (optional): absolute path, or repo-relative path such as `code_scripts/logs/run_all_companies_scheduled.log`
+- `OIAT_SCHEDULER_POLL_SECONDS` (default `15`)
+- `OIAT_SCHEDULER_ENABLE_ENV_FALLBACK` (default `1`)
+- `SCHEDULE_CRON` (default `0 18 * * *`, i.e. 6pm daily) fallback cron when no enabled DB schedules exist
+- `SCHEDULE_TZ` (default `Africa/Lagos`) fallback timezone when no enabled DB schedules exist
 
 ---
 
@@ -227,10 +225,11 @@ Then open `http://127.0.0.1:8000/` in your browser and log in with the superuser
 
 ### Portal Permissions
 
-Two custom permissions control dashboard actions:
+Three custom permissions control dashboard actions:
 
 - `can_trigger_runs` — allows triggering pipeline runs from the Runs page
 - `can_edit_companies` — allows creating/editing company configurations
+- `can_manage_schedules` — allows creating/editing/toggling/deleting schedules and using Run Now
 
 Assign these to users via Django Admin (`/admin/`). Superusers have all permissions by default.
 
@@ -243,6 +242,7 @@ Assign these to users via Django Admin (`/admin/`). Superusers have all permissi
 | `python manage.py check_company_config_drift` | Detect mismatches between DB and JSON configs |
 | `python manage.py ingest_run_history --days 60` | Import historical run metadata from Uploaded/ |
 | `python manage.py reconcile_run_jobs` | Mark stuck running jobs as failed (reaper) |
+| `python manage.py run_schedule_worker` | Run the DB-backed scheduler worker loop (supports `--once` and `--poll-seconds`) |
 | `python manage.py run_scheduled_all_companies --parallel 2` | Run all companies under global lock; creates RunJob for dashboard (used by scheduler service and can be run manually) |
 
 ### Portal Dashboard Tuning (Environment Variables)

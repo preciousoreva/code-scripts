@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import date
 
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from unittest.mock import Mock, patch
 
-from apps.epos_qbo.models import RunJob, RunLock
+from apps.epos_qbo.models import RunJob, RunLock, RunSchedule, RunScheduleEvent
 from apps.epos_qbo.services.job_runner import _monitor_process, build_command, dispatch_next_queued_job
 
 
@@ -196,4 +197,43 @@ class MonitorProcessTests(TestCase):
         log_handle.close.assert_called_once_with()
         attach_recent_artifacts_to_job_mock.assert_not_called()
         release_run_lock_mock.assert_called_once_with(run_job=None, force=True)
+        dispatch_next_queued_job_mock.assert_called_once_with()
+
+    @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
+    @patch("apps.epos_qbo.services.job_runner.release_run_lock")
+    @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
+    def test_monitor_creates_schedule_event_for_scheduled_run(
+        self,
+        attach_recent_artifacts_to_job_mock,
+        release_run_lock_mock,
+        dispatch_next_queued_job_mock,
+    ):
+        schedule = RunSchedule.objects.create(
+            name="Nightly schedule",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 18 * * *",
+            timezone_name="UTC",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            next_fire_at=timezone.now(),
+        )
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_ALL,
+            status=RunJob.STATUS_RUNNING,
+            scheduled_by=schedule,
+        )
+        popen = Mock()
+        popen.wait.return_value = 0
+        log_handle = Mock()
+
+        _monitor_process(job.id, popen, log_handle)
+
+        event = RunScheduleEvent.objects.filter(schedule=schedule, run_job=job).first()
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.event_type, RunScheduleEvent.TYPE_RUN_SUCCEEDED)
+        self.assertEqual(event.payload_json.get("status"), RunJob.STATUS_SUCCEEDED)
+        self.assertEqual(event.payload_json.get("schedule_name"), schedule.name)
+        self.assertEqual(event.payload_json.get("schedule_id"), str(schedule.id))
+        release_run_lock_mock.assert_called_once()
         dispatch_next_queued_job_mock.assert_called_once_with()

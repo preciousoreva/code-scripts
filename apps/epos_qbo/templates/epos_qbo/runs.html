@@ -9,7 +9,7 @@
 {% block content %}
 <div class="space-y-6" data-active-runs='{{ active_run_ids_json|safe }}'>
     <div>
-        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Runs</h1>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Runs</h1>
     </div>
 
     {% if perms.epos_qbo.can_trigger_runs %}
