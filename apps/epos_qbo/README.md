@@ -32,6 +32,7 @@ All routes require authentication.
 - `epos_qbo.can_trigger_runs`: required for triggering runs.
 - `epos_qbo.can_edit_companies`: required for creating/editing companies, syncing JSON, and toggling active state.
 - `epos_qbo.can_manage_schedules`: required for schedule management and run-now actions.
+- `epos_qbo.can_manage_portal_settings`: required for editing portal-wide defaults on Settings.
 
 ## Core models
 

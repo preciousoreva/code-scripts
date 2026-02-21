@@ -11,17 +11,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone as dt_tz
 from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.utils import timezone
+
+from . import portal_settings
 
 
 def get_dashboard_timezone_name() -> str:
-    """Return the timezone name used for dashboard dates (e.g. 'America/New_York')."""
-    return getattr(
-        settings,
-        "OIAT_DASHBOARD_TIMEZONE",
-        getattr(settings, "TIME_ZONE", "UTC"),
-    )
+    """Return the timezone name used for dashboard dates (e.g. 'America/New_York'). DB overrides env."""
+    return portal_settings.get_dashboard_timezone_name()
 
 
 def get_dashboard_timezone_display() -> str:

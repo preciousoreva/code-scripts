@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from unittest.mock import Mock, patch
 
@@ -69,11 +69,9 @@ class BuildCommandTests(SimpleTestCase):
         self.assertIn("--skip-download", command)
         self.assertIn("--continue-on-failure", command)
 
-    @override_settings(
-        OIAT_DASHBOARD_DEFAULT_PARALLEL=4,
-        OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS=8,
-    )
-    def test_build_command_uses_settings_defaults_when_missing(self):
+    @patch("apps.epos_qbo.services.job_runner.portal_settings.get_default_parallel", return_value=4)
+    @patch("apps.epos_qbo.services.job_runner.portal_settings.get_default_stagger_seconds", return_value=8)
+    def test_build_command_uses_settings_defaults_when_missing(self, mock_stagger, mock_parallel):
         command = build_command(
             {
                 "scope": RunJob.SCOPE_ALL,

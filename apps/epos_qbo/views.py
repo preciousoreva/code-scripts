@@ -13,7 +13,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.db.models import Q
-from django.http import Http404, JsonResponse
+from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -21,14 +21,24 @@ from django.views.decorators.http import require_GET, require_POST
 
 from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
 
-from .forms import CompanyAdvancedForm, CompanyBasicForm, RunScheduleForm, RunTriggerForm
+from .forms import (
+    CompanyAdvancedForm,
+    CompanyBasicForm,
+    PortalSettingsForm,
+    RunScheduleForm,
+    RunTriggerForm,
+    UserPreferencesForm,
+)
 from .models import (
     CompanyConfigRecord,
+    DashboardUserPreference,
+    PortalSettings,
     RunArtifact,
     RunJob,
     RunSchedule,
     RunScheduleEvent,
 )
+from . import portal_settings
 from .services.config_sync import (
     apply_advanced_payload,
     build_basic_payload,
@@ -38,7 +48,7 @@ from .services.config_sync import (
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
-from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display, get_dashboard_timezone_name
+from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
     get_business_day_cutoff,
     get_business_timezone_display,
@@ -92,53 +102,6 @@ EXIT_CODE_REFERENCE = [
     {"code": "126", "message": "Subprocess command invoked but not executable."},
     {"code": "127", "message": "Subprocess command/dependency not found."},
 ]
-
-
-def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = getattr(settings, name, default)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    if value < minimum:
-        return default
-    return value
-
-
-def _decimal_setting(name: str, default: Decimal, *, minimum: Decimal | None = None) -> Decimal:
-    raw = getattr(settings, name, default)
-    try:
-        value = Decimal(str(raw))
-    except Exception:
-        return default
-    if minimum is not None and value < minimum:
-        return default
-    return value
-
-
-def _dashboard_default_parallel() -> int:
-    return _int_setting("OIAT_DASHBOARD_DEFAULT_PARALLEL", 2, minimum=1)
-
-
-def _dashboard_default_stagger_seconds() -> int:
-    return _int_setting("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
-
-
-def _dashboard_stale_hours_warning() -> int:
-    return _int_setting("OIAT_DASHBOARD_STALE_HOURS_WARNING", 48, minimum=1)
-
-
-def _dashboard_refresh_expiring_days() -> int:
-    return _int_setting("OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS", 7, minimum=1)
-
-
-def _dashboard_reconcile_diff_warning_threshold() -> Decimal:
-    return _decimal_setting("OIAT_DASHBOARD_RECON_DIFF_WARNING", Decimal("1.0"), minimum=Decimal("0"))
-
-
-def _reauth_guidance() -> str:
-    text = str(getattr(settings, "OIAT_DASHBOARD_REAUTH_GUIDANCE", DEFAULT_REAUTH_GUIDANCE)).strip()
-    return text or DEFAULT_REAUTH_GUIDANCE
 
 
 def _health_reason_labels(reason_codes: list[str] | None) -> list[str]:
@@ -215,6 +178,19 @@ def _normalize_revenue_period(value: str | None) -> str:
     return selected if selected in REVENUE_PERIOD_DAYS else "7d"
 
 
+def _get_user_overview_defaults(request):
+    """Return (default_company_key, default_revenue_period) for the current user."""
+    try:
+        pref = DashboardUserPreference.objects.get(user=request.user)
+    except DashboardUserPreference.DoesNotExist:
+        return (None, "7d")
+    period = (pref.default_revenue_period or "").strip() or "7d"
+    if period not in REVENUE_PERIOD_DAYS:
+        period = "7d"
+    company = (pref.default_overview_company_key or "").strip() or None
+    return (company, period)
+
+
 def _quick_sync_default_target_date(*, now: datetime | None = None) -> str:
     return get_target_trading_date(now=now).isoformat()
 
@@ -266,7 +242,7 @@ def _exit_code_info(exit_code: int | None) -> dict | None:
 
 
 def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = None) -> dict:
-    guidance = _reauth_guidance()
+    guidance = portal_settings.get_reauth_guidance()
     cfg = company.config_json or {}
     realm_id = (cfg.get("qbo") or {}).get("realm_id")
     if not realm_id:
@@ -398,7 +374,7 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
     if (
         refresh_expires_at is not None
         and refresh_seconds_left is not None
-        and refresh_seconds_left <= _dashboard_refresh_expiring_days() * 86400
+        and refresh_seconds_left <= portal_settings.get_refresh_expiring_days() * 86400
     ):
         days_left = _format_day_count(refresh_seconds_left)
         message = f"Refresh token expires in {days_left} day{'s' if days_left != 1 else ''}"
@@ -537,7 +513,7 @@ def _company_health_snapshot(
                 "run_activity": run_activity,
             }
         reconcile_diff = latest_artifact.reconcile_difference
-        if reconcile_diff is not None and abs(reconcile_diff) > _dashboard_reconcile_diff_warning_threshold():
+        if reconcile_diff is not None and abs(reconcile_diff) > portal_settings.get_reconcile_diff_warning():
             return {
                 "level": "warning",
                 "summary": "Reconciliation mismatch above threshold.",
@@ -1126,8 +1102,13 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
 @login_required
 def overview(request):
     _ensure_company_records()
-    revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
-    company_key = (request.GET.get("company") or "").strip() or None
+    revenue_period_param = request.GET.get("revenue_period")
+    company_param = request.GET.get("company")
+    if (revenue_period_param or "").strip() or (company_param or "").strip():
+        revenue_period = _normalize_revenue_period(revenue_period_param)
+        company_key = (company_param or "").strip() or None
+    else:
+        company_key, revenue_period = _get_user_overview_defaults(request)
     context = _overview_context(revenue_period, company_key=company_key)
     context["quick_sync_target_date"] = _quick_sync_default_target_date()
     context["quick_sync_timezone"] = context.get("business_timezone_display", get_business_timezone_display())
@@ -1149,8 +1130,13 @@ def overview(request):
 @require_GET
 def overview_panels(request):
     _ensure_company_records()
-    revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
-    company_key = (request.GET.get("company") or "").strip() or None
+    revenue_period_param = request.GET.get("revenue_period")
+    company_param = request.GET.get("company")
+    if (revenue_period_param or "").strip() or (company_param or "").strip():
+        revenue_period = _normalize_revenue_period(revenue_period_param)
+        company_key = (company_param or "").strip() or None
+    else:
+        company_key, revenue_period = _get_user_overview_defaults(request)
     context = _overview_context(revenue_period, company_key=company_key)
     response = render(request, "components/overview_refresh.html", context)
     response["Cache-Control"] = "no-store"
@@ -1158,19 +1144,84 @@ def overview_panels(request):
     return response
 
 
+def _scheduler_env_for_display():
+    """Build read-only scheduler/env key-value dict for Settings page."""
+    return {
+        "OIAT_SCHEDULER_POLL_SECONDS": os.environ.get("OIAT_SCHEDULER_POLL_SECONDS", "(default 15)"),
+        "OIAT_SCHEDULER_ENABLE_ENV_FALLBACK": os.environ.get("OIAT_SCHEDULER_ENABLE_ENV_FALLBACK", "(default 1)"),
+        "OIAT_BUSINESS_TIMEZONE": getattr(settings, "OIAT_BUSINESS_TIMEZONE", os.environ.get("OIAT_BUSINESS_TIMEZONE", "(default Africa/Lagos)")),
+        "OIAT_BUSINESS_DAY_CUTOFF_HOUR": os.environ.get("OIAT_BUSINESS_DAY_CUTOFF_HOUR") or getattr(settings, "OIAT_BUSINESS_DAY_CUTOFF_HOUR", "(default 5)"),
+        "OIAT_BUSINESS_DAY_CUTOFF_MINUTE": os.environ.get("OIAT_BUSINESS_DAY_CUTOFF_MINUTE") or getattr(settings, "OIAT_BUSINESS_DAY_CUTOFF_MINUTE", "(default 0)"),
+        "SCHEDULE_CRON": os.environ.get("SCHEDULE_CRON", "(default 0 18 * * *)"),
+        "SCHEDULE_TZ": os.environ.get("SCHEDULE_TZ", "(default from OIAT_BUSINESS_TIMEZONE)"),
+    }
+
+
 @login_required
-@require_GET
 def settings_page(request):
-    """Settings page: dashboard tuning (read-only) and appearance (theme)."""
+    """Settings page: portal defaults (editable with can_manage_portal_settings), my preferences, dashboard and scheduler read-only."""
+    can_edit_portal = request.user.has_perm("epos_qbo.can_manage_portal_settings")
+    portal_form = None
+    user_prefs_form = None
+
+    active_companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    if request.method == "POST":
+        if request.POST.get("save_portal") and not can_edit_portal:
+            return HttpResponseForbidden("You do not have permission to edit portal defaults.")
+        if can_edit_portal and request.POST.get("save_portal"):
+            portal_form = PortalSettingsForm(request.POST)
+            if portal_form.is_valid():
+                portal_form.save(request.user)
+                messages.success(request, "Portal defaults saved.")
+                return redirect("epos_qbo:settings")
+        elif request.POST.get("save_preferences"):
+            user_prefs_form = UserPreferencesForm(request.POST)
+            user_prefs_form.fields["default_overview_company_key"].choices = [("", "All companies")] + [(c.company_key, c.display_name) for c in active_companies]
+            if user_prefs_form.is_valid():
+                user_prefs_form.save(request.user)
+                messages.success(request, "Your preferences saved.")
+                return redirect("epos_qbo:settings")
+
+    if portal_form is None:
+        row = PortalSettings.objects.filter(pk=1).first()
+        initial_portal = {}
+        if row:
+            initial_portal = {
+                "default_parallel": row.default_parallel,
+                "default_stagger_seconds": row.default_stagger_seconds,
+                "stale_hours_warning": row.stale_hours_warning,
+                "refresh_expiring_days": row.refresh_expiring_days,
+                "reconcile_diff_warning": row.reconcile_diff_warning,
+                "reauth_guidance": row.reauth_guidance or "",
+                "dashboard_timezone": row.dashboard_timezone or "",
+            }
+        portal_form = PortalSettingsForm(initial=initial_portal)
+
+    if user_prefs_form is None:
+        try:
+            pref = DashboardUserPreference.objects.get(user=request.user)
+            initial_prefs = {
+                "default_revenue_period": pref.default_revenue_period or "7d",
+                "default_overview_company_key": pref.default_overview_company_key or "",
+            }
+        except DashboardUserPreference.DoesNotExist:
+            initial_prefs = {"default_revenue_period": "7d", "default_overview_company_key": ""}
+        user_prefs_form = UserPreferencesForm(initial=initial_prefs)
+
+    user_prefs_form.fields["default_overview_company_key"].choices = [("", "All companies")] + [(c.company_key, c.display_name) for c in active_companies]
     context = {
+        "can_edit_portal": can_edit_portal,
+        "portal_form": portal_form,
+        "user_prefs_form": user_prefs_form,
         "dashboard_timezone_display": get_dashboard_timezone_display(),
-        "dashboard_timezone_name": get_dashboard_timezone_name(),
-        "default_parallel": _dashboard_default_parallel(),
-        "default_stagger_seconds": _dashboard_default_stagger_seconds(),
-        "stale_hours_warning": _dashboard_stale_hours_warning(),
-        "refresh_expiring_days": _dashboard_refresh_expiring_days(),
-        "reconcile_diff_warning": _dashboard_reconcile_diff_warning_threshold(),
-        "reauth_guidance": _reauth_guidance(),
+        "dashboard_timezone_name": portal_settings.get_dashboard_timezone_name(),
+        "default_parallel": portal_settings.get_default_parallel(),
+        "default_stagger_seconds": portal_settings.get_default_stagger_seconds(),
+        "stale_hours_warning": portal_settings.get_stale_hours_warning(),
+        "refresh_expiring_days": portal_settings.get_refresh_expiring_days(),
+        "reconcile_diff_warning": portal_settings.get_reconcile_diff_warning(),
+        "reauth_guidance": portal_settings.get_reauth_guidance(),
+        "scheduler_env": _scheduler_env_for_display(),
     }
     context.update(_nav_context())
     context.update(
@@ -1201,8 +1252,8 @@ def _schedule_create_initial() -> dict:
         "cron_expr": "0 18 * * *",
         "timezone_name": _schedule_default_timezone_name(),
         "target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
-        "parallel": _dashboard_default_parallel(),
-        "stagger_seconds": _dashboard_default_stagger_seconds(),
+        "parallel": portal_settings.get_default_parallel(),
+        "stagger_seconds": portal_settings.get_default_stagger_seconds(),
         "continue_on_failure": False,
     }
 
@@ -1426,8 +1477,8 @@ def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
 @login_required
 def runs_list(request):
     _ensure_company_records()
-    default_parallel = _dashboard_default_parallel()
-    default_stagger_seconds = _dashboard_default_stagger_seconds()
+    default_parallel = portal_settings.get_default_parallel()
+    default_stagger_seconds = portal_settings.get_default_stagger_seconds()
     jobs = list(RunJob.objects.order_by("-created_at")[:100])
     job_ids = [j.id for j in jobs]
     # Reconcile status per run (from artifacts)
@@ -1732,8 +1783,8 @@ def trigger_run(request):
         from_date=cleaned.get("from_date"),
         to_date=cleaned.get("to_date"),
         skip_download=bool(cleaned.get("skip_download")),
-        parallel=int(cleaned.get("parallel") or _dashboard_default_parallel()),
-        stagger_seconds=int(cleaned.get("stagger_seconds") or _dashboard_default_stagger_seconds()),
+        parallel=int(cleaned.get("parallel") or portal_settings.get_default_parallel()),
+        stagger_seconds=int(cleaned.get("stagger_seconds") or portal_settings.get_default_stagger_seconds()),
         continue_on_failure=bool(cleaned.get("continue_on_failure")),
         requested_by=request.user,
         status=RunJob.STATUS_QUEUED,
@@ -2089,7 +2140,7 @@ def _get_company_issues_for_list(
         })
     if latest_run and latest_run.started_at:
         hours_since = (timezone.now() - latest_run.started_at).total_seconds() / 3600
-        if hours_since > _dashboard_stale_hours_warning():
+        if hours_since > portal_settings.get_stale_hours_warning():
             issues.append({
                 "severity": "amber",
                 "icon": "solar:clock-circle-linear",

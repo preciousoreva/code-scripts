@@ -586,3 +586,64 @@ class SchedulerWorkerHeartbeat(models.Model):
     class Meta:
         verbose_name = "Scheduler worker heartbeat"
         verbose_name_plural = "Scheduler worker heartbeats"
+
+
+class PortalSettings(models.Model):
+    """Singleton (id=1) for dashboard defaults. Null means use env/settings; non-null overrides."""
+
+    id = models.PositiveIntegerField(primary_key=True)  # Singleton: id=1
+    default_parallel = models.PositiveSmallIntegerField(null=True, blank=True)
+    default_stagger_seconds = models.PositiveSmallIntegerField(null=True, blank=True)
+    stale_hours_warning = models.PositiveIntegerField(null=True, blank=True)
+    refresh_expiring_days = models.PositiveIntegerField(null=True, blank=True)
+    reconcile_diff_warning = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True
+    )
+    reauth_guidance = models.TextField(null=True, blank=True)
+    dashboard_timezone = models.CharField(max_length=64, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="updated_portal_settings",
+    )
+
+    class Meta:
+        permissions = [
+            ("can_manage_portal_settings", "Can manage portal settings"),
+        ]
+        verbose_name = "Portal settings"
+        verbose_name_plural = "Portal settings"
+
+    def save(self, *args, **kwargs):
+        result = super().save(*args, **kwargs)
+        from . import portal_settings  # local import avoids circular import at module load
+
+        portal_settings.invalidate_cache()
+        return result
+
+    def delete(self, *args, **kwargs):
+        result = super().delete(*args, **kwargs)
+        from . import portal_settings  # local import avoids circular import at module load
+
+        portal_settings.invalidate_cache()
+        return result
+
+
+class DashboardUserPreference(models.Model):
+    """Per-user dashboard preferences (default Overview company and revenue period)."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="dashboard_preference",
+    )
+    default_overview_company_key = models.CharField(max_length=64, null=True, blank=True)
+    default_revenue_period = models.CharField(max_length=16, default="7d")
+    notify_on_run_failure = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "Dashboard user preference"
+        verbose_name_plural = "Dashboard user preferences"

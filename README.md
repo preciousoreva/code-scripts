@@ -225,11 +225,12 @@ Then open `http://127.0.0.1:8000/` in your browser and log in with the superuser
 
 ### Portal Permissions
 
-Three custom permissions control dashboard actions:
+Four custom permissions control dashboard actions:
 
 - `can_trigger_runs` — allows triggering pipeline runs from the Runs page
 - `can_edit_companies` — allows creating/editing company configurations
 - `can_manage_schedules` — allows creating/editing/toggling/deleting schedules and using Run Now
+- `can_manage_portal_settings` — allows editing portal-wide defaults on the Settings page
 
 Assign these to users via Django Admin (`/admin/`). Superusers have all permissions by default.
 
