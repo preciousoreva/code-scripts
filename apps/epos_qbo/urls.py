@@ -29,4 +29,7 @@ urlpatterns = [
     path("companies/<slug:company_key>/advanced", views.company_advanced, name="company-advanced"),
     path("companies/<slug:company_key>/sync-json", views.sync_company_json, name="company-sync-json"),
     path("settings/", views.settings_page, name="settings"),
+    path("tools/", views.tools_page, name="tools"),
+    path("tools/qbo-query/", views.tools_qbo_query_api, name="tools-qbo-query"),
+    path("tools/verify-mapping/", views.tools_verify_mapping_api, name="tools-verify-mapping"),
 ]

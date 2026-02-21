@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -2506,3 +2508,154 @@ def company_toggle_active(request, company_key):
     msg = f"Company {company.display_name} has been {'activated' if company.is_active else 'deactivated'}."
     messages.success(request, msg)
     return redirect("epos_qbo:companies-list")
+
+
+# ---------------------------------------------------------------------------
+# Tools page
+# ---------------------------------------------------------------------------
+
+def _tools_venv_python() -> str:
+    """Resolve Python executable: prefer project venv, fall back to sys.executable."""
+    from oiat_portal.paths import BASE_DIR
+    venv_python = BASE_DIR / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+    return sys.executable
+
+
+def _tools_subprocess_env() -> dict:
+    """Build env dict for tool subprocesses (mirrors job_runner)."""
+    from oiat_portal.paths import BASE_DIR
+    env = dict(os.environ)
+    pythonpath = str(BASE_DIR)
+    env["PYTHONPATH"] = pythonpath + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
+TOOLS_QUERY_MAX_LENGTH = 2000
+TOOLS_SUBPROCESS_TIMEOUT = 30
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+def tools_page(request):
+    """Tools page: QBO query, verify mappings, and other script tools."""
+    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    company_options = [{"value": c.company_key, "label": c.display_name} for c in companies]
+    context = {
+        "company_options": company_options,
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Tools", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/tools.html", context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def tools_qbo_query_api(request):
+    """Execute a QBO SQL-like query via subprocess and return JSON."""
+    from oiat_portal.paths import BASE_DIR
+
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"success": False, "error": "Invalid JSON body."}, status=400)
+
+    company_key = (body.get("company_key") or "").strip()
+    query = (body.get("query") or "").strip()
+
+    if not company_key:
+        return JsonResponse({"success": False, "error": "Company is required."}, status=400)
+    if not CompanyConfigRecord.objects.filter(company_key=company_key, is_active=True).exists():
+        return JsonResponse({"success": False, "error": f"Unknown or inactive company: {company_key}"}, status=400)
+    if not query:
+        return JsonResponse({"success": False, "error": "Query is required."}, status=400)
+    if len(query) > TOOLS_QUERY_MAX_LENGTH:
+        return JsonResponse({"success": False, "error": f"Query exceeds {TOOLS_QUERY_MAX_LENGTH} character limit."}, status=400)
+
+    script_path = str(BASE_DIR / "code_scripts" / "scripts" / "qbo_queries" / "qbo_query.py")
+    cmd = [_tools_venv_python(), script_path, "--company", company_key, "query", query, "--raw-json"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=_tools_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=TOOLS_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return JsonResponse({"success": False, "error": "Query timed out (30s limit)."}, status=504)
+    except Exception as exc:
+        return JsonResponse({"success": False, "error": f"Failed to run query: {exc}"}, status=500)
+
+    if result.returncode != 0:
+        error_msg = (result.stderr or result.stdout or "Unknown error").strip()
+        if len(error_msg) > 1000:
+            error_msg = error_msg[:1000] + "..."
+        return JsonResponse({"success": False, "error": error_msg}, status=502)
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "Script returned non-JSON output.", "raw": result.stdout[:2000]}, status=502)
+
+    return JsonResponse({"success": True, "data": data})
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def tools_verify_mapping_api(request):
+    """Run verify-mapping-accounts script for a company and return JSON."""
+    from oiat_portal.paths import BASE_DIR
+
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"success": False, "error": "Invalid JSON body."}, status=400)
+
+    company_key = (body.get("company_key") or "").strip()
+    if not company_key:
+        return JsonResponse({"success": False, "error": "Company is required."}, status=400)
+    if not CompanyConfigRecord.objects.filter(company_key=company_key, is_active=True).exists():
+        return JsonResponse({"success": False, "error": f"Unknown or inactive company: {company_key}"}, status=400)
+
+    script_path = str(BASE_DIR / "code_scripts" / "scripts" / "qbo_queries" / "qbo_verify_mapping_accounts.py")
+    cmd = [_tools_venv_python(), script_path, "--company", company_key]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=_tools_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return JsonResponse({"success": False, "error": "Verification timed out (60s limit)."}, status=504)
+    except Exception as exc:
+        return JsonResponse({"success": False, "error": f"Failed to run verification: {exc}"}, status=500)
+
+    output = (result.stdout or "").strip()
+    error_output = (result.stderr or "").strip()
+
+    if result.returncode != 0:
+        combined = (output + "\n" + error_output).strip()
+        if len(combined) > 2000:
+            combined = combined[:2000] + "..."
+        return JsonResponse({"success": False, "error": combined or "Verification failed."}, status=502)
+
+    return JsonResponse({"success": True, "output": output})
