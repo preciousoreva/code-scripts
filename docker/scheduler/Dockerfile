@@ -12,4 +12,4 @@ RUN pip install --upgrade pip \
     && pip install -r /tmp/requirements.txt APScheduler \
     && python -m playwright install --with-deps chromium
 
-CMD ["python", "-m", "code_scripts.scheduler_service"]
+CMD ["python", "manage.py", "run_schedule_worker"]

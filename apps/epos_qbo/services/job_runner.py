@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 
-from ..models import RunJob, RunLock
+from ..models import RunJob, RunLock, RunScheduleEvent
 from .artifact_ingestion import attach_recent_artifacts_to_job
 from .locking import release_run_lock
 
@@ -125,6 +125,32 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
             if exit_code != 0 and not job.failure_reason:
                 job.failure_reason = f"Subprocess exited with code {exit_code}"
             job.save(update_fields=["exit_code", "finished_at", "status", "failure_reason"])
+            if job.scheduled_by_id:
+                schedule = job.scheduled_by
+                event_type = (
+                    RunScheduleEvent.TYPE_RUN_SUCCEEDED
+                    if job.status == RunJob.STATUS_SUCCEEDED
+                    else RunScheduleEvent.TYPE_RUN_FAILED
+                )
+                message = (
+                    f"Run completed with status={job.status} exit_code={exit_code}"
+                    if exit_code is not None
+                    else f"Run completed with status={job.status}"
+                )
+                payload_json = {
+                    "status": job.status,
+                    "exit_code": exit_code,
+                }
+                if schedule is not None:
+                    payload_json["schedule_id"] = str(schedule.id)
+                    payload_json["schedule_name"] = schedule.name
+                RunScheduleEvent.objects.create(
+                    schedule=schedule,
+                    run_job=job,
+                    event_type=event_type,
+                    message=message,
+                    payload_json=payload_json,
+                )
             logger.info(
                 "RunJob %s finalized: status=%s exit_code=%s attached_artifacts=%s attach_elapsed_ms=%s",
                 job_id,

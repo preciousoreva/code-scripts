@@ -19,8 +19,14 @@ from django.views.decorators.http import require_GET, require_POST
 
 from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
 
-from .forms import CompanyAdvancedForm, CompanyBasicForm, RunTriggerForm
-from .models import CompanyConfigRecord, RunArtifact, RunJob
+from .forms import CompanyAdvancedForm, CompanyBasicForm, RunScheduleForm, RunTriggerForm
+from .models import (
+    CompanyConfigRecord,
+    RunArtifact,
+    RunJob,
+    RunSchedule,
+    RunScheduleEvent,
+)
 from .services.config_sync import (
     apply_advanced_payload,
     build_basic_payload,
@@ -29,6 +35,7 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk
+from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display, get_dashboard_timezone_name
 from .business_date import (
     get_business_day_cutoff,
@@ -1004,11 +1011,22 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         "series": revenue_series if has_reconciled_revenue_data else [],
     }
 
+    # Latest completed run for overview freshness
+    latest_completed_run = (
+        RunJob.objects.filter(
+            status__in=[RunJob.STATUS_SUCCEEDED, RunJob.STATUS_FAILED, RunJob.STATUS_CANCELLED],
+            finished_at__isnull=False,
+        )
+        .order_by("-finished_at", "-created_at")
+        .first()
+    )
+    latest_run_id = str(latest_completed_run.id) if latest_completed_run else ""
+
     # Get active run IDs for polling
     active_runs = RunJob.objects.filter(
         status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING]
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
-    
+
     if has_overview_target_date and target_date_display and last_successful_sync_at:
         age_text = _format_relative_age((now - last_successful_sync_at).total_seconds())
         metric_basis_line = (
@@ -1086,6 +1104,7 @@ def _overview_context(revenue_period: str = "7d") -> dict:
         "revenue_chart_payload": revenue_chart_payload,
         "active_run_ids": [str(id) for id in active_runs],
         "active_run_ids_json": json.dumps([str(id) for id in active_runs]),
+        "latest_run_id": latest_run_id,
     }
 
 
@@ -1116,7 +1135,10 @@ def overview_panels(request):
     _ensure_company_records()
     revenue_period = _normalize_revenue_period(request.GET.get("revenue_period"))
     context = _overview_context(revenue_period)
-    return render(request, "components/overview_refresh.html", context)
+    response = render(request, "components/overview_refresh.html", context)
+    response["Cache-Control"] = "no-store"
+    response["Pragma"] = "no-cache"
+    return response
 
 
 @login_required
@@ -1143,6 +1165,215 @@ def settings_page(request):
         )
     )
     return render(request, "epos_qbo/settings.html", context)
+
+
+def _schedule_default_timezone_name() -> str:
+    return str(
+        getattr(
+            settings,
+            "OIAT_BUSINESS_TIMEZONE",
+            getattr(settings, "TIME_ZONE", "UTC"),
+        )
+    )
+
+
+def _schedule_create_initial() -> dict:
+    return {
+        "enabled": True,
+        "scope": RunJob.SCOPE_ALL,
+        "cron_expr": "0 18 * * *",
+        "timezone_name": _schedule_default_timezone_name(),
+        "target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        "parallel": _dashboard_default_parallel(),
+        "stagger_seconds": _dashboard_default_stagger_seconds(),
+        "continue_on_failure": False,
+    }
+
+
+def _form_error_text(form: RunScheduleForm) -> str:
+    parts: list[str] = []
+    for field_name, errors in form.errors.items():
+        label = "General" if field_name == "__all__" else field_name
+        joined = ", ".join([str(err) for err in errors])
+        parts.append(f"{label}: {joined}")
+    return "; ".join(parts)
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_GET
+def schedules_page(request):
+    _ensure_company_records()
+    schedules = list(RunSchedule.objects.order_by("-is_system_managed", "name", "created_at"))
+    recent_events = list(
+        RunScheduleEvent.objects.select_related("schedule", "run_job", "run_job__scheduled_by")
+        .order_by("-created_at")[:60]
+    )
+    active_run_ids = list(
+        RunJob.objects.filter(
+            scheduled_by__isnull=False,
+            status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING],
+        )
+        .order_by("-created_at")
+        .values_list("id", flat=True)[:20]
+    )
+    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    context = {
+        "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
+        "schedules": schedules,
+        "recent_events": recent_events,
+        "companies": companies,
+        "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
+        "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        "single_scope": RunJob.SCOPE_SINGLE,
+        "all_scope": RunJob.SCOPE_ALL,
+        "scheduler_status": get_scheduler_status(),
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Schedules", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/schedules.html", context)
+
+
+@login_required
+@require_GET
+def schedule_status_api(request):
+    """Return current scheduler status as JSON for live polling on the Schedules page."""
+    status = get_scheduler_status()
+    return JsonResponse({
+        "running": status["running"],
+        "message": status.get("message", ""),
+    })
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_create(request):
+    form = RunScheduleForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        return redirect("epos_qbo:schedules")
+
+    schedule: RunSchedule = form.save(commit=False)
+    schedule.created_by = request.user
+    schedule.updated_by = request.user
+    if schedule.enabled:
+        try:
+            schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
+        except Exception as exc:
+            messages.error(request, f"Unable to compute next fire time: {exc}")
+            return redirect("epos_qbo:schedules")
+    else:
+        schedule.next_fire_at = None
+    schedule.save()
+    messages.success(request, f"Schedule created: {schedule.name}")
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_update(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be edited.")
+        return redirect("epos_qbo:schedules")
+
+    form = RunScheduleForm(request.POST, instance=schedule)
+    if not form.is_valid():
+        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        return redirect("epos_qbo:schedules")
+
+    schedule = form.save(commit=False)
+    schedule.updated_by = request.user
+    if schedule.enabled:
+        try:
+            schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
+        except Exception as exc:
+            messages.error(request, f"Unable to compute next fire time: {exc}")
+            return redirect("epos_qbo:schedules")
+    else:
+        schedule.next_fire_at = None
+    schedule.save()
+    messages.success(request, f"Schedule updated: {schedule.name}")
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_toggle(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be toggled manually.")
+        return redirect("epos_qbo:schedules")
+
+    schedule.enabled = not schedule.enabled
+    schedule.updated_by = request.user
+    if schedule.enabled:
+        try:
+            schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
+        except Exception as exc:
+            messages.error(request, f"Could not enable schedule: {exc}")
+            return redirect("epos_qbo:schedules")
+        message = f"Schedule enabled: {schedule.name}"
+    else:
+        schedule.next_fire_at = None
+        message = f"Schedule disabled: {schedule.name}"
+    schedule.save(update_fields=["enabled", "next_fire_at", "updated_by", "updated_at"])
+    messages.success(request, message)
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_run_now(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
+        messages.error(request, "Single-company schedule is missing company key.")
+        return redirect("epos_qbo:schedules")
+
+    job, result = enqueue_run_for_schedule(schedule, now=timezone.now(), source="manual")
+    if job is None and result == RunScheduleEvent.TYPE_SKIPPED_OVERLAP:
+        messages.warning(request, "Schedule already has a queued/running run. Manual enqueue skipped.")
+        return redirect("epos_qbo:schedules")
+    if job is None:
+        messages.error(request, "Could not queue run for schedule.")
+        return redirect("epos_qbo:schedules")
+
+    dispatch_next_queued_job()
+    job.refresh_from_db()
+    if job.status == RunJob.STATUS_RUNNING:
+        messages.success(request, f"Scheduled run started: {job.display_label}")
+        return redirect("epos_qbo:run-detail", job_id=job.id)
+
+    messages.success(request, f"Scheduled run queued: {job.display_label}")
+    return redirect("epos_qbo:schedules")
+
+
+@login_required
+@permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
+@require_POST
+def schedule_delete(request, schedule_id):
+    schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be deleted.")
+        return redirect("epos_qbo:schedules")
+
+    schedule_name = schedule.name
+    schedule.delete()
+    messages.success(request, f"Schedule deleted: {schedule_name}")
+    return redirect("epos_qbo:schedules")
 
 
 def _reconciliation_label_for_job(job_id: str, artifacts_by_job: dict) -> str:

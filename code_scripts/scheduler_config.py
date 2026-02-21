@@ -53,7 +53,7 @@ def _normalize_log_level(raw_level: str) -> str:
 def load_scheduler_config() -> SchedulerConfig:
     schedule_cron = (os.getenv("SCHEDULE_CRON") or "").strip()
     if not schedule_cron:
-        raise ValueError("SCHEDULE_CRON is required (cron syntax: '*/5 * * * *').")
+        raise ValueError("SCHEDULE_CRON is required (cron syntax: '0 18 * * *' for 6pm daily).")
 
     schedule_tz = _validate_timezone_name(
         (os.getenv("SCHEDULE_TZ") or DEFAULT_SCHEDULE_TZ).strip() or DEFAULT_SCHEDULE_TZ

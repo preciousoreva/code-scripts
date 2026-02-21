@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django import forms
+
+from .models import RunJob, RunSchedule, validate_cron_expr, validate_timezone_name
 
 
 def _int_setting(name: str, default: int, *, minimum: int = 0) -> int:
@@ -23,6 +26,16 @@ def _default_parallel() -> int:
 
 def _default_stagger_seconds() -> int:
     return _int_setting("OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS", 2, minimum=0)
+
+
+def _default_schedule_timezone() -> str:
+    return str(
+        getattr(
+            settings,
+            "OIAT_BUSINESS_TIMEZONE",
+            getattr(settings, "TIME_ZONE", "UTC"),
+        )
+    )
 
 
 class RunTriggerForm(forms.Form):
@@ -127,3 +140,82 @@ class CompanyAdvancedForm(forms.Form):
     @staticmethod
     def today_iso() -> str:
         return date.today().isoformat()
+
+
+class RunScheduleForm(forms.ModelForm):
+    class Meta:
+        model = RunSchedule
+        fields = [
+            "name",
+            "enabled",
+            "scope",
+            "company_key",
+            "cron_expr",
+            "timezone_name",
+            "target_date_mode",
+            "parallel",
+            "stagger_seconds",
+            "continue_on_failure",
+        ]
+        widgets = {
+            "target_date_mode": forms.HiddenInput(),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["scope"].choices = RunJob.SCOPE_CHOICES
+        self.fields["target_date_mode"].initial = RunSchedule.TARGET_DATE_MODE_TRADING_DATE
+        self.fields["timezone_name"].initial = self.initial.get("timezone_name") or _default_schedule_timezone()
+        self.fields["parallel"].min_value = 1
+        self.fields["stagger_seconds"].min_value = 0
+        self.fields["parallel"].initial = self.initial.get("parallel", _default_parallel())
+        self.fields["stagger_seconds"].initial = self.initial.get("stagger_seconds", _default_stagger_seconds())
+
+    def clean_cron_expr(self) -> str:
+        value = (self.cleaned_data.get("cron_expr") or "").strip()
+        try:
+            validate_cron_expr(value)
+        except Exception as exc:
+            raise forms.ValidationError("Enter a valid cron expression.") from exc
+        return value
+
+    def clean_timezone_name(self) -> str:
+        value = (self.cleaned_data.get("timezone_name") or "").strip()
+        if not value:
+            value = _default_schedule_timezone()
+        try:
+            validate_timezone_name(value)
+        except Exception as exc:
+            raise forms.ValidationError("Enter a valid timezone name (e.g. Africa/Lagos).") from exc
+        return value
+
+    def clean_target_date_mode(self) -> str:
+        value = (self.cleaned_data.get("target_date_mode") or "").strip()
+        if value != RunSchedule.TARGET_DATE_MODE_TRADING_DATE:
+            return RunSchedule.TARGET_DATE_MODE_TRADING_DATE
+        return value
+
+    def clean(self):
+        cleaned = super().clean()
+        scope = cleaned.get("scope")
+        company_key = (cleaned.get("company_key") or "").strip()
+
+        if scope == RunJob.SCOPE_SINGLE and not company_key:
+            self.add_error("company_key", "Company key is required for single-company schedules.")
+
+        if scope == RunJob.SCOPE_ALL:
+            cleaned["company_key"] = None
+        else:
+            cleaned["company_key"] = company_key
+            cleaned["parallel"] = 1
+            cleaned["continue_on_failure"] = False
+
+        timezone_name = cleaned.get("timezone_name")
+        if timezone_name:
+            try:
+                ZoneInfo(timezone_name)
+            except Exception:
+                self.add_error("timezone_name", "Invalid timezone name.")
+
+        cleaned["target_date_mode"] = RunSchedule.TARGET_DATE_MODE_TRADING_DATE
+        return cleaned
