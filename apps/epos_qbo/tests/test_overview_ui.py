@@ -347,6 +347,54 @@ class OverviewUIContextTests(TestCase):
         # 10 minutes from the succeeded run only (target-date logic).
         self.assertEqual(context["kpis"]["avg_runtime_today_seconds"], 600)
 
+    def test_overview_avg_runtime_includes_successful_runs_with_zero_uploads(self):
+        yesterday_date = (self.fixed_now - timedelta(days=1)).date()
+        prev_date = (self.fixed_now - timedelta(days=2)).date()
+
+        prev_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(days=1, minutes=4),
+            finished_at=self.fixed_now - timedelta(days=1, minutes=2),
+        )
+        RunArtifact.objects.create(
+            run_job=prev_run,
+            company_key=self.company.company_key,
+            target_date=prev_date,
+            processed_at=self.fixed_now - timedelta(days=1, minutes=1),
+            source_path="/tmp/prev_zero_uploads.json",
+            source_hash="hash-prev-zero-uploads",
+            upload_stats_json={"uploaded": 0, "skipped": 2, "failed": 0},
+        )
+
+        today_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=2),
+            finished_at=self.fixed_now - timedelta(minutes=1),
+        )
+        RunArtifact.objects.create(
+            run_job=today_run,
+            company_key=self.company.company_key,
+            target_date=yesterday_date,
+            processed_at=self.fixed_now - timedelta(seconds=30),
+            source_path="/tmp/today_zero_uploads.json",
+            source_hash="hash-today-zero-uploads",
+            upload_stats_json={"uploaded": 0, "skipped": 3, "failed": 0},
+        )
+
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            context = views._overview_context()
+
+        self.assertEqual(context["kpis"]["avg_runtime_today_seconds"], 60)
+        self.assertIn("50.0% faster vs Feb 11", context["kpis"]["avg_runtime_today_trend_text"])
+
     def test_overview_sales_24h_uses_decrease_wording_for_negative_delta(self):
         prev_date = (self.fixed_now - timedelta(days=2)).date()
         this_date = (self.fixed_now - timedelta(days=1)).date()
@@ -469,6 +517,121 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(context["kpis"]["sales_24h_total"], Decimal("12019300.0000"))
         self.assertEqual(context["kpis"]["sales_prev_24h_total"], Decimal("0.0000"))
 
+    def test_overview_context_company_filter_changes_kpis_but_keeps_revenue_chart_scope(self):
+        CompanyConfigRecord.objects.create(
+            company_key="company_b",
+            display_name="Company B",
+            config_json={
+                "company_key": "company_b",
+                "display_name": "Company B",
+                "qbo": {"realm_id": "987654321"},
+                "epos": {"username_env_key": "EPOS_USERNAME_B", "password_env_key": "EPOS_PASSWORD_B"},
+            },
+        )
+        target_date = (self.fixed_now - timedelta(days=1)).date()
+        prev_target_date = (self.fixed_now - timedelta(days=2)).date()
+
+        run_a_prev = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=run_a_prev,
+            company_key="company_a",
+            target_date=prev_target_date,
+            processed_at=self.fixed_now - timedelta(hours=30),
+            source_path="/tmp/company_a_prev_filter.json",
+            source_hash="company-a-prev-filter",
+            reconcile_epos_total=100.0,
+            upload_stats_json={"uploaded": 2, "skipped": 0, "failed": 0},
+        )
+        run_a_current = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=15),
+            finished_at=self.fixed_now - timedelta(minutes=10),
+        )
+        RunArtifact.objects.create(
+            run_job=run_a_current,
+            company_key="company_a",
+            target_date=target_date,
+            processed_at=self.fixed_now - timedelta(hours=2),
+            source_path="/tmp/company_a_current_filter.json",
+            source_hash="company-a-current-filter",
+            reconcile_epos_total=150.0,
+            upload_stats_json={"uploaded": 2, "skipped": 0, "failed": 0},
+        )
+
+        run_b_prev = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_b",
+            status=RunJob.STATUS_SUCCEEDED,
+        )
+        RunArtifact.objects.create(
+            run_job=run_b_prev,
+            company_key="company_b",
+            target_date=prev_target_date,
+            processed_at=self.fixed_now - timedelta(hours=29),
+            source_path="/tmp/company_b_prev_filter.json",
+            source_hash="company-b-prev-filter",
+            reconcile_epos_total=200.0,
+            upload_stats_json={"uploaded": 2, "skipped": 0, "failed": 0},
+        )
+        run_b_current = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_b",
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=25),
+            finished_at=self.fixed_now - timedelta(minutes=20),
+        )
+        RunArtifact.objects.create(
+            run_job=run_b_current,
+            company_key="company_b",
+            target_date=target_date,
+            processed_at=self.fixed_now - timedelta(hours=3),
+            source_path="/tmp/company_b_current_filter.json",
+            source_hash="company-b-current-filter",
+            reconcile_epos_total=260.0,
+            upload_stats_json={"uploaded": 2, "skipped": 0, "failed": 0},
+        )
+        run_b_failed = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_b",
+            status=RunJob.STATUS_FAILED,
+        )
+        RunArtifact.objects.create(
+            run_job=run_b_failed,
+            company_key="company_b",
+            target_date=target_date,
+            processed_at=self.fixed_now - timedelta(hours=1),
+            source_path="/tmp/company_b_failed_filter.json",
+            source_hash="company-b-failed-filter",
+            reconcile_epos_total=999.0,
+            upload_stats_json={"uploaded": 1, "skipped": 0, "failed": 0},
+        )
+
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            all_context = views._overview_context()
+            company_context = views._overview_context(company_key="company_a")
+
+        self.assertEqual(all_context["kpis"]["run_success_ratio_24h"], "2/3")
+        self.assertEqual(company_context["kpis"]["run_success_ratio_24h"], "1/1")
+        self.assertEqual(company_context["kpis"]["sales_24h_total"], Decimal("150.0000"))
+        self.assertEqual(
+            {series["company_key"] for series in company_context["revenue_series"]},
+            {"company_a", "company_b"},
+        )
+        self.assertEqual(
+            {item["company_key"] for item in company_context["revenue_company_options"]},
+            {"company_a", "company_b"},
+        )
+
 
 class OverviewUITemplateTests(TestCase):
     def setUp(self):
@@ -508,6 +671,7 @@ class OverviewUITemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn('id="overview-company-filter"', html)
+        self.assertIn(f'data-panels-url="{reverse("epos_qbo:overview-panels")}"', html)
         self.assertIn("js/overview.js", html)
 
     def test_overview_does_not_render_run_reliability_panel(self):
@@ -568,6 +732,29 @@ class OverviewUITemplateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn('<option value="90d" selected>', html)
+
+    def test_overview_panels_company_filter_keeps_revenue_company_options(self):
+        CompanyConfigRecord.objects.create(
+            company_key="company_b",
+            display_name="Company B",
+            config_json={
+                "company_key": "company_b",
+                "display_name": "Company B",
+                "qbo": {"realm_id": "987654321"},
+                "epos": {"username_env_key": "EPOS_USERNAME_B", "password_env_key": "EPOS_PASSWORD_B"},
+            },
+        )
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            response = self.client.get(reverse("epos_qbo:overview-panels"), {"company": "company_a"})
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn('value="company_a">Company A</option>', html)
+        self.assertIn('value="company_b">Company B</option>', html)
 
     def test_overview_topbar_uses_quick_sync_label(self):
         perm = Permission.objects.get(codename="can_trigger_runs")

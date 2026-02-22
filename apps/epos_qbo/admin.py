@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from .models import CompanyConfigRecord, RunArtifact, RunJob, RunLock
+from .models import (
+    CompanyConfigRecord,
+    RunArtifact,
+    RunJob,
+    RunLock,
+    RunSchedule,
+    RunScheduleEvent,
+)
 
 
 @admin.register(CompanyConfigRecord)
@@ -26,3 +33,27 @@ class RunArtifactAdmin(admin.ModelAdmin):
 @admin.register(RunLock)
 class RunLockAdmin(admin.ModelAdmin):
     list_display = ("id", "active", "holder", "owner_run_job", "acquired_at", "updated_at")
+
+
+@admin.register(RunSchedule)
+class RunScheduleAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "enabled",
+        "scope",
+        "company_key",
+        "cron_expr",
+        "timezone_name",
+        "next_fire_at",
+        "last_fired_at",
+        "is_system_managed",
+    )
+    list_filter = ("enabled", "scope", "is_system_managed", "timezone_name")
+    search_fields = ("name", "company_key", "cron_expr")
+
+
+@admin.register(RunScheduleEvent)
+class RunScheduleEventAdmin(admin.ModelAdmin):
+    list_display = ("event_type", "schedule", "run_job", "created_at")
+    list_filter = ("event_type",)
+    search_fields = ("message",)

@@ -18,6 +18,19 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
         return default
     return value
 
+
+def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
 # Security: prefer env in production; dev default only when explicitly enabled
 _SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 if _SECRET_KEY:
@@ -130,6 +143,7 @@ OIAT_DASHBOARD_REAUTH_GUIDANCE = os.getenv(
     "OIAT_DASHBOARD_REAUTH_GUIDANCE",
     "QBO re-authentication required. Run OAuth flow and store tokens using code_scripts/store_tokens.py.",
 )
+OIAT_DASHBOARD_RECON_DIFF_WARNING = _env_float("OIAT_DASHBOARD_RECON_DIFF_WARNING", 1.0, minimum=0)
 # Timezone for dashboard "today" / "yesterday" (overview KPIs, Run Success, receipts uploaded, Quick Sync default).
 # Set to match your scheduler (e.g. America/New_York). If unset, uses TIME_ZONE (UTC).
 OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)

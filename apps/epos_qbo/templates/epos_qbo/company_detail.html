@@ -12,7 +12,7 @@
     <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
         <div>
             <div class="flex items-center gap-3 mb-2">
-                <h1 class="text-3xl font-bold text-slate-900 dark:text-slate-100">{{ company_data.company.display_name }}</h1>
+                <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ company_data.company.display_name }}</h1>
                 <span class="px-3 py-1 bg-{{ company_data.status.color }}-100 dark:bg-{{ company_data.status.color }}-900/30 text-{{ company_data.status.color }}-700 dark:text-{{ company_data.status.color }}-400 text-sm font-medium rounded-full flex items-center gap-2">
                     <span class="w-2 h-2 bg-{{ company_data.status.color }}-500 rounded-full"></span>
                     {{ company_data.status.label }}

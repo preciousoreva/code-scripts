@@ -9,46 +9,211 @@
 {% block content %}
 <div class="space-y-8">
     <div>
-        <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Settings</h1>
-        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Dashboard defaults and appearance</p>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Settings</h1>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Portal defaults, your preferences, and effective configuration</p>
     </div>
 
-    <!-- Dashboard (read-only) -->
+    {% if can_edit_portal %}
+    <!-- Portal defaults (editable with can_manage_portal_settings permission) -->
     <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
-        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">Dashboard</h2>
-        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">These values are read from environment variables. Change them in <code class="font-mono text-xs bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 rounded">.env</code> and restart the server to apply.</p>
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">Portal defaults</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">Override environment defaults for the whole portal. Leave a field blank to use the value from <code class="font-mono text-xs bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 rounded">.env</code>.</p>
+        <form id="portal-defaults-form" method="post" action="{% url 'epos_qbo:settings' %}" class="space-y-6">
+            {% csrf_token %}
+            <input type="hidden" name="save_portal" value="1">
+            <div class="space-y-4">
+                <h3 class="text-sm font-medium text-slate-600 dark:text-slate-400 uppercase tracking-wider">Run trigger &amp; dashboard</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label for="id_default_parallel" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Default parallel workers</label>
+                        {{ portal_form.default_parallel }}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Runs page: workers when triggering all companies.</p>
+                        {% if portal_form.default_parallel.errors %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.default_parallel.errors.0 }}</p>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <label for="id_default_stagger_seconds" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Stagger (seconds)</label>
+                        {{ portal_form.default_stagger_seconds }}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Delay between starting each company run.</p>
+                        {% if portal_form.default_stagger_seconds.errors %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.default_stagger_seconds.errors.0 }}</p>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <label for="id_dashboard_timezone" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Dashboard timezone</label>
+                        {{ portal_form.dashboard_timezone }}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Calendar “today” and date filters across the portal.</p>
+                        {% if portal_form.dashboard_timezone.errors %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.dashboard_timezone.errors.0 }}</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="space-y-4">
+                <h3 class="text-sm font-medium text-slate-600 dark:text-slate-400 uppercase tracking-wider">Warnings &amp; thresholds</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label for="id_stale_hours_warning" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Stale warning (hours)</label>
+                        {{ portal_form.stale_hours_warning }}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Hours since last run before “stale” warning on Overview.</p>
+                        {% if portal_form.stale_hours_warning.errors %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.stale_hours_warning.errors.0 }}</p>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <label for="id_refresh_expiring_days" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Refresh token expiring (days)</label>
+                        {{ portal_form.refresh_expiring_days }}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">When to show “refresh QBO token soon” warning.</p>
+                        {% if portal_form.refresh_expiring_days.errors %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.refresh_expiring_days.errors.0 }}</p>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <label for="id_reconcile_diff_warning" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Reconcile warning threshold</label>
+                        {{ portal_form.reconcile_diff_warning }}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Max allowed EPOS vs QBO difference before warning.</p>
+                        {% if portal_form.reconcile_diff_warning.errors %}
+                        <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.reconcile_diff_warning.errors.0 }}</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="space-y-4">
+                <h3 class="text-sm font-medium text-slate-600 dark:text-slate-400 uppercase tracking-wider">Token re-auth</h3>
+                <div>
+                    <label for="id_reauth_guidance" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Re-auth guidance (shown when QBO tokens need refresh)</label>
+                    {{ portal_form.reauth_guidance }}
+                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Instructions shown to operators when tokens are expired or missing.</p>
+                    {% if portal_form.reauth_guidance.errors %}
+                    <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ portal_form.reauth_guidance.errors.0 }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            <button type="submit" id="save-portal-btn" class="btn btn-primary opacity-60 cursor-not-allowed" disabled aria-describedby="portal-save-hint">Save portal defaults</button>
+            <p id="portal-save-hint" class="sr-only">Button is enabled when you change a value.</p>
+        </form>
+    </section>
+    {% endif %}
+
+    <!-- My preferences -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">My preferences</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">Default company and revenue period when you open the Overview with no filters.</p>
+        <form id="preferences-form" method="post" action="{% url 'epos_qbo:settings' %}" class="space-y-4">
+            {% csrf_token %}
+            <input type="hidden" name="save_preferences" value="1">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label for="id_default_revenue_period" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Default revenue period</label>
+                    {{ user_prefs_form.default_revenue_period }}
+                    {% if user_prefs_form.default_revenue_period.errors %}
+                    <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ user_prefs_form.default_revenue_period.errors.0 }}</p>
+                    {% endif %}
+                </div>
+                <div>
+                    <label for="id_default_overview_company_key" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Default company (Overview)</label>
+                    {{ user_prefs_form.default_overview_company_key }}
+                    {% if user_prefs_form.default_overview_company_key.errors %}
+                    <p class="mt-1 text-sm text-red-600 dark:text-red-400">{{ user_prefs_form.default_overview_company_key.errors.0 }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            <button type="submit" id="save-preferences-btn" class="btn btn-primary opacity-60 cursor-not-allowed" disabled aria-describedby="prefs-save-hint">Save preferences</button>
+            <p id="prefs-save-hint" class="sr-only">Button is enabled when you change a value.</p>
+        </form>
+    </section>
+
+    <!-- Dashboard (read-only effective values) -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">Dashboard (effective values)</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">Values in use now. When a portal default is set above, it overrides env; otherwise <code class="font-mono text-xs bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 rounded">.env</code> applies. Restart the server after changing env.</p>
         <dl class="space-y-4">
             <div>
                 <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Timezone</dt>
                 <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">Data in <strong>{{ dashboard_timezone_display }}</strong> ({{ dashboard_timezone_name }})</dd>
-                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_TIMEZONE={{ dashboard_timezone_name }}</dd>
             </div>
             <div>
                 <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Default parallel workers</dt>
                 <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ default_parallel }}</dd>
-                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_DEFAULT_PARALLEL={{ default_parallel }}</dd>
             </div>
             <div>
                 <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Stagger (seconds)</dt>
                 <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ default_stagger_seconds }}</dd>
-                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_DEFAULT_STAGGER_SECONDS={{ default_stagger_seconds }}</dd>
             </div>
             <div>
                 <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Stale warning (hours)</dt>
                 <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ stale_hours_warning }}</dd>
-                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_STALE_HOURS_WARNING={{ stale_hours_warning }}</dd>
             </div>
             <div>
                 <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Refresh token expiring (days)</dt>
                 <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ refresh_expiring_days }}</dd>
-                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_REFRESH_EXPIRING_DAYS={{ refresh_expiring_days }}</dd>
             </div>
             <div>
                 <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Reconcile warning threshold</dt>
                 <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100">{{ reconcile_diff_warning }}</dd>
-                <dd class="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">OIAT_DASHBOARD_RECON_DIFF_WARNING={{ reconcile_diff_warning }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Re-auth guidance</dt>
+                <dd class="mt-1 text-sm text-slate-600 dark:text-slate-300 whitespace-pre-wrap">{{ reauth_guidance|default:"—" }}</dd>
             </div>
         </dl>
     </section>
+
+    <!-- Scheduler / environment (read-only) -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">Scheduler / environment</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">Read from environment. Change in <code class="font-mono text-xs bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200 px-1.5 py-0.5 rounded">.env</code> and restart the scheduler service to apply.</p>
+        <dl class="space-y-4">
+            {% for key, value in scheduler_env.items %}
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider font-mono">{{ key }}</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100 font-mono">{{ value }}</dd>
+            </div>
+            {% endfor %}
+        </dl>
+    </section>
+
+    <!-- API tokens (coming soon) -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">API tokens</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400">When implemented, API or personal access tokens will be managed here.</p>
+    </section>
 </div>
+
+<script>
+(function() {
+    function formState(form) {
+        var o = {};
+        var els = form.querySelectorAll('input[name], select[name], textarea[name]');
+        for (var i = 0; i < els.length; i++) {
+            var el = els[i];
+            if (el.name === 'csrfmiddlewaretoken' || el.name === 'save_portal' || el.name === 'save_preferences') continue;
+            if (el.type === 'checkbox') o[el.name] = el.checked ? '1' : '';
+            else o[el.name] = el.value || '';
+        }
+        return JSON.stringify(o);
+    }
+    function wireDirtyCheck(formId, btnId) {
+        var form = document.getElementById(formId);
+        var btn = document.getElementById(btnId);
+        if (!form || !btn) return;
+        var initial = formState(form);
+        function update() {
+            var dirty = formState(form) !== initial;
+            btn.disabled = !dirty;
+            if (dirty) {
+                btn.classList.remove('opacity-60', 'cursor-not-allowed');
+            } else {
+                btn.classList.add('opacity-60', 'cursor-not-allowed');
+            }
+        }
+        form.addEventListener('input', update);
+        form.addEventListener('change', update);
+        update();
+    }
+    wireDirtyCheck('portal-defaults-form', 'save-portal-btn');
+    wireDirtyCheck('preferences-form', 'save-preferences-btn');
+})();
+</script>
 {% endblock %}

@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+
+{% block title %}Tools • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <div>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Tools</h1>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Run QBO queries, verify account mappings, and access pipeline utilities.</p>
+    </div>
+
+    <!-- QBO Query Tool -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm" x-data="qboQueryTool()">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
+                <iconify-icon icon="solar:database-linear" width="20"></iconify-icon>
+            </div>
+            <div>
+                <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">QBO Query</h2>
+                <p class="text-xs text-slate-500 dark:text-slate-400">Execute QuickBooks Online SQL-like queries against the API.</p>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div class="sm:col-span-1">
+                    <label for="qbo-query-company" class="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">Company</label>
+                    <select id="qbo-query-company" x-model="company"
+                        class="block w-full h-9 px-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500">
+                        <option value="">Select company...</option>
+                        {% for opt in company_options %}
+                        <option value="{{ opt.value }}">{{ opt.label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="sm:col-span-3">
+                    <label for="qbo-query-input" class="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">SQL Query</label>
+                    <textarea id="qbo-query-input" x-model="query" rows="2"
+                        placeholder="select Id, Name from Item maxresults 5"
+                        class="block w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-sm font-mono text-slate-700 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500 resize-y"></textarea>
+                </div>
+            </div>
+            <div class="flex items-center gap-3">
+                <button type="button" @click="runQuery()" :disabled="loading || !company || !query.trim()" class="btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed">
+                    <template x-if="loading">
+                        <iconify-icon icon="svg-spinners:ring-resize" width="16"></iconify-icon>
+                    </template>
+                    <template x-if="!loading">
+                        <iconify-icon icon="solar:play-linear" width="16"></iconify-icon>
+                    </template>
+                    <span x-text="loading ? 'Running...' : 'Run Query'"></span>
+                </button>
+                <button type="button" x-show="resultJson || errorMsg" @click="clearResult()" class="btn btn-secondary btn-sm">Clear</button>
+            </div>
+        </div>
+
+        <!-- Error -->
+        <div x-show="errorMsg" x-cloak class="mt-6 rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3">
+            <p class="text-sm font-medium text-red-800 dark:text-red-200">Error</p>
+            <pre class="text-xs text-red-700 dark:text-red-300 mt-1 whitespace-pre-wrap break-words font-mono max-h-48 overflow-auto" x-text="errorMsg"></pre>
+        </div>
+
+        <!-- Result -->
+        <div x-show="resultJson" x-cloak class="mt-6">
+            <div class="flex items-center justify-between mb-2">
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Result</p>
+                <button type="button" @click="copyResult()" class="btn btn-secondary btn-sm">
+                    <iconify-icon icon="solar:copy-linear" width="14"></iconify-icon>
+                    Copy JSON
+                </button>
+            </div>
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 p-4 max-h-96 overflow-auto">
+                <pre class="text-xs font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-words" x-text="resultJson"></pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- Verify Mapping Accounts -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm" x-data="verifyMappingTool()">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400">
+                <iconify-icon icon="solar:check-circle-linear" width="20"></iconify-icon>
+            </div>
+            <div>
+                <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">Verify Mapping Accounts</h2>
+                <p class="text-xs text-slate-500 dark:text-slate-400">Check that all accounts in Product.Mapping.csv exist in QuickBooks Online.</p>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <div class="max-w-xs">
+                <label for="verify-mapping-company" class="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">Company</label>
+                <select id="verify-mapping-company" x-model="company"
+                    class="block w-full h-9 px-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500">
+                    <option value="">Select company...</option>
+                    {% for opt in company_options %}
+                    <option value="{{ opt.value }}">{{ opt.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <button type="button" @click="runVerify()" :disabled="loading || !company" class="btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed">
+                    <template x-if="loading">
+                        <iconify-icon icon="svg-spinners:ring-resize" width="16"></iconify-icon>
+                    </template>
+                    <template x-if="!loading">
+                        <iconify-icon icon="solar:shield-check-linear" width="16"></iconify-icon>
+                    </template>
+                    <span x-text="loading ? 'Verifying...' : 'Run Verification'"></span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Error -->
+        <div x-show="errorMsg" x-cloak class="mt-6 rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3 flex items-start justify-between gap-3">
+            <div class="min-w-0 flex-1">
+                <p class="text-sm font-medium text-red-800 dark:text-red-200">Error</p>
+                <pre class="text-xs text-red-700 dark:text-red-300 mt-1 whitespace-pre-wrap break-words font-mono max-h-48 overflow-auto" x-text="errorMsg"></pre>
+            </div>
+            <button type="button" @click="closeResult()" class="btn btn-icon flex-shrink-0 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/30 rounded-md" aria-label="Close">
+                <iconify-icon icon="solar:close-circle-linear" width="20"></iconify-icon>
+            </button>
+        </div>
+
+        <!-- Result -->
+        <div x-show="output" x-cloak class="mt-6">
+            <div class="flex items-center justify-between gap-2 mb-2">
+                <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Verification Result</p>
+                <div class="flex items-center gap-2">
+                    <button type="button" @click="copyOutput()" class="btn btn-secondary btn-sm">
+                        <iconify-icon icon="solar:copy-linear" width="14"></iconify-icon>
+                        Copy
+                    </button>
+                    <button type="button" @click="closeResult()" class="btn btn-secondary btn-sm" aria-label="Close result">
+                        <iconify-icon icon="solar:close-circle-linear" width="14"></iconify-icon>
+                        Close
+                    </button>
+                </div>
+            </div>
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 p-4 max-h-96 overflow-auto">
+                <pre class="text-xs font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-words" x-text="output"></pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- Other Tools (CLI reference) -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <div class="flex items-center gap-3 mb-4">
+            <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+                <iconify-icon icon="solar:command-linear" width="20"></iconify-icon>
+            </div>
+            <div>
+                <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">CLI Tools Reference</h2>
+                <p class="text-xs text-slate-500 dark:text-slate-400">Additional pipeline scripts available from the command line.</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Bills -->
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <iconify-icon icon="solar:bill-list-linear" width="18" class="text-slate-500 dark:text-slate-400"></iconify-icon>
+                    <h3 class="text-sm font-medium text-slate-900 dark:text-slate-100">Bills (Import / Export)</h3>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Export existing QBO bills to CSV or re-import bills from CSV files.</p>
+                <div class="space-y-2">
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/bills/qbo_export_bills.py --company company_a</code>
+                    </div>
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/bills/qbo_import_bills.py --company company_a --all --dry-run</code>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Invoices -->
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <iconify-icon icon="solar:document-text-linear" width="18" class="text-slate-500 dark:text-slate-400"></iconify-icon>
+                    <h3 class="text-sm font-medium text-slate-900 dark:text-slate-100">Invoices</h3>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Prepare, transform, and import invoices from CSV into QuickBooks.</p>
+                <div class="space-y-2">
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/invoice/prepare_invoice_csv.py --company company_a</code>
+                    </div>
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/invoice/qbo_import_invoices.py --company company_a --dry-run</code>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Delete Sales Receipts -->
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <iconify-icon icon="solar:trash-bin-minimalistic-linear" width="18" class="text-red-500 dark:text-red-400"></iconify-icon>
+                    <h3 class="text-sm font-medium text-slate-900 dark:text-slate-100">Delete Sales Receipts</h3>
+                    <span class="inline-flex items-center rounded-full bg-red-50 dark:bg-red-900/30 px-2 py-0.5 text-[9px] font-medium uppercase text-red-600 dark:text-red-400">Destructive</span>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Delete QBO Sales Receipts by DocNumber, date, or date range. Always use <code class="font-mono bg-slate-100 dark:bg-slate-700 px-1 rounded">--dry-run</code> first.</p>
+                <div class="space-y-2">
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/qbo_delete_sales_receipts.py --company company_a --target-date 2026-01-15 --dry-run</code>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Inventory Manager -->
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <iconify-icon icon="solar:box-linear" width="18" class="text-slate-500 dark:text-slate-400"></iconify-icon>
+                    <h3 class="text-sm font-medium text-slate-900 dark:text-slate-100">Inventory Manager</h3>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Manage QBO inventory items: get, list, export/import products, set InvStartDate.</p>
+                <div class="space-y-2">
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/qbo_inv_manager.py --company company_a export-products --out exports/products.csv</code>
+                    </div>
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/qbo_inv_manager.py --company company_a get --name "ITEM-NAME"</code>
+                    </div>
+                </div>
+            </div>
+
+            <!-- General QBO Query (CLI) -->
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 p-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <iconify-icon icon="solar:monitor-linear" width="18" class="text-slate-500 dark:text-slate-400"></iconify-icon>
+                    <h3 class="text-sm font-medium text-slate-900 dark:text-slate-100">QBO Account Query (CLI)</h3>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-3">Query QBO accounts by name or number, and verify mapping file accounts.</p>
+                <div class="space-y-2">
+                    <div class="rounded-md bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 p-2">
+                        <code class="text-[11px] font-mono text-slate-600 dark:text-slate-300 break-all">python code_scripts/scripts/qbo_queries/qbo_account_query.py --company company_a --account-name "120300 - Non - Food Items"</code>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script>
+function getCsrfToken() {
+    var name = 'csrftoken';
+    var cookies = document.cookie.split(';');
+    for (var i = 0; i < cookies.length; i++) {
+        var c = cookies[i].trim();
+        if (c.indexOf(name + '=') === 0) return c.substring(name.length + 1);
+    }
+    return '';
+}
+
+function qboQueryTool() {
+    return {
+        company: '',
+        query: '',
+        loading: false,
+        resultJson: '',
+        errorMsg: '',
+        clearResult() {
+            this.resultJson = '';
+            this.errorMsg = '';
+        },
+        async runQuery() {
+            this.clearResult();
+            if (!this.company || !this.query.trim()) return;
+            this.loading = true;
+            try {
+                var resp = await fetch("{% url 'epos_qbo:tools-qbo-query' %}", {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken()},
+                    body: JSON.stringify({company_key: this.company, query: this.query})
+                });
+                var data = await resp.json();
+                if (data.success) {
+                    this.resultJson = JSON.stringify(data.data, null, 2);
+                } else {
+                    this.errorMsg = data.error || 'Unknown error';
+                }
+            } catch (e) {
+                this.errorMsg = 'Network error: ' + e.message;
+            } finally {
+                this.loading = false;
+            }
+        },
+        copyResult() {
+            if (this.resultJson && navigator.clipboard) {
+                navigator.clipboard.writeText(this.resultJson);
+            }
+        }
+    };
+}
+
+function verifyMappingTool() {
+    return {
+        company: '',
+        loading: false,
+        output: '',
+        errorMsg: '',
+        closeResult() {
+            this.output = '';
+            this.errorMsg = '';
+        },
+        async runVerify() {
+            this.output = '';
+            this.errorMsg = '';
+            if (!this.company) return;
+            this.loading = true;
+            try {
+                var resp = await fetch("{% url 'epos_qbo:tools-verify-mapping' %}", {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken()},
+                    body: JSON.stringify({company_key: this.company})
+                });
+                var data = await resp.json();
+                if (data.success) {
+                    this.output = data.output || 'Verification complete (no output).';
+                } else {
+                    this.errorMsg = data.error || 'Verification failed.';
+                }
+            } catch (e) {
+                this.errorMsg = 'Network error: ' + e.message;
+            } finally {
+                this.loading = false;
+            }
+        },
+        copyOutput() {
+            if (this.output && navigator.clipboard) {
+                navigator.clipboard.writeText(this.output);
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

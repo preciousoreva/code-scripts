@@ -49,14 +49,16 @@ class TemplateRenderIntegrityTests(TestCase):
         self.assertNotIn("{#", html)
 
     def test_primary_dashboard_pages_do_not_leak_template_tokens(self):
-        perm = Permission.objects.get(codename="can_trigger_runs")
-        self.user.user_permissions.add(perm)
+        trigger_perm = Permission.objects.get(codename="can_trigger_runs")
+        schedule_perm = Permission.objects.get(codename="can_manage_schedules")
+        self.user.user_permissions.add(trigger_perm, schedule_perm)
 
         urls = [
             reverse("epos_qbo:overview"),
             reverse("epos_qbo:companies-list"),
             reverse("epos_qbo:runs"),
             reverse("epos_qbo:logs"),
+            reverse("epos_qbo:schedules"),
             reverse("epos_qbo:company-detail", kwargs={"company_key": self.company.company_key}),
         ]
 

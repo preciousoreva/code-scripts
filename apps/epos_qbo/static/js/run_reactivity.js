@@ -31,11 +31,15 @@
         const shouldRefresh = typeof options.shouldRefresh === 'function'
             ? options.shouldRefresh
             : () => true;
+        const checkFreshnessAfterRefresh = typeof options.checkFreshnessAfterRefresh === 'function'
+            ? options.checkFreshnessAfterRefresh
+            : null;
 
         let startedTimerId = null;
         let completionTimerIds = [];
         let refreshInFlight = false;
         let refreshQueued = false;
+        let lastCompletedJobId = null;
 
         function clearCompletionTimers() {
             if (!completionTimerIds.length) return;
@@ -68,11 +72,13 @@
             refreshInFlight = true;
             Promise.resolve()
                 .then(() => onRefresh())
-                .catch(() => {
-                    // Best effort; page should remain usable on transient failures.
-                })
+                .catch(() => {})
                 .finally(() => {
                     refreshInFlight = false;
+                    if (lastCompletedJobId != null && checkFreshnessAfterRefresh && checkFreshnessAfterRefresh(lastCompletedJobId)) {
+                        clearCompletionTimers();
+                        lastCompletedJobId = null;
+                    }
                     if (refreshQueued) {
                         refreshQueued = false;
                         triggerRefresh();
@@ -81,7 +87,9 @@
         }
 
         function onCompleted(event) {
-            if (!shouldRefresh('completed', event && event.detail ? event.detail : {})) return;
+            const detail = event && event.detail ? event.detail : {};
+            if (!shouldRefresh('completed', detail)) return;
+            lastCompletedJobId = detail.jobId != null ? String(detail.jobId) : null;
             scheduleCompletionRefreshes();
         }
 

@@ -121,7 +121,7 @@
                     class="px-2.5 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-md text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-slate-100 dark:focus:ring-slate-600"
                 >
                     <option value="all">All Companies</option>
-                    {% for company in companies %}
+                    {% for company in revenue_company_options %}
                     <option value="{{ company.company_key }}">{{ company.name }}</option>
                     {% endfor %}
                 </select>
