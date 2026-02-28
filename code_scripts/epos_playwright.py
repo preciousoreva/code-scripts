@@ -1,5 +1,6 @@
 import re
 import sys
+import time
 import argparse
 from datetime import datetime, timedelta
 from playwright.sync_api import Playwright, sync_playwright, expect
@@ -135,6 +136,11 @@ def get_args():
     return args
 
 
+_EPOS_URL = "https://www.eposnowhq.com/Pages/Reporting/SageReport.aspx"
+_GOTO_MAX_RETRIES = 3
+_GOTO_RETRY_DELAY_S = 5
+
+
 def run(
     playwright: Playwright,
     config,
@@ -174,7 +180,16 @@ def run(
     browser = playwright.chromium.launch(headless=True)
     context = browser.new_context()
     page = context.new_page()
-    page.goto("https://www.eposnowhq.com/Pages/Reporting/SageReport.aspx")
+    for attempt in range(1, _GOTO_MAX_RETRIES + 1):
+        try:
+            page.goto(_EPOS_URL)
+            break
+        except Exception as e:
+            if attempt < _GOTO_MAX_RETRIES:
+                print(f"  [Retry {attempt}/{_GOTO_MAX_RETRIES}] page.goto failed: {e}. Retrying in {_GOTO_RETRY_DELAY_S}s...")
+                time.sleep(_GOTO_RETRY_DELAY_S)
+            else:
+                raise
     page.get_by_role("textbox", name="Username or email address").click()
     page.get_by_role("textbox", name="Username or email address").fill(epos_username)
     page.get_by_role("textbox", name="Password").click()
