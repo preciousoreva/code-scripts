@@ -21,6 +21,7 @@
     "date_format": "%Y-%m-%d",
     "receipt_prefix": "SR",
     "receipt_number_format": "date_tender_sequence",
+    "aggregate_products": true,
     "location_mapping": {}
   },
   "output": {

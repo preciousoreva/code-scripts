@@ -135,6 +135,21 @@ class CompanyConfig:
         return self._data["transform"]["receipt_number_format"]
     
     @property
+    def aggregate_products(self) -> bool:
+        """Whether to normalize pack-multiplier product names and aggregate duplicate
+        product rows within each tender/receipt group during transform.
+
+        When True the transform step will:
+        1. Strip trailing ``*N`` suffixes from product names (e.g. "WATER 50CL*12" → "WATER 50CL").
+        2. Multiply ``ItemQuantity`` by N to get effective units.
+        3. Collapse rows that share the same tender + normalized product name,
+           summing quantities and monetary columns.
+
+        Default ``False`` — opt-in per company via ``transform.aggregate_products``.
+        """
+        return self._data.get("transform", {}).get("aggregate_products", False)
+
+    @property
     def location_mapping(self) -> Dict[str, str]:
         """Mapping from location names to location codes (for Company B)."""
         return self._data["transform"].get("location_mapping", {})

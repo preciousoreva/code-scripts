@@ -116,6 +116,7 @@ def build_basic_payload(form: CompanyBasicForm) -> dict[str, Any]:
             "date_format": "%Y-%m-%d",
             "receipt_prefix": "SR",
             "receipt_number_format": "date_tender_sequence",
+            "aggregate_products": False,
             "location_mapping": {},
         },
         "output": {
@@ -180,6 +181,7 @@ def apply_advanced_payload(payload: dict[str, Any], form: CompanyAdvancedForm) -
             "receipt_prefix": d.get("receipt_prefix") or "SR",
             "receipt_number_format": d.get("receipt_number_format") or "date_tender_sequence",
             "group_by": form.cleaned_group_by() or ["date", "tender"],
+            "aggregate_products": bool(d.get("aggregate_products")),
         }
     )
     return payload

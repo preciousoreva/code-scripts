@@ -29,6 +29,7 @@ def _valid_payload() -> dict:
             "date_format": "%Y-%m-%d",
             "receipt_prefix": "SR",
             "receipt_number_format": "date_tender_sequence",
+            "aggregate_products": False,
         },
         "output": {
             "csv_prefix": "sales_receipts",

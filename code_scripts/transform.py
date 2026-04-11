@@ -45,6 +45,73 @@ def ensure_required_columns(df: pd.DataFrame) -> None:
         )
 
 
+# Matches a trailing pack-size multiplier, e.g. "*12" at end of "AQUAFINA 50CL*12".
+# Tolerates optional whitespace around the asterisk: "50CL*12", "50CL *12", "50CL * 12".
+_PACK_MULTIPLIER_RE = re.compile(r"\s*\*\s*(\d+)\s*$")
+
+
+def strip_pack_multiplier(product_name: str) -> Tuple[str, int]:
+    """Extract and remove a trailing ``*N`` pack multiplier from a product name.
+
+    Returns ``(base_name, multiplier)`` where *multiplier* defaults to 1 when no
+    ``*N`` suffix is present.
+
+    Examples
+    --------
+    >>> strip_pack_multiplier("AQUAFINA DRINKING WATERBOTTLE 50CL*12")
+    ('AQUAFINA DRINKING WATERBOTTLE 50CL', 12)
+    >>> strip_pack_multiplier("COCA COLA 35CL")
+    ('COCA COLA 35CL', 1)
+    """
+    m = _PACK_MULTIPLIER_RE.search(product_name)
+    if m:
+        base = product_name[: m.start()].strip()
+        return base, int(m.group(1))
+    return product_name.strip(), 1
+
+
+# Columns that should be summed when aggregating duplicate product rows.
+_AGG_SUM_COLS = [
+    "ItemQuantity",
+    "*ItemAmount",
+    "TOTAL Sales",
+    "NET Sales",
+    "Cost Price",
+    "ItemTaxAmount",
+]
+
+
+def aggregate_product_rows(out: pd.DataFrame) -> pd.DataFrame:
+    """Collapse rows that share the same tender (``Memo``) and product name.
+
+    For each group of duplicates the numeric / monetary columns are summed and
+    non-numeric columns take the value from the first row in the group.  This
+    runs *after* pack-multiplier expansion so effective quantities are already
+    baked into ``ItemQuantity``.
+
+    Groups by formatted date string (``_date_str``), not the raw datetime, so
+    rows at different clock times on the same business day aggregate correctly.
+    """
+    group_key = ["_date_str", "Memo", "Item(Product/Service)"]
+
+    # Separate sum-cols from first-value-cols to build a clean agg spec
+    sum_cols = [c for c in _AGG_SUM_COLS if c in out.columns]
+    first_cols = [c for c in out.columns if c not in group_key and c not in sum_cols]
+
+    agg_spec: Dict[str, str] = {}
+    for c in sum_cols:
+        agg_spec[c] = "sum"
+    for c in first_cols:
+        agg_spec[c] = "first"
+
+    aggregated = out.groupby(group_key, sort=False, as_index=False).agg(agg_spec)
+
+    # Restore original column order
+    aggregated = aggregated[[c for c in out.columns if c in aggregated.columns]]
+
+    return aggregated
+
+
 def parse_date(value: str) -> Optional[datetime]:
     """Parse common date/time strings into a naive datetime (local to EPOS export).
     Returns None if empty/unparseable.
@@ -408,6 +475,32 @@ def transform_dataframe_unified(df: pd.DataFrame, config, target_date: Optional[
     else:
         out["Service Date"] = out["*SalesReceiptDate"]
     
+    # --- Product aggregation (opt-in per company) ---
+    # When enabled, strip pack-size multipliers from product names (e.g. *12),
+    # scale quantities accordingly, and merge rows for the same product within
+    # each tender so QBO gets one line per product per tender per day.
+    if config.aggregate_products:
+        pre_count = len(out)
+
+        # 1. Normalise names and expand quantities by multiplier
+        base_names = []
+        effective_qtys = []
+        for _, row in out.iterrows():
+            base, multiplier = strip_pack_multiplier(str(row["Item(Product/Service)"]))
+            base_names.append(base)
+            effective_qtys.append(row["ItemQuantity"] * multiplier)
+
+        out["Item(Product/Service)"] = base_names
+        out["ItemQuantity"] = effective_qtys
+
+        # 2. Collapse duplicate product rows within each tender group
+        out = aggregate_product_rows(out)
+        out = out.reset_index(drop=True)
+
+        post_count = len(out)
+        if pre_count != post_count:
+            print(f"[INFO] Product aggregation: {pre_count} rows → {post_count} rows ({pre_count - post_count} merged)")
+
     # Generate SalesReceiptNo based on company config
     if config.receipt_number_format == "date_location_sequence":
         # Company B: SR-YYYYMMDD-LOC-SEQ
