@@ -122,6 +122,7 @@ class CompanyAdvancedForm(forms.Form):
     receipt_prefix = forms.CharField(max_length=16, initial="SR")
     receipt_number_format = forms.CharField(max_length=64, initial="date_tender_sequence")
     group_by = forms.CharField(max_length=128, initial="date,tender")
+    aggregate_products = forms.BooleanField(required=False, initial=False)
 
     def cleaned_group_by(self) -> list[str]:
         raw = (self.cleaned_data.get("group_by") or "").strip()

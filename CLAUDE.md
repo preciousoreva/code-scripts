@@ -138,6 +138,16 @@ Companies are defined as JSON files in `code_scripts/companies/`. The DB (`Compa
 
 Staging directories (`uploads/range_raw/`, `uploads/spill_raw/`) are **temporary**. `Uploaded/` is **authoritative**.
 
+### Product Aggregation (per-company opt-in)
+
+When `transform.aggregate_products` is `true` in a company's config, the transform step:
+
+1. **Strips pack-size multipliers** from product names — a trailing `*N` suffix (e.g. `AQUAFINA 50CL*12`) is removed, yielding the base product name (`AQUAFINA 50CL`).
+2. **Scales quantity** by the multiplier (`ItemQuantity × N`; `N` defaults to 1 when no `*` is present).
+3. **Merges duplicate product rows** within the same tender (Memo) group — quantities and monetary columns (`*ItemAmount`, `TOTAL Sales`, `NET Sales`, `Cost Price`, `ItemTaxAmount`) are summed; non-numeric columns take the first value.
+
+This produces one line per product per tender in the output CSV, which the uploader consumes as-is. Toggle via the "Product Aggregation" section in the portal's Advanced Company Settings, or directly in the company JSON (`transform.aggregate_products`). Currently enabled for `company_a` only.
+
 ### Portal Permissions
 
 Four custom permissions (assign via `/admin/`):

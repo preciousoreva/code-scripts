@@ -85,6 +85,15 @@
             </label>
         </section>
 
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <h2 class="md:col-span-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Product Aggregation</h2>
+            <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                <input type="checkbox" name="aggregate_products" {% if form.aggregate_products.value %}checked{% endif %}>
+                Aggregate products per tender
+            </label>
+            <p class="text-xs text-slate-500 dark:text-slate-400">When enabled, pack-size multipliers (e.g. *12) are stripped from product names and duplicate products within the same tender are merged into a single line with summed quantities and amounts.</p>
+        </section>
+
         <div class="flex items-center justify-between">
             <span class="text-xs text-slate-500 dark:text-slate-400">Saving this form updates DB config and syncs JSON atomically.</span>
             <button type="submit" class="btn btn-primary">

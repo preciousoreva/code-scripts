@@ -1877,6 +1877,7 @@ def company_advanced(request, company_key):
                 "receipt_prefix": (cfg.get("transform") or {}).get("receipt_prefix", "SR"),
                 "receipt_number_format": (cfg.get("transform") or {}).get("receipt_number_format", "date_tender_sequence"),
                 "group_by": ",".join((cfg.get("transform") or {}).get("group_by", ["date", "tender"])),
+                "aggregate_products": (cfg.get("transform") or {}).get("aggregate_products", False),
             }
         )
 
@@ -1925,6 +1926,7 @@ def _parse_config_for_display(config_json: dict | None) -> dict:
         "deposit_account": qbo.get("deposit_account", "Undeposited Funds"),
         "group_by": ", ".join(transform.get("group_by", ["date", "tender"])),
         "date_format": transform.get("date_format", "%Y-%m-%d"),
+        "aggregate_products": transform.get("aggregate_products", False),
         "realm_id": qbo.get("realm_id", "Not set"),
     }
 

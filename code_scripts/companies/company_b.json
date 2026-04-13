@@ -42,6 +42,7 @@
     "date_format": "%d/%m/%Y",
     "receipt_prefix": "SR",
     "receipt_number_format": "date_location_sequence",
+    "aggregate_products": false,
     "location_mapping": {
       "TALEA MALL REST (CHEVRON)": "TALE",
       "1004 (VI)": "VI04",
