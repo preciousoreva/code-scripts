@@ -148,7 +148,7 @@ EPOS_PASSWORD_A=...
 EPOS_USERNAME_B=...
 EPOS_PASSWORD_B=...
 
-DJANGO_SECRET_KEY=replace-with-a-long-random-secret
+DJANGO_SECRET_KEY='replace-with-a-long-random-secret'
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,your-domain.com
 ```
 
@@ -156,6 +156,7 @@ DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,your-domain.com
 - Django's signing/encryption secret
 - Must be long, random, and stable for that environment
 - Do not commit it to Git
+- If the secret contains `$`, wrap it in single quotes in `.env` so Docker Compose treats it literally
 
 `DJANGO_ALLOWED_HOSTS`
 - Comma-separated list of hostnames or IPs the app is allowed to serve
@@ -219,6 +220,107 @@ git pull origin docker-build
 docker compose build
 docker compose up -d web scheduler
 ```
+
+### Smoke tests after deployment
+
+Use these checks after the containers come up to confirm the deployment is actually usable, not just running:
+
+```bash
+# 1. Confirm both containers are up
+docker compose ps
+
+# 2. Tail recent logs
+docker compose logs --tail=100 web scheduler
+
+# 3. Confirm the login page responds
+curl -I http://localhost:8000/login/
+
+# 4. Confirm Django users exist in the seeded database
+docker compose exec web python manage.py shell -c "from django.contrib.auth import get_user_model; print(list(get_user_model().objects.values_list('username', flat=True)))"
+
+# 5. Confirm companies exist in the DB
+docker compose exec web python manage.py shell -c "from apps.epos_qbo.models import CompanyConfigRecord; print(list(CompanyConfigRecord.objects.values_list('company_key', flat=True)))"
+
+# 6. Confirm QBO tokens are present
+docker compose exec web python store_tokens.py --list
+
+# 7. Confirm QBO connectivity with a safe read-only query
+docker compose exec web python code_scripts/scripts/qbo_queries/qbo_query.py --company company_a query "select Id, Name from Item maxresults 1"
+```
+
+Expected results:
+
+- `docker compose ps` shows both `web` and `scheduler` as `Up`
+- `/login/` responds successfully
+- Django users and company keys are present
+- `store_tokens.py --list` shows stored tokens
+- the QBO query returns JSON instead of an auth or transport error
+
+### Troubleshooting
+
+**Docker Compose warns that a variable is not set**
+
+If you see warnings like:
+
+```text
+The "abc123" variable is not set. Defaulting to a blank string.
+```
+
+then a value in `.env` contains `$...` and Docker Compose is trying to interpolate it.
+
+Fix:
+
+- wrap the value in single quotes, for example:
+
+  ```env
+  DJANGO_SECRET_KEY='my$literal$secret'
+  ```
+
+- or escape each dollar sign as `$$`
+
+Then verify:
+
+```bash
+docker compose config > /dev/null
+```
+
+If that command prints no interpolation warnings, recreate the containers:
+
+```bash
+docker compose up -d --force-recreate web scheduler
+```
+
+**Login page loads but authentication fails**
+
+If you are testing over plain HTTP rather than HTTPS, set:
+
+```env
+DJANGO_CSRF_COOKIE_SECURE=0
+DJANGO_SESSION_COOKIE_SECURE=0
+```
+
+Then recreate the containers.
+
+If you are behind HTTPS, keep those at `1` and also set:
+
+```env
+DJANGO_CSRF_TRUSTED_ORIGINS=https://your-domain.com
+DJANGO_USE_X_FORWARDED_PROTO=1
+```
+
+**Users, companies, or tokens are missing**
+
+If the smoke tests show empty users, empty companies, or no tokens, the first-run seed probably did not populate the Docker volume. Once the Docker volume exists, copied repo files do not automatically overwrite it.
+
+If you need to restart from the copied repo state, stop the app, remove the Docker volume, and start again:
+
+```bash
+docker compose down
+docker volume rm code-scripts_app-data
+docker compose up -d web scheduler
+```
+
+This is destructive to current container state, so only do it if the volume contents are wrong and you want to reseed from the copied repo.
 
 ### Docker services and env behavior
 
