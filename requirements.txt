@@ -4,6 +4,8 @@
 # Django web framework (OIAT Portal)
 Django>=4.2,<5.1
 croniter>=2.0.0
+gunicorn>=21.2.0
+whitenoise>=6.6.0
 
 # Web automation
 playwright>=1.40.0
