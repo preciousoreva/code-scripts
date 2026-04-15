@@ -85,6 +85,8 @@ That's it! The pipeline will download, split, transform, upload, archive, and re
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
 >
 > **Note:** All examples use `python` for cross-platform compatibility. On macOS/Linux, use `python3` if `python` points to Python 2 or is missing.
+>
+> **Docker deployment:** For the `docker-build` branch, see [Docker Deployment](#docker-deployment-docker-build-branch) before deploying on a server.
 
 ---
 
@@ -115,6 +117,115 @@ Use this sequence once per machine (or per new clone/venv) so both the pipeline 
    ```
 
 5. **If you use the OIAT Portal:** run [Portal Setup](#portal-setup) (migrate, createsuperuser, sync companies, runserver).
+
+---
+
+## Docker Deployment (`docker-build` branch)
+
+The `docker-build` branch packages the Django portal and scheduler into Docker services:
+
+- `web` — runs Django migrations, then serves the portal with Gunicorn
+- `scheduler` — runs `python manage.py run_schedule_worker`
+
+Both services share the same Docker volume for persistent state.
+
+### What you need on the server
+
+1. Docker and Docker Compose installed
+2. The repo present on disk
+3. A `.env` file in the repo root
+4. If you want to preserve existing state, copy your current repo contents first so Docker can seed from them on first start
+
+### Required `.env` values
+
+At minimum, set these in `.env`:
+
+```env
+QBO_CLIENT_ID=your_client_id_here
+QBO_CLIENT_SECRET=your_client_secret_here
+EPOS_USERNAME_A=...
+EPOS_PASSWORD_A=...
+EPOS_USERNAME_B=...
+EPOS_PASSWORD_B=...
+
+DJANGO_SECRET_KEY=replace-with-a-long-random-secret
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,your-domain.com
+```
+
+`DJANGO_SECRET_KEY`
+- Django's signing/encryption secret
+- Must be long, random, and stable for that environment
+- Do not commit it to Git
+
+`DJANGO_ALLOWED_HOSTS`
+- Comma-separated list of hostnames or IPs the app is allowed to serve
+- Include the exact server IP and/or domain you will browse to
+
+If you are serving the app behind HTTPS or a reverse proxy, also set:
+
+```env
+DJANGO_CSRF_TRUSTED_ORIGINS=https://your-domain.com
+DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_CSRF_COOKIE_SECURE=1
+DJANGO_SESSION_COOKIE_SECURE=1
+```
+
+For plain HTTP testing only, you can temporarily set:
+
+```env
+DJANGO_CSRF_COOKIE_SECURE=0
+DJANGO_SESSION_COOKIE_SECURE=0
+```
+
+### First deployment
+
+From the repo root on the server:
+
+```bash
+git fetch origin
+git switch docker-build
+git pull origin docker-build
+docker compose build
+docker compose up -d web scheduler
+docker compose logs -f web scheduler
+```
+
+### What happens on first start
+
+Docker creates a named volume called `app-data` and stores persistent runtime state there.
+
+On first container start, the entrypoint seeds the Docker volume from the copied repo directory if those source files or folders exist and the volume is still empty:
+
+- `db.sqlite3`
+- `code_scripts/qbo_tokens.sqlite`
+- `code_scripts/Uploaded/`
+- `code_scripts/uploads/`
+- `code_scripts/logs/`
+- `code_scripts/reports/`
+- `code_scripts/outputs/`
+
+After that, the Docker volume becomes the source of truth. Future container rebuilds and restarts keep using the volume state.
+
+### Important deployment note
+
+If you copy the repo to the server **after** the Docker volume has already been created and populated, those copied SQLite files will not automatically overwrite the existing volume. Seed-from-repo behavior is only for first start when the volume is empty.
+
+### Updating the deployment
+
+For later updates:
+
+```bash
+git pull origin docker-build
+docker compose build
+docker compose up -d web scheduler
+```
+
+### Docker services and env behavior
+
+- `web` and `scheduler` both load `.env`
+- Compose requires `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`
+- Persistent state lives in `/data` inside the containers, backed by the `app-data` volume
+- The copied repo is mounted read-only into `/seed` and is only used to seed the volume on first start
 
 ---
 
@@ -160,9 +271,9 @@ This script is intentionally thin — all business logic remains in `run_pipelin
 
 Inventory sync mode is intentionally **not** configurable on `run_all_companies.py`; each company uses its own config/env value.
 
-### Scheduled runs via Docker scheduler service
+### Scheduled runs via Docker services
 
-Use the in-repo scheduler worker through Docker Compose. The worker reads DB schedules from the `Schedules` page and enqueues `RunJob` records.
+Use the in-repo scheduler worker through Docker Compose. The worker reads DB schedules from the `Schedules` page and enqueues `RunJob` records. In the `docker-build` branch, the scheduler is expected to run alongside the `web` service because both share the same runtime image and persistent state.
 
 Execution path:
 
@@ -171,14 +282,14 @@ Execution path:
 - existing dispatcher starts the run and applies normal lock protections
 
 ```bash
-# Build scheduler image
-docker compose build scheduler
+# Build the app image
+docker compose build
 
-# Start scheduler in background
-docker compose up -d scheduler
+# Start web + scheduler in background
+docker compose up -d web scheduler
 
-# Tail scheduler logs
-docker compose logs -f scheduler
+# Tail logs
+docker compose logs -f web scheduler
 ```
 
 Scheduler env vars:
@@ -708,6 +819,7 @@ python store_tokens.py --list
 **Notes:**
 
 - `qbo_tokens.sqlite` is local state, gitignored, and must be created per machine (or copied manually)
+- In Docker deployments, `qbo_tokens.sqlite` lives in the `app-data` volume after first start
 - Do not commit tokens or the database file
 - The script automatically loads the `realm_id` from your company configuration file
 - Optional: You can use a GUI tool like [DB Browser for SQLite](https://sqlitebrowser.org/) to view the database contents (useful for debugging or verifying stored tokens)
@@ -1189,7 +1301,8 @@ export QBO_CLIENT_ID="your_id"
 ## Security Best Practices
 
 - **Credentials:** Use `.env` file or environment variables, never hardcode
-- **Tokens:** `qbo_tokens.sqlite` is auto-created with restricted permissions (0o600)
+- **Django deployment:** In Docker, set `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS` explicitly in `.env`
+- **Tokens:** `qbo_tokens.sqlite` is auto-created if missing; in Docker it is persisted in the `app-data` volume
 - **Git:** `.gitignore` excludes all sensitive files (including `qbo_tokens.sqlite` and SQLite sidecar files)
 - **Production:** Use a secrets manager (AWS Secrets Manager, HashiCorp Vault)
 
