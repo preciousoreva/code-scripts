@@ -122,12 +122,18 @@ Use this sequence once per machine (or per new clone/venv) so both the pipeline 
 
 ## Docker Deployment (`docker-build` branch)
 
-The `docker-build` branch packages the Django portal and scheduler into Docker services:
+The `docker-build` branch packages the portal into Docker services with a Caddy reverse proxy in front:
 
+- `caddy` — terminates HTTPS on the Tailscale IP and forwards requests to Django
 - `web` — runs Django migrations, then serves the portal with Gunicorn
 - `scheduler` — runs `python manage.py run_schedule_worker`
 
-Both services share the same Docker volume for persistent state.
+`web` is not exposed directly on a host port. Caddy is the only entrypoint, and it should be bound only to the Tailscale IP.
+
+The stack uses these volumes:
+
+- `app-data` — Django DB, QBO token DB, logs, uploads, reports, outputs
+- `caddy_data` / `caddy_config` — Caddy state, including its locally issued certificates
 
 ### What you need on the server
 
@@ -149,7 +155,15 @@ EPOS_USERNAME_B=...
 EPOS_PASSWORD_B=...
 
 DJANGO_SECRET_KEY='replace-with-a-long-random-secret'
-DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,your-domain.com
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,portal.oiatsolutions.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://portal.oiatsolutions.com
+DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_USE_X_FORWARDED_HOST=1
+DJANGO_CSRF_COOKIE_SECURE=1
+DJANGO_SESSION_COOKIE_SECURE=1
+
+PORTAL_DOMAIN=portal.oiatsolutions.com
+TAILSCALE_BIND_IP=100.125.133.118
 ```
 
 `DJANGO_SECRET_KEY`
@@ -162,20 +176,22 @@ DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,your-domain.com
 - Comma-separated list of hostnames or IPs the app is allowed to serve
 - Include the exact server IP and/or domain you will browse to
 
-If you are serving the app behind HTTPS or a reverse proxy, also set:
+`PORTAL_DOMAIN`
+- The hostname Caddy serves, for example `portal.oiatsolutions.com`
+- This should match the HTTPS origin users will visit
+
+`TAILSCALE_BIND_IP`
+- The Tailscale IP on the host where Caddy should listen on `443`
+- This keeps the portal bound to the tailnet-facing interface instead of all interfaces
+
+For the Caddy/Tailscale setup, also set:
 
 ```env
-DJANGO_CSRF_TRUSTED_ORIGINS=https://your-domain.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://portal.oiatsolutions.com
 DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_USE_X_FORWARDED_HOST=1
 DJANGO_CSRF_COOKIE_SECURE=1
 DJANGO_SESSION_COOKIE_SECURE=1
-```
-
-For plain HTTP testing only, you can temporarily set:
-
-```env
-DJANGO_CSRF_COOKIE_SECURE=0
-DJANGO_SESSION_COOKIE_SECURE=0
 ```
 
 ### First deployment
@@ -187,8 +203,8 @@ git fetch origin
 git switch docker-build
 git pull origin docker-build
 docker compose build
-docker compose up -d web scheduler
-docker compose logs -f web scheduler
+docker compose up -d caddy web scheduler
+docker compose logs -f caddy web scheduler
 ```
 
 ### What happens on first start
@@ -211,6 +227,37 @@ After that, the Docker volume becomes the source of truth. Future container rebu
 
 If you copy the repo to the server **after** the Docker volume has already been created and populated, those copied SQLite files will not automatically overwrite the existing volume. Seed-from-repo behavior is only for first start when the volume is empty.
 
+### Current TLS mode
+
+The repo currently ships Caddy in `tls internal` mode. That means:
+
+- traffic between the browser and the proxy is encrypted
+- Caddy issues its own private certificate authority (CA)
+- browsers will still show a certificate warning until that CA is trusted on the client device
+
+This is enough to start the reverse-proxy setup privately on the tailnet, but it is not the final browser-trusted setup for `portal.oiatsolutions.com`.
+
+To get a browser-trusted certificate for a tailnet-only custom domain, you will typically need:
+
+- split DNS so tailnet users resolve `portal.oiatsolutions.com` to the server's Tailscale IP
+- Tailscale grants/ACLs so only approved users can reach the server on `443`
+- a public CA certificate issued with DNS validation for the domain
+
+The exact certificate step depends on your DNS provider and is not fully generic in this repo.
+
+### Split DNS and Tailscale access control
+
+To make `portal.oiatsolutions.com` tailnet-only:
+
+1. Configure split DNS so tailnet clients resolve `portal.oiatsolutions.com` to the server's Tailscale IP
+2. Add a Tailscale grant/ACL so only an approved group can reach the server on `tcp:443`
+3. Keep Django auth enabled so approved network users still need valid portal credentials
+
+This gives you two layers of access control:
+
+- Tailscale decides who can reach the portal
+- Django decides who can log in and use it
+
 ### Updating the deployment
 
 For later updates:
@@ -218,7 +265,7 @@ For later updates:
 ```bash
 git pull origin docker-build
 docker compose build
-docker compose up -d web scheduler
+docker compose up -d caddy web scheduler
 ```
 
 ### Smoke tests after deployment
@@ -226,14 +273,14 @@ docker compose up -d web scheduler
 Use these checks after the containers come up to confirm the deployment is actually usable, not just running:
 
 ```bash
-# 1. Confirm both containers are up
+# 1. Confirm all containers are up
 docker compose ps
 
 # 2. Tail recent logs
-docker compose logs --tail=100 web scheduler
+docker compose logs --tail=100 caddy web scheduler
 
-# 3. Confirm the login page responds
-curl -I http://localhost:8000/login/
+# 3. Confirm the login page responds through Caddy
+curl -k -I https://portal.oiatsolutions.com/login/
 
 # 4. Confirm Django users exist in the seeded database
 docker compose exec web python manage.py shell -c "from django.contrib.auth import get_user_model; print(list(get_user_model().objects.values_list('username', flat=True)))"
@@ -250,11 +297,13 @@ docker compose exec web python code_scripts/scripts/qbo_queries/qbo_query.py --c
 
 Expected results:
 
-- `docker compose ps` shows both `web` and `scheduler` as `Up`
-- `/login/` responds successfully
+- `docker compose ps` shows `caddy`, `web`, and `scheduler` as `Up`
+- `/login/` responds successfully through Caddy
 - Django users and company keys are present
 - `store_tokens.py --list` shows stored tokens
 - the QBO query returns JSON instead of an auth or transport error
+
+`curl -k` is used above because the default `tls internal` certificate is not publicly trusted yet.
 
 ### Troubleshooting
 
@@ -287,25 +336,19 @@ docker compose config > /dev/null
 If that command prints no interpolation warnings, recreate the containers:
 
 ```bash
-docker compose up -d --force-recreate web scheduler
+docker compose up -d --force-recreate caddy web scheduler
 ```
 
 **Login page loads but authentication fails**
 
-If you are testing over plain HTTP rather than HTTPS, set:
+If login or CSRF fails behind Caddy, confirm these are set:
 
 ```env
-DJANGO_CSRF_COOKIE_SECURE=0
-DJANGO_SESSION_COOKIE_SECURE=0
-```
-
-Then recreate the containers.
-
-If you are behind HTTPS, keep those at `1` and also set:
-
-```env
-DJANGO_CSRF_TRUSTED_ORIGINS=https://your-domain.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://portal.oiatsolutions.com
 DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_USE_X_FORWARDED_HOST=1
+DJANGO_CSRF_COOKIE_SECURE=1
+DJANGO_SESSION_COOKIE_SECURE=1
 ```
 
 **Users, companies, or tokens are missing**
@@ -317,14 +360,16 @@ If you need to restart from the copied repo state, stop the app, remove the Dock
 ```bash
 docker compose down
 docker volume rm code-scripts_app-data
-docker compose up -d web scheduler
+docker compose up -d caddy web scheduler
 ```
 
 This is destructive to current container state, so only do it if the volume contents are wrong and you want to reseed from the copied repo.
 
 ### Docker services and env behavior
 
-- `web` and `scheduler` both load `.env`
+- `caddy`, `web`, and `scheduler` all load the relevant env/config
+- Caddy listens on `443` only, bound to the Tailscale IP you set in `.env`
+- `web` is internal-only and is reached through Docker networking
 - Compose requires `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`
 - Persistent state lives in `/data` inside the containers, backed by the `app-data` volume
 - The copied repo is mounted read-only into `/seed` and is only used to seed the volume on first start

@@ -26,8 +26,8 @@ services:
       - /bin/sh
       - -lc
       - python manage.py migrate --noinput && exec gunicorn oiat_portal.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --timeout ${GUNICORN_TIMEOUT:-180}
-    ports:
-      - "${OIAT_WEB_PORT:-8000}:8000"
+    expose:
+      - "8000"
 
   scheduler:
     <<: *app-common
@@ -46,5 +46,23 @@ services:
       SCHEDULE_CRON: ${SCHEDULE_CRON:-0 18 * * *}
       SCHEDULE_TZ: ${SCHEDULE_TZ:-Africa/Lagos}
 
+  caddy:
+    image: caddy:2
+    container_name: oiat-caddy
+    depends_on:
+      - web
+    environment:
+      PORTAL_DOMAIN: ${PORTAL_DOMAIN:?set PORTAL_DOMAIN in .env}
+    ports:
+      - "${TAILSCALE_BIND_IP:?set TAILSCALE_BIND_IP in .env}:443:443"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    init: true
+
 volumes:
   app-data:
+  caddy_data:
+  caddy_config:

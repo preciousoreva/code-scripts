@@ -1,0 +1,13 @@
+{
+	admin off
+}
+
+{$PORTAL_DOMAIN} {
+	tls internal
+
+	reverse_proxy web:8000 {
+		health_uri /login/
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}
