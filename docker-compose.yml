@@ -11,14 +11,30 @@ x-app-common: &app-common
     DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
     DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
     STATE_ROOT: /data
-    SEED_ROOT: /seed
   volumes:
     - app-data:/data
-    - .:/seed:ro
   restart: unless-stopped
   init: true
 
 services:
+  bootstrap:
+    <<: *app-common
+    profiles: ["bootstrap"]
+    command:
+      - /bin/sh
+      - -lc
+      - echo "Bootstrap seed complete."
+    environment:
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
+      STATE_ROOT: /data
+      SEED_ROOT: /seed
+    volumes:
+      - app-data:/data
+      - .:/seed:ro
+    restart: "no"
+
   web:
     <<: *app-common
     container_name: oiat-web
@@ -40,7 +56,6 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
       STATE_ROOT: /data
-      SEED_ROOT: /seed
       OIAT_SCHEDULER_POLL_SECONDS: ${OIAT_SCHEDULER_POLL_SECONDS:-15}
       OIAT_SCHEDULER_ENABLE_ENV_FALLBACK: ${OIAT_SCHEDULER_ENABLE_ENV_FALLBACK:-1}
       SCHEDULE_CRON: ${SCHEDULE_CRON:-0 18 * * *}

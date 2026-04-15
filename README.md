@@ -128,6 +128,8 @@ The `docker-build` branch packages the portal into Docker services with a Caddy 
 - `web` — runs Django migrations, then serves the portal with Gunicorn
 - `scheduler` — runs `python manage.py run_schedule_worker`
 
+For moving this setup to a new host, use [docs/DOCKER_MIGRATION_READY.md](docs/DOCKER_MIGRATION_READY.md).
+
 `web` is not exposed directly on a host port. Caddy is the only entrypoint, and it should be bound only to the Tailscale IP.
 
 The stack uses these volumes:
@@ -140,7 +142,7 @@ The stack uses these volumes:
 1. Docker and Docker Compose installed
 2. The repo present on disk
 3. A `.env` file in the repo root
-4. If you want to preserve existing state, copy your current repo contents first so Docker can seed from them on first start
+4. If you want to preserve existing state, copy your current repo contents first so the one-time bootstrap step can seed the Docker volume
 5. `oiatsolutions.com` managed in Cloudflare DNS
 6. A Cloudflare API token for DNS challenge issuance
 7. A public DNS record for `portal.oiatsolutions.com` pointing at the server's Tailscale IP
@@ -251,11 +253,18 @@ docker compose up -d caddy web scheduler
 docker compose logs -f caddy web scheduler
 ```
 
+If this is a migration from an existing non-Docker install and you want to import the current DB, token store, logs, uploads, and reports first, run the bootstrap service once before starting the long-lived services:
+
+```bash
+docker compose run --rm --profile bootstrap bootstrap
+docker compose up -d caddy web scheduler
+```
+
 ### What happens on first start
 
 Docker creates a named volume called `app-data` and stores persistent runtime state there.
 
-On first container start, the entrypoint seeds the Docker volume from the copied repo directory if those source files or folders exist and the volume is still empty:
+When you run the bootstrap service, the entrypoint seeds the Docker volume from the copied repo directory if those source files or folders exist and the volume is still empty:
 
 - `db.sqlite3`
 - `code_scripts/qbo_tokens.sqlite`
@@ -269,7 +278,9 @@ After that, the Docker volume becomes the source of truth. Future container rebu
 
 ### Important deployment note
 
-If you copy the repo to the server **after** the Docker volume has already been created and populated, those copied SQLite files will not automatically overwrite the existing volume. Seed-from-repo behavior is only for first start when the volume is empty.
+The running `web` and `scheduler` services no longer mount the checked-out repo into `/seed`. That is intentional. It reduces exposure of `.env`, `.git`, and other checked-out files if an app container is ever compromised.
+
+If you copy the repo to the server **after** the Docker volume has already been created and populated, those copied SQLite files will not automatically overwrite the existing volume. Bootstrap seeding only works when the volume is empty.
 
 ### Updating the deployment
 
@@ -280,6 +291,8 @@ git pull origin docker-build
 docker compose build
 docker compose up -d caddy web scheduler
 ```
+
+Do not rerun the bootstrap service on ordinary code updates. It is for first-time state import only.
 
 ### Smoke tests after deployment
 
@@ -404,13 +417,14 @@ DJANGO_SESSION_COOKIE_SECURE=1
 
 **Users, companies, or tokens are missing**
 
-If the smoke tests show empty users, empty companies, or no tokens, the first-run seed probably did not populate the Docker volume. Once the Docker volume exists, copied repo files do not automatically overwrite it.
+If the smoke tests show empty users, empty companies, or no tokens, the bootstrap seed probably did not populate the Docker volume. Once the Docker volume exists, copied repo files do not automatically overwrite it.
 
 If you need to restart from the copied repo state, stop the app, remove the Docker volume, and start again:
 
 ```bash
 docker compose down
 docker volume rm code-scripts_app-data
+docker compose run --rm --profile bootstrap bootstrap
 docker compose up -d caddy web scheduler
 ```
 
@@ -418,12 +432,39 @@ This is destructive to current container state, so only do it if the volume cont
 
 ### Docker services and env behavior
 
-- `caddy`, `web`, and `scheduler` all load the relevant env/config
+- `bootstrap`, `caddy`, `web`, and `scheduler` all load the relevant env/config
 - Caddy listens on `443` only, bound to the Tailscale IP you set in `.env`
 - `web` is internal-only and is reached through Docker networking
 - Compose requires `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, and `CF_API_TOKEN`
 - Persistent state lives in `/data` inside the containers, backed by the `app-data` volume
-- The copied repo is mounted read-only into `/seed` and is only used to seed the volume on first start
+- The copied repo is mounted read-only into `/seed` only for the one-time `bootstrap` service
+
+### Security posture
+
+This setup is materially safer than exposing Django or Gunicorn directly, but it is not "unhackable" and it is not magic DDoS protection.
+
+What is protecting the portal now:
+
+- `web` is not published directly to the host
+- Caddy only binds to the Tailscale IP, not all host interfaces
+- the browser-facing certificate is a real Let's Encrypt certificate
+- Django only serves configured hosts via `DJANGO_ALLOWED_HOSTS`
+- secure cookies and forwarded-proto handling are enabled for HTTPS
+- the portal still requires Django authentication after network access
+
+What reduces DDoS exposure:
+
+- the service is reachable over the Tailscale interface, not the open public internet
+- the public DNS record points to a Tailscale IP, which is not generally routable from the internet
+
+What this does **not** mean:
+
+- Cloudflare is **not** proxying or shielding traffic here because the DNS record is `DNS only`
+- this is **not** protected by Cloudflare WAF or Cloudflare DDoS mitigation
+- if your Tailscale grants are too broad, any allowed tailnet user can still attempt logins or hammer the app
+- the Django login does not currently have built-in brute-force throttling
+
+The most important operational control is still Tailscale policy. Restrict `tcp:443` on this host to only the specific users or groups that should reach the portal.
 
 ---
 
