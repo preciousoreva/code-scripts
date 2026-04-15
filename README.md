@@ -133,7 +133,7 @@ The `docker-build` branch packages the portal into Docker services with a Caddy 
 The stack uses these volumes:
 
 - `app-data` — Django DB, QBO token DB, logs, uploads, reports, outputs
-- `caddy_data` / `caddy_config` — Caddy state, including its locally issued certificates
+- `caddy_data` / `caddy_config` — Caddy ACME state, issued certificates, and runtime config
 
 ### What you need on the server
 
@@ -141,6 +141,9 @@ The stack uses these volumes:
 2. The repo present on disk
 3. A `.env` file in the repo root
 4. If you want to preserve existing state, copy your current repo contents first so Docker can seed from them on first start
+5. `oiatsolutions.com` managed in Cloudflare DNS
+6. A Cloudflare API token for DNS challenge issuance
+7. A public DNS record for `portal.oiatsolutions.com` pointing at the server's Tailscale IP
 
 ### Required `.env` values
 
@@ -164,6 +167,7 @@ DJANGO_SESSION_COOKIE_SECURE=1
 
 PORTAL_DOMAIN=portal.oiatsolutions.com
 TAILSCALE_BIND_IP=100.125.133.118
+CF_API_TOKEN=your_cloudflare_dns_api_token
 ```
 
 `DJANGO_SECRET_KEY`
@@ -183,6 +187,46 @@ TAILSCALE_BIND_IP=100.125.133.118
 `TAILSCALE_BIND_IP`
 - The Tailscale IP on the host where Caddy should listen on `443`
 - This keeps the portal bound to the tailnet-facing interface instead of all interfaces
+
+`CF_API_TOKEN`
+- Cloudflare API token used by Caddy for ACME DNS challenge issuance
+- Scope it to the portal zone with:
+  - `Zone.Zone:Read`
+  - `Zone.DNS:Edit`
+- Restrict it to the specific zone you are serving, for example `oiatsolutions.com`
+
+### Cloudflare DNS setup
+
+Before the first Caddy start, create these in Cloudflare:
+
+1. A DNS record for `portal.oiatsolutions.com`
+   - Type: `A`
+   - Name: `portal`
+   - Content: the server's Tailscale IP, for example `100.125.133.118`
+   - Proxy status: `DNS only`
+2. An API token scoped to that zone with:
+   - `Zone.Zone:Read`
+   - `Zone.DNS:Edit`
+
+Important:
+
+- The portal record must be `DNS only`, not proxied through Cloudflare
+- Cloudflare's reverse proxy cannot reach a tailnet-only origin on a Tailscale IP
+- The public DNS record is acceptable here because the Tailscale IP is only reachable by approved tailnet clients
+
+### Tailscale access model
+
+Use Tailscale as the network gate:
+
+1. Publish `portal.oiatsolutions.com` in public DNS so browsers can resolve it normally
+2. Restrict actual connectivity with a Tailscale grant/ACL so only approved users can reach the server on `tcp:443`
+3. Keep Django login enabled so approved network users still need valid portal credentials
+
+That gives you:
+
+- browser-trusted HTTPS without per-device certificate import
+- tailnet-only reachability
+- Django auth as a second access-control layer
 
 For the Caddy/Tailscale setup, also set:
 
@@ -227,37 +271,6 @@ After that, the Docker volume becomes the source of truth. Future container rebu
 
 If you copy the repo to the server **after** the Docker volume has already been created and populated, those copied SQLite files will not automatically overwrite the existing volume. Seed-from-repo behavior is only for first start when the volume is empty.
 
-### Current TLS mode
-
-The repo currently ships Caddy in `tls internal` mode. That means:
-
-- traffic between the browser and the proxy is encrypted
-- Caddy issues its own private certificate authority (CA)
-- browsers will still show a certificate warning until that CA is trusted on the client device
-
-This is enough to start the reverse-proxy setup privately on the tailnet, but it is not the final browser-trusted setup for `portal.oiatsolutions.com`.
-
-To get a browser-trusted certificate for a tailnet-only custom domain, you will typically need:
-
-- split DNS so tailnet users resolve `portal.oiatsolutions.com` to the server's Tailscale IP
-- Tailscale grants/ACLs so only approved users can reach the server on `443`
-- a public CA certificate issued with DNS validation for the domain
-
-The exact certificate step depends on your DNS provider and is not fully generic in this repo.
-
-### Split DNS and Tailscale access control
-
-To make `portal.oiatsolutions.com` tailnet-only:
-
-1. Configure split DNS so tailnet clients resolve `portal.oiatsolutions.com` to the server's Tailscale IP
-2. Add a Tailscale grant/ACL so only an approved group can reach the server on `tcp:443`
-3. Keep Django auth enabled so approved network users still need valid portal credentials
-
-This gives you two layers of access control:
-
-- Tailscale decides who can reach the portal
-- Django decides who can log in and use it
-
 ### Updating the deployment
 
 For later updates:
@@ -280,7 +293,7 @@ docker compose ps
 docker compose logs --tail=100 caddy web scheduler
 
 # 3. Confirm the login page responds through Caddy
-curl -k -I https://portal.oiatsolutions.com/login/
+curl -I https://portal.oiatsolutions.com/login/
 
 # 4. Confirm Django users exist in the seeded database
 docker compose exec web python manage.py shell -c "from django.contrib.auth import get_user_model; print(list(get_user_model().objects.values_list('username', flat=True)))"
@@ -302,8 +315,6 @@ Expected results:
 - Django users and company keys are present
 - `store_tokens.py --list` shows stored tokens
 - the QBO query returns JSON instead of an auth or transport error
-
-`curl -k` is used above because the default `tls internal` certificate is not publicly trusted yet.
 
 ### Troubleshooting
 
@@ -339,6 +350,46 @@ If that command prints no interpolation warnings, recreate the containers:
 docker compose up -d --force-recreate caddy web scheduler
 ```
 
+**`portal.oiatsolutions.com` returns `NXDOMAIN`**
+
+The domain is not published correctly in public DNS yet.
+
+Check:
+
+- `portal.oiatsolutions.com` exists in Cloudflare DNS
+- the record type is `A`
+- the record points to the server's Tailscale IP
+- the record is `DNS only`, not proxied
+
+From a client device, verify:
+
+```bash
+nslookup portal.oiatsolutions.com
+```
+
+You should get the server's Tailscale IP back.
+
+**Caddy fails to obtain or renew the certificate**
+
+Common causes:
+
+- `CF_API_TOKEN` is missing or invalid
+- the token does not have both `Zone.Zone:Read` and `Zone.DNS:Edit`
+- the token is scoped to the wrong zone
+- `portal.oiatsolutions.com` is not publicly resolvable in Cloudflare DNS yet
+
+Check recent Caddy logs:
+
+```bash
+docker compose logs --tail=100 caddy
+```
+
+Typical fixes:
+
+- replace `CF_API_TOKEN` with a valid token for the correct zone
+- make sure the portal DNS record exists before first certificate issuance
+- keep the record `DNS only`
+
 **Login page loads but authentication fails**
 
 If login or CSRF fails behind Caddy, confirm these are set:
@@ -370,7 +421,7 @@ This is destructive to current container state, so only do it if the volume cont
 - `caddy`, `web`, and `scheduler` all load the relevant env/config
 - Caddy listens on `443` only, bound to the Tailscale IP you set in `.env`
 - `web` is internal-only and is reached through Docker networking
-- Compose requires `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`
+- Compose requires `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, and `CF_API_TOKEN`
 - Persistent state lives in `/data` inside the containers, backed by the `app-data` volume
 - The copied repo is mounted read-only into `/seed` and is only used to seed the volume on first start
 

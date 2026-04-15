@@ -14,6 +14,7 @@ __pycache__
 .env
 db.sqlite3
 code_scripts/qbo_tokens.sqlite
+caddy-root.crt
 
 build
 runtime

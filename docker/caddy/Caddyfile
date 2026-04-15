@@ -1,9 +1,13 @@
 {
 	admin off
+	auto_https disable_redirects
 }
 
 {$PORTAL_DOMAIN} {
-	tls internal
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+		resolvers 1.1.1.1 1.0.0.1
+	}
 
 	reverse_proxy web:8000 {
 		health_uri /login/

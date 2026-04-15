@@ -47,12 +47,16 @@ services:
       SCHEDULE_TZ: ${SCHEDULE_TZ:-Africa/Lagos}
 
   caddy:
-    image: caddy:2
+    build:
+      context: .
+      dockerfile: docker/caddy/Dockerfile
+    image: oiat-caddy:latest
     container_name: oiat-caddy
     depends_on:
       - web
     environment:
       PORTAL_DOMAIN: ${PORTAL_DOMAIN:?set PORTAL_DOMAIN in .env}
+      CF_API_TOKEN: ${CF_API_TOKEN:?set CF_API_TOKEN in .env}
     ports:
       - "${TAILSCALE_BIND_IP:?set TAILSCALE_BIND_IP in .env}:443:443"
     volumes:
