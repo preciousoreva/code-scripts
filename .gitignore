@@ -109,3 +109,6 @@ dataPandasLib/
 
 # Scheduled run lock (runtime/ created by run_scheduled_all_companies; lock file removed on exit)
 runtime/
+
+# Exported local Caddy root cert from older tls-internal testing
+caddy-root.crt

@@ -85,6 +85,8 @@ That's it! The pipeline will download, split, transform, upload, archive, and re
 > 💡 **Tip:** See [Initial Setup](#initial-setup) below for detailed instructions on each step.
 >
 > **Note:** All examples use `python` for cross-platform compatibility. On macOS/Linux, use `python3` if `python` points to Python 2 or is missing.
+>
+> **Docker deployment:** For the `docker-build` branch, see [Docker Deployment](#docker-deployment-docker-build-branch) before deploying on a server.
 
 ---
 
@@ -115,6 +117,354 @@ Use this sequence once per machine (or per new clone/venv) so both the pipeline 
    ```
 
 5. **If you use the OIAT Portal:** run [Portal Setup](#portal-setup) (migrate, createsuperuser, sync companies, runserver).
+
+---
+
+## Docker Deployment (`docker-build` branch)
+
+The `docker-build` branch packages the portal into Docker services with a Caddy reverse proxy in front:
+
+- `caddy` — terminates HTTPS on the Tailscale IP and forwards requests to Django
+- `web` — runs Django migrations, then serves the portal with Gunicorn
+- `scheduler` — runs `python manage.py run_schedule_worker`
+
+For moving this setup to a new host, use [docs/DOCKER_MIGRATION_READY.md](docs/DOCKER_MIGRATION_READY.md).
+
+`web` is not exposed directly on a host port. Caddy is the only entrypoint, and it should be bound only to the Tailscale IP.
+
+The stack uses these volumes:
+
+- `app-data` — Django DB, QBO token DB, logs, uploads, reports, outputs
+- `caddy_data` / `caddy_config` — Caddy ACME state, issued certificates, and runtime config
+
+### What you need on the server
+
+1. Docker and Docker Compose installed
+2. The repo present on disk
+3. A `.env` file in the repo root
+4. If you want to preserve existing state, copy your current repo contents first so the one-time bootstrap step can seed the Docker volume
+5. `oiatsolutions.com` managed in Cloudflare DNS
+6. A Cloudflare API token for DNS challenge issuance
+7. A public DNS record for `portal.oiatsolutions.com` pointing at the server's Tailscale IP
+
+### Required `.env` values
+
+At minimum, set these in `.env`:
+
+```env
+QBO_CLIENT_ID=your_client_id_here
+QBO_CLIENT_SECRET=your_client_secret_here
+EPOS_USERNAME_A=...
+EPOS_PASSWORD_A=...
+EPOS_USERNAME_B=...
+EPOS_PASSWORD_B=...
+
+DJANGO_SECRET_KEY='replace-with-a-long-random-secret'
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,your-server-ip,portal.oiatsolutions.com
+DJANGO_CSRF_TRUSTED_ORIGINS=https://portal.oiatsolutions.com
+DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_USE_X_FORWARDED_HOST=1
+DJANGO_CSRF_COOKIE_SECURE=1
+DJANGO_SESSION_COOKIE_SECURE=1
+
+PORTAL_DOMAIN=portal.oiatsolutions.com
+TAILSCALE_BIND_IP=100.125.133.118
+CF_API_TOKEN=your_cloudflare_dns_api_token
+```
+
+`DJANGO_SECRET_KEY`
+- Django's signing/encryption secret
+- Must be long, random, and stable for that environment
+- Do not commit it to Git
+- If the secret contains `$`, wrap it in single quotes in `.env` so Docker Compose treats it literally
+
+`DJANGO_ALLOWED_HOSTS`
+- Comma-separated list of hostnames or IPs the app is allowed to serve
+- Include the exact server IP and/or domain you will browse to
+
+`PORTAL_DOMAIN`
+- The hostname Caddy serves, for example `portal.oiatsolutions.com`
+- This should match the HTTPS origin users will visit
+
+`TAILSCALE_BIND_IP`
+- The Tailscale IP on the host where Caddy should listen on `443`
+- This keeps the portal bound to the tailnet-facing interface instead of all interfaces
+
+`CF_API_TOKEN`
+- Cloudflare API token used by Caddy for ACME DNS challenge issuance
+- Scope it to the portal zone with:
+  - `Zone.Zone:Read`
+  - `Zone.DNS:Edit`
+- Restrict it to the specific zone you are serving, for example `oiatsolutions.com`
+
+### Cloudflare DNS setup
+
+Before the first Caddy start, create these in Cloudflare:
+
+1. A DNS record for `portal.oiatsolutions.com`
+   - Type: `A`
+   - Name: `portal`
+   - Content: the server's Tailscale IP, for example `100.125.133.118`
+   - Proxy status: `DNS only`
+2. An API token scoped to that zone with:
+   - `Zone.Zone:Read`
+   - `Zone.DNS:Edit`
+
+Important:
+
+- The portal record must be `DNS only`, not proxied through Cloudflare
+- Cloudflare's reverse proxy cannot reach a tailnet-only origin on a Tailscale IP
+- The public DNS record is acceptable here because the Tailscale IP is only reachable by approved tailnet clients
+
+### Tailscale access model
+
+Use Tailscale as the network gate:
+
+1. Publish `portal.oiatsolutions.com` in public DNS so browsers can resolve it normally
+2. Restrict actual connectivity with a Tailscale grant/ACL so only approved users can reach the server on `tcp:443`
+3. Keep Django login enabled so approved network users still need valid portal credentials
+
+That gives you:
+
+- browser-trusted HTTPS without per-device certificate import
+- tailnet-only reachability
+- Django auth as a second access-control layer
+
+For the Caddy/Tailscale setup, also set:
+
+```env
+DJANGO_CSRF_TRUSTED_ORIGINS=https://portal.oiatsolutions.com
+DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_USE_X_FORWARDED_HOST=1
+DJANGO_CSRF_COOKIE_SECURE=1
+DJANGO_SESSION_COOKIE_SECURE=1
+```
+
+### First deployment
+
+From the repo root on the server:
+
+```bash
+git fetch origin
+git switch docker-build
+git pull origin docker-build
+docker compose build
+docker compose up -d caddy web scheduler
+docker compose logs -f caddy web scheduler
+```
+
+If this is a migration from an existing non-Docker install and you want to import the current DB, token store, logs, uploads, and reports first, run the bootstrap service once before starting the long-lived services:
+
+```bash
+docker compose run --rm --profile bootstrap bootstrap
+docker compose up -d caddy web scheduler
+```
+
+### What happens on first start
+
+Docker creates a named volume called `app-data` and stores persistent runtime state there.
+
+When you run the bootstrap service, the entrypoint seeds the Docker volume from the copied repo directory if those source files or folders exist and the volume is still empty:
+
+- `db.sqlite3`
+- `code_scripts/qbo_tokens.sqlite`
+- `code_scripts/Uploaded/`
+- `code_scripts/uploads/`
+- `code_scripts/logs/`
+- `code_scripts/reports/`
+- `code_scripts/outputs/`
+
+After that, the Docker volume becomes the source of truth. Future container rebuilds and restarts keep using the volume state.
+
+### Important deployment note
+
+The running `web` and `scheduler` services no longer mount the checked-out repo into `/seed`. That is intentional. It reduces exposure of `.env`, `.git`, and other checked-out files if an app container is ever compromised.
+
+If you copy the repo to the server **after** the Docker volume has already been created and populated, those copied SQLite files will not automatically overwrite the existing volume. Bootstrap seeding only works when the volume is empty.
+
+### Updating the deployment
+
+For later updates:
+
+```bash
+git pull origin docker-build
+docker compose build
+docker compose up -d caddy web scheduler
+```
+
+Do not rerun the bootstrap service on ordinary code updates. It is for first-time state import only.
+
+### Smoke tests after deployment
+
+Use these checks after the containers come up to confirm the deployment is actually usable, not just running:
+
+```bash
+# 1. Confirm all containers are up
+docker compose ps
+
+# 2. Tail recent logs
+docker compose logs --tail=100 caddy web scheduler
+
+# 3. Confirm the login page responds through Caddy
+curl -I https://portal.oiatsolutions.com/login/
+
+# 4. Confirm Django users exist in the seeded database
+docker compose exec web python manage.py shell -c "from django.contrib.auth import get_user_model; print(list(get_user_model().objects.values_list('username', flat=True)))"
+
+# 5. Confirm companies exist in the DB
+docker compose exec web python manage.py shell -c "from apps.epos_qbo.models import CompanyConfigRecord; print(list(CompanyConfigRecord.objects.values_list('company_key', flat=True)))"
+
+# 6. Confirm QBO tokens are present
+docker compose exec web python store_tokens.py --list
+
+# 7. Confirm QBO connectivity with a safe read-only query
+docker compose exec web python code_scripts/scripts/qbo_queries/qbo_query.py --company company_a query "select Id, Name from Item maxresults 1"
+```
+
+Expected results:
+
+- `docker compose ps` shows `caddy`, `web`, and `scheduler` as `Up`
+- `/login/` responds successfully through Caddy
+- Django users and company keys are present
+- `store_tokens.py --list` shows stored tokens
+- the QBO query returns JSON instead of an auth or transport error
+
+### Troubleshooting
+
+**Docker Compose warns that a variable is not set**
+
+If you see warnings like:
+
+```text
+The "abc123" variable is not set. Defaulting to a blank string.
+```
+
+then a value in `.env` contains `$...` and Docker Compose is trying to interpolate it.
+
+Fix:
+
+- wrap the value in single quotes, for example:
+
+  ```env
+  DJANGO_SECRET_KEY='my$literal$secret'
+  ```
+
+- or escape each dollar sign as `$$`
+
+Then verify:
+
+```bash
+docker compose config > /dev/null
+```
+
+If that command prints no interpolation warnings, recreate the containers:
+
+```bash
+docker compose up -d --force-recreate caddy web scheduler
+```
+
+**`portal.oiatsolutions.com` returns `NXDOMAIN`**
+
+The domain is not published correctly in public DNS yet.
+
+Check:
+
+- `portal.oiatsolutions.com` exists in Cloudflare DNS
+- the record type is `A`
+- the record points to the server's Tailscale IP
+- the record is `DNS only`, not proxied
+
+From a client device, verify:
+
+```bash
+nslookup portal.oiatsolutions.com
+```
+
+You should get the server's Tailscale IP back.
+
+**Caddy fails to obtain or renew the certificate**
+
+Common causes:
+
+- `CF_API_TOKEN` is missing or invalid
+- the token does not have both `Zone.Zone:Read` and `Zone.DNS:Edit`
+- the token is scoped to the wrong zone
+- `portal.oiatsolutions.com` is not publicly resolvable in Cloudflare DNS yet
+
+Check recent Caddy logs:
+
+```bash
+docker compose logs --tail=100 caddy
+```
+
+Typical fixes:
+
+- replace `CF_API_TOKEN` with a valid token for the correct zone
+- make sure the portal DNS record exists before first certificate issuance
+- keep the record `DNS only`
+
+**Login page loads but authentication fails**
+
+If login or CSRF fails behind Caddy, confirm these are set:
+
+```env
+DJANGO_CSRF_TRUSTED_ORIGINS=https://portal.oiatsolutions.com
+DJANGO_USE_X_FORWARDED_PROTO=1
+DJANGO_USE_X_FORWARDED_HOST=1
+DJANGO_CSRF_COOKIE_SECURE=1
+DJANGO_SESSION_COOKIE_SECURE=1
+```
+
+**Users, companies, or tokens are missing**
+
+If the smoke tests show empty users, empty companies, or no tokens, the bootstrap seed probably did not populate the Docker volume. Once the Docker volume exists, copied repo files do not automatically overwrite it.
+
+If you need to restart from the copied repo state, stop the app, remove the Docker volume, and start again:
+
+```bash
+docker compose down
+docker volume rm code-scripts_app-data
+docker compose run --rm --profile bootstrap bootstrap
+docker compose up -d caddy web scheduler
+```
+
+This is destructive to current container state, so only do it if the volume contents are wrong and you want to reseed from the copied repo.
+
+### Docker services and env behavior
+
+- `bootstrap`, `caddy`, `web`, and `scheduler` all load the relevant env/config
+- Caddy listens on `443` only, bound to the Tailscale IP you set in `.env`
+- `web` is internal-only and is reached through Docker networking
+- Compose requires `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, and `CF_API_TOKEN`
+- Persistent state lives in `/data` inside the containers, backed by the `app-data` volume
+- The copied repo is mounted read-only into `/seed` only for the one-time `bootstrap` service
+
+### Security posture
+
+This setup is materially safer than exposing Django or Gunicorn directly, but it is not "unhackable" and it is not magic DDoS protection.
+
+What is protecting the portal now:
+
+- `web` is not published directly to the host
+- Caddy only binds to the Tailscale IP, not all host interfaces
+- the browser-facing certificate is a real Let's Encrypt certificate
+- Django only serves configured hosts via `DJANGO_ALLOWED_HOSTS`
+- secure cookies and forwarded-proto handling are enabled for HTTPS
+- the portal still requires Django authentication after network access
+
+What reduces DDoS exposure:
+
+- the service is reachable over the Tailscale interface, not the open public internet
+- the public DNS record points to a Tailscale IP, which is not generally routable from the internet
+
+What this does **not** mean:
+
+- Cloudflare is **not** proxying or shielding traffic here because the DNS record is `DNS only`
+- this is **not** protected by Cloudflare WAF or Cloudflare DDoS mitigation
+- if your Tailscale grants are too broad, any allowed tailnet user can still attempt logins or hammer the app
+- the Django login does not currently have built-in brute-force throttling
+
+The most important operational control is still Tailscale policy. Restrict `tcp:443` on this host to only the specific users or groups that should reach the portal.
 
 ---
 
@@ -160,9 +510,9 @@ This script is intentionally thin — all business logic remains in `run_pipelin
 
 Inventory sync mode is intentionally **not** configurable on `run_all_companies.py`; each company uses its own config/env value.
 
-### Scheduled runs via Docker scheduler service
+### Scheduled runs via Docker services
 
-Use the in-repo scheduler worker through Docker Compose. The worker reads DB schedules from the `Schedules` page and enqueues `RunJob` records.
+Use the in-repo scheduler worker through Docker Compose. The worker reads DB schedules from the `Schedules` page and enqueues `RunJob` records. In the `docker-build` branch, the scheduler is expected to run alongside the `web` service because both share the same runtime image and persistent state.
 
 Execution path:
 
@@ -171,14 +521,14 @@ Execution path:
 - existing dispatcher starts the run and applies normal lock protections
 
 ```bash
-# Build scheduler image
-docker compose build scheduler
+# Build the app image
+docker compose build
 
-# Start scheduler in background
-docker compose up -d scheduler
+# Start web + scheduler in background
+docker compose up -d web scheduler
 
-# Tail scheduler logs
-docker compose logs -f scheduler
+# Tail logs
+docker compose logs -f web scheduler
 ```
 
 Scheduler env vars:
@@ -708,6 +1058,7 @@ python store_tokens.py --list
 **Notes:**
 
 - `qbo_tokens.sqlite` is local state, gitignored, and must be created per machine (or copied manually)
+- In Docker deployments, `qbo_tokens.sqlite` lives in the `app-data` volume after first start
 - Do not commit tokens or the database file
 - The script automatically loads the `realm_id` from your company configuration file
 - Optional: You can use a GUI tool like [DB Browser for SQLite](https://sqlitebrowser.org/) to view the database contents (useful for debugging or verifying stored tokens)
@@ -1189,7 +1540,8 @@ export QBO_CLIENT_ID="your_id"
 ## Security Best Practices
 
 - **Credentials:** Use `.env` file or environment variables, never hardcode
-- **Tokens:** `qbo_tokens.sqlite` is auto-created with restricted permissions (0o600)
+- **Django deployment:** In Docker, set `DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS` explicitly in `.env`
+- **Tokens:** `qbo_tokens.sqlite` is auto-created if missing; in Docker it is persisted in the `app-data` volume
 - **Git:** `.gitignore` excludes all sensitive files (including `qbo_tokens.sqlite` and SQLite sidecar files)
 - **Production:** Use a secrets manager (AWS Secrets Manager, HashiCorp Vault)
 

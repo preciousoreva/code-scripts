@@ -1,19 +1,87 @@
+x-app-common: &app-common
+  build:
+    context: .
+    dockerfile: docker/scheduler/Dockerfile
+  image: oiat-portal:latest
+  working_dir: /app
+  env_file:
+    - .env
+  environment:
+    DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
+    STATE_ROOT: /data
+  volumes:
+    - app-data:/data
+  restart: unless-stopped
+  init: true
+
 services:
-  scheduler:
-    build:
-      context: .
-      dockerfile: docker/scheduler/Dockerfile
-    container_name: oiat-scheduler
-    working_dir: /app
-    command: ["python", "manage.py", "run_schedule_worker"]
-    env_file:
-      - .env
+  bootstrap:
+    <<: *app-common
+    profiles: ["bootstrap"]
+    command:
+      - /bin/sh
+      - -lc
+      - echo "Bootstrap seed complete."
     environment:
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
+      STATE_ROOT: /data
+      SEED_ROOT: /seed
+    volumes:
+      - app-data:/data
+      - .:/seed:ro
+    restart: "no"
+
+  web:
+    <<: *app-common
+    container_name: oiat-web
+    command:
+      - /bin/sh
+      - -lc
+      - python manage.py migrate --noinput && exec gunicorn oiat_portal.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --timeout ${GUNICORN_TIMEOUT:-180}
+    expose:
+      - "8000"
+
+  scheduler:
+    <<: *app-common
+    container_name: oiat-scheduler
+    command: ["python", "manage.py", "run_schedule_worker"]
+    depends_on:
+      - web
+    environment:
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
+      STATE_ROOT: /data
       OIAT_SCHEDULER_POLL_SECONDS: ${OIAT_SCHEDULER_POLL_SECONDS:-15}
       OIAT_SCHEDULER_ENABLE_ENV_FALLBACK: ${OIAT_SCHEDULER_ENABLE_ENV_FALLBACK:-1}
       SCHEDULE_CRON: ${SCHEDULE_CRON:-0 18 * * *}
       SCHEDULE_TZ: ${SCHEDULE_TZ:-Africa/Lagos}
+
+  caddy:
+    build:
+      context: .
+      dockerfile: docker/caddy/Dockerfile
+    image: oiat-caddy:latest
+    container_name: oiat-caddy
+    depends_on:
+      - web
+    environment:
+      PORTAL_DOMAIN: ${PORTAL_DOMAIN:?set PORTAL_DOMAIN in .env}
+      CF_API_TOKEN: ${CF_API_TOKEN:?set CF_API_TOKEN in .env}
+    ports:
+      - "${TAILSCALE_BIND_IP:?set TAILSCALE_BIND_IP in .env}:443:443"
     volumes:
-      - .:/app
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     restart: unless-stopped
     init: true
+
+volumes:
+  app-data:
+  caddy_data:
+  caddy_config:
