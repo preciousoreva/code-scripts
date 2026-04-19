@@ -22,16 +22,34 @@ from .locking import release_run_lock
 logger = logging.getLogger(__name__)
 
 
+def resolve_python_executable() -> str:
+    """Resolve Python executable for dashboard subprocesses.
+
+    Precedence:
+    1. Explicit sandbox/dev override via OIAT_VENV_PATH
+    2. The interpreter running Django right now
+    3. Repo-local .venv as a final fallback
+    """
+    configured_venv = os.environ.get("OIAT_VENV_PATH")
+    if configured_venv:
+        configured_python = Path(configured_venv).expanduser() / "bin" / "python"
+        if configured_python.exists():
+            return str(configured_python)
+
+    if sys.executable:
+        return sys.executable
+
+    venv_python = BASE_DIR / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+
+    return "python3"
+
+
 def build_command(cleaned: dict) -> list[str]:
     scope = cleaned["scope"]
     date_mode = cleaned["date_mode"]
-    
-    # Prefer project's venv Python if it exists, otherwise use sys.executable
-    venv_python = BASE_DIR / ".venv" / "bin" / "python"
-    if venv_python.exists():
-        python_exe = str(venv_python)
-    else:
-        python_exe = sys.executable
+    python_exe = resolve_python_executable()
 
     if scope == RunJob.SCOPE_SINGLE:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_pipeline.py"), "--company", cleaned["company_key"]]

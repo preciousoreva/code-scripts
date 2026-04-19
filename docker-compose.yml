@@ -5,12 +5,13 @@ x-app-common: &app-common
   image: oiat-portal:latest
   working_dir: /app
   env_file:
-    - .env
+    - ${OIAT_ENV_FILE:-.env}
   environment:
     DJANGO_DEBUG: ${DJANGO_DEBUG:-0}
     DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
     DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
     STATE_ROOT: /data
+    OIAT_COMPANIES_DIR: /data/code_scripts/companies
   volumes:
     - app-data:/data
   restart: unless-stopped
@@ -29,6 +30,7 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
       STATE_ROOT: /data
+      OIAT_COMPANIES_DIR: /data/code_scripts/companies
       SEED_ROOT: /seed
     volumes:
       - app-data:/data
@@ -37,7 +39,7 @@ services:
 
   web:
     <<: *app-common
-    container_name: oiat-web
+    container_name: ${COMPOSE_PROJECT_NAME:-oiat}-web
     command:
       - /bin/sh
       - -lc
@@ -47,7 +49,7 @@ services:
 
   scheduler:
     <<: *app-common
-    container_name: oiat-scheduler
+    container_name: ${COMPOSE_PROJECT_NAME:-oiat}-scheduler
     command: ["python", "manage.py", "run_schedule_worker"]
     depends_on:
       - web
@@ -56,6 +58,7 @@ services:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?set DJANGO_ALLOWED_HOSTS in .env}
       STATE_ROOT: /data
+      OIAT_COMPANIES_DIR: /data/code_scripts/companies
       OIAT_SCHEDULER_POLL_SECONDS: ${OIAT_SCHEDULER_POLL_SECONDS:-15}
       OIAT_SCHEDULER_ENABLE_ENV_FALLBACK: ${OIAT_SCHEDULER_ENABLE_ENV_FALLBACK:-1}
       SCHEDULE_CRON: ${SCHEDULE_CRON:-0 18 * * *}
@@ -66,7 +69,7 @@ services:
       context: .
       dockerfile: docker/caddy/Dockerfile
     image: oiat-caddy:latest
-    container_name: oiat-caddy
+    container_name: ${COMPOSE_PROJECT_NAME:-oiat}-caddy
     depends_on:
       - web
     environment:

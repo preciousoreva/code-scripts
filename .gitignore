@@ -27,6 +27,11 @@ uploaded_docnumbers*.json
 .env
 .env.local
 .env.gp
+.oiat/
+.claude/
+
+# macOS SMB deletion artifacts (appear on network mounts)
+.smbdelete*
 
 # Python cache
 __pycache__/

@@ -88,6 +88,17 @@ That's it! The pipeline will download, split, transform, upload, archive, and re
 >
 > **Docker deployment:** For the `docker-build` branch, see [Docker Deployment](#docker-deployment-docker-build-branch) before deploying on a server.
 
+### Developer Sandbox Profiles
+
+To develop against a QuickBooks sandbox without touching production state, bootstrap a local profile:
+
+```bash
+./build/init-dev-profile.sh marvin-dev   # creates .oiat/env/marvin-dev.env and ~/.oiat/state/marvin-dev
+./build/run-sandbox.sh                   # starts Django with the sandbox env loaded
+```
+
+This keeps the sandbox Django DB, QBO token DB, company JSON, and artifacts under `~/.oiat/state/<profile>/` on your local disk — separate from production. See [docs/DEV_STAGE_SETUP.md](docs/DEV_STAGE_SETUP.md) for the full flow, guardrails, and what ships to `master` vs what stays local.
+
 ---
 
 ## First-time setup (all in one)

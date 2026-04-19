@@ -19,13 +19,18 @@ import pandas as pd
 import requests
 
 from code_scripts.load_env import load_env_file
-from code_scripts.company_config import load_company_config, get_available_companies
+from code_scripts.company_config import (
+    ensure_company_runtime_compatible,
+    get_available_companies,
+    get_qbo_api_base_url,
+    load_company_config,
+)
 from code_scripts.token_manager import get_access_token, refresh_access_token, verify_realm_match, DB_FILE
 
 # Load .env if present so QBO_* vars are available (shared secrets only)
 load_env_file()
 
-BASE_URL = "https://quickbooks.api.intuit.com"
+BASE_URL = get_qbo_api_base_url()
 VERBOSE_PIPELINE_LOGS = os.getenv("OIAT_VERBOSE_PIPELINE_LOGS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 QBO_REQUEST_TIMEOUT = (10, 120)
@@ -2962,6 +2967,7 @@ def main():
     # Load company configuration
     try:
         config = load_company_config(args.company)
+        ensure_company_runtime_compatible(config)
     except Exception as e:
         print(f"Error: Failed to load company config for '{args.company}': {e}")
         sys.exit(1)

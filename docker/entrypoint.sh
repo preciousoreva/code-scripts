@@ -4,11 +4,13 @@ set -eu
 APP_ROOT="/app"
 STATE_ROOT="${STATE_ROOT:-/data}"
 SEED_ROOT="${SEED_ROOT:-/seed}"
+COMPANIES_ROOT="${OIAT_COMPANIES_DIR:-${STATE_ROOT}/code_scripts/companies}"
 
 mkdir -p \
   "${STATE_ROOT}" \
   "${STATE_ROOT}/runtime" \
   "${STATE_ROOT}/code_scripts" \
+  "${COMPANIES_ROOT}" \
   "${STATE_ROOT}/code_scripts/Uploaded" \
   "${STATE_ROOT}/code_scripts/uploads" \
   "${STATE_ROOT}/code_scripts/logs" \
@@ -51,6 +53,7 @@ link_path() {
 
 seed_file_if_empty "${STATE_ROOT}/db.sqlite3" "${SEED_ROOT}/db.sqlite3"
 seed_file_if_empty "${STATE_ROOT}/code_scripts/qbo_tokens.sqlite" "${SEED_ROOT}/code_scripts/qbo_tokens.sqlite"
+seed_dir_if_empty "${COMPANIES_ROOT}" "${SEED_ROOT}/code_scripts/companies"
 seed_dir_if_empty "${STATE_ROOT}/code_scripts/Uploaded" "${SEED_ROOT}/code_scripts/Uploaded"
 seed_dir_if_empty "${STATE_ROOT}/code_scripts/uploads" "${SEED_ROOT}/code_scripts/uploads"
 seed_dir_if_empty "${STATE_ROOT}/code_scripts/logs" "${SEED_ROOT}/code_scripts/logs"
@@ -65,6 +68,7 @@ mkdir -p \
 link_path "${STATE_ROOT}/db.sqlite3" "${APP_ROOT}/db.sqlite3"
 link_path "${STATE_ROOT}/runtime" "${APP_ROOT}/runtime"
 link_path "${STATE_ROOT}/code_scripts/qbo_tokens.sqlite" "${APP_ROOT}/code_scripts/qbo_tokens.sqlite"
+link_path "${COMPANIES_ROOT}" "${APP_ROOT}/code_scripts/companies"
 link_path "${STATE_ROOT}/code_scripts/Uploaded" "${APP_ROOT}/code_scripts/Uploaded"
 link_path "${STATE_ROOT}/code_scripts/uploads" "${APP_ROOT}/code_scripts/uploads"
 link_path "${STATE_ROOT}/code_scripts/logs" "${APP_ROOT}/code_scripts/logs"

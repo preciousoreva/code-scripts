@@ -97,6 +97,7 @@ def build_basic_payload(form: CompanyBasicForm) -> dict[str, Any]:
         "company_key": d["company_key"],
         "display_name": d["display_name"],
         "qbo": {
+            "environment": d["qbo_environment"],
             "realm_id": d["realm_id"],
             "deposit_account": d["deposit_account"],
             "tax_mode": d["tax_mode"],

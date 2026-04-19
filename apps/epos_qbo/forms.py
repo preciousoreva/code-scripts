@@ -93,6 +93,10 @@ class RunTriggerForm(forms.Form):
 class CompanyBasicForm(forms.Form):
     company_key = forms.SlugField(max_length=64)
     display_name = forms.CharField(max_length=255)
+    qbo_environment = forms.ChoiceField(
+        choices=[("production", "Production"), ("sandbox", "Sandbox")],
+        initial="production",
+    )
     realm_id = forms.CharField(max_length=64)
     deposit_account = forms.CharField(max_length=255)
     tax_mode = forms.CharField(max_length=64, initial="vat_inclusive_7_5")

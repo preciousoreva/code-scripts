@@ -20,12 +20,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from code_scripts.load_env import load_env_file
-from code_scripts.company_config import load_company_config, get_available_companies
+from code_scripts.company_config import get_available_companies, get_qbo_api_base_url, load_company_config
 from code_scripts.token_manager import get_access_token
 
 load_env_file()
 
-BASE_URL = "https://quickbooks.api.intuit.com"
 MINOR_VERSION = os.environ.get("QBO_MINOR_VERSION", "70")
 
 
@@ -34,7 +33,8 @@ def qbo_query_for_company(query: str, company_key: str) -> dict:
     config = load_company_config(company_key)
     realm_id = config.realm_id
     access_token = get_access_token(company_key, realm_id)
-    url = f"{BASE_URL}/v3/company/{realm_id}/query?query={quote(query)}&minorversion={MINOR_VERSION}"
+    base_url = get_qbo_api_base_url(config.qbo_environment)
+    url = f"{base_url}/v3/company/{realm_id}/query?query={quote(query)}&minorversion={MINOR_VERSION}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"})
     resp.raise_for_status()
     return resp.json()
