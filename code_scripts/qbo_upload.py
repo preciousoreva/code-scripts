@@ -1048,13 +1048,55 @@ def build_desired_item_state(df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     return desired
 
 
+class _CaseInsensitiveItemIndex(dict):
+    """QBO matches item names case-insensitively; mirror that for lookups.
+
+    Why: EPOS may emit 'CEDAA YOGHURT DRINK 50cl' while QBO stores it as
+    '...50CL'. A case-sensitive miss leads to a create attempt and a 400
+    'Duplicate Name Exists Error' from QBO.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lower = {k.lower(): k for k in self.keys() if isinstance(k, str)}
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if isinstance(key, str):
+            self._lower[key.lower()] = key
+
+    def _resolve(self, key):
+        if isinstance(key, str):
+            return self._lower.get(key.lower())
+        return None
+
+    def __contains__(self, key):
+        actual = self._resolve(key)
+        if actual is not None:
+            return True
+        return super().__contains__(key)
+
+    def __getitem__(self, key):
+        actual = self._resolve(key)
+        if actual is not None:
+            return super().__getitem__(actual)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        actual = self._resolve(key)
+        if actual is not None:
+            return super().__getitem__(actual)
+        return default
+
+
 def prefetch_all_items(token_mgr: TokenManager, realm_id: str) -> Dict[str, Dict[str, Any]]:
     """
     Load all QBO Items once per run via paginated query.
-    Returns existing_items_by_name: key = item Name (exact, case-sensitive), value = item dict.
+    Returns existing_items_by_name with case-insensitive lookup semantics
+    (matches QBO's own uniqueness rules). Stored keys preserve QBO's casing.
     Do NOT include SubItem in SELECT (QBO rejects it).
     """
-    existing: Dict[str, Dict[str, Any]] = {}
+    existing: Dict[str, Dict[str, Any]] = _CaseInsensitiveItemIndex()
     startposition = 1
     page_size = 1000
     base_select = (

@@ -124,6 +124,7 @@ After migration, back up the Docker volume-backed state on `oiat-srv-01` regular
 
 - starting `web` and `scheduler` on the new host before seeding state
 - forgetting that `bootstrap` is a one-time import step, not a normal update step
+- forgetting to seed `code_scripts/companies/*.json` on the volume after migration — the portal reads from the DB, but `run_all_companies.py` / `run_pipeline.py` read the JSON files. If the volume's companies directory is empty, scheduled and Quick Sync runs fail with "No runnable companies found." Fix: `docker compose exec web python manage.py sync_companies_to_json` once after bootstrap
 - using a Cloudflare proxied record instead of `DNS only`
 - assuming Cloudflare is acting as a WAF here when it is not
 - leaving Tailscale access too broad
