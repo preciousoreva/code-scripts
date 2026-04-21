@@ -8,6 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.epos_qbo.models import CompanyConfigRecord
+from apps.epos_qbo.views import _tools_venv_python
 
 
 class ToolsPageTests(TestCase):
@@ -57,6 +58,11 @@ class ToolsPageTests(TestCase):
         html = response.content.decode("utf-8")
         self.assertNotIn("{{", html)
         self.assertNotIn("{%", html)
+
+    @mock.patch.dict("os.environ", {"OIAT_VENV_PATH": "/tmp/custom-venv"}, clear=False)
+    @mock.patch("apps.epos_qbo.services.job_runner.Path.exists", return_value=True)
+    def test_tools_venv_python_prefers_configured_venv(self, _exists):
+        self.assertEqual(_tools_venv_python(), "/tmp/custom-venv/bin/python")
 
 
 class QBOQueryAPITests(TestCase):

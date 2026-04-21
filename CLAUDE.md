@@ -124,7 +124,23 @@ Business logic is split into service modules under `apps/epos_qbo/services/`:
 
 ### Company Configuration
 
-Companies are defined as JSON files in `code_scripts/companies/`. The DB (`CompanyConfig` model) is the source of truth at runtime; JSON files are synced to/from DB via management commands. Use `company.example.json` as a template when adding a new company.
+Companies are defined as JSON files under `OPS_COMPANIES_DIR` (defaults to `runtime/code_scripts/companies/`, overridable via `OIAT_COMPANIES_DIR`). The DB (`CompanyConfig` model) is the source of truth at runtime; JSON files are synced to/from DB via management commands. Use `company.example.json` as a template when adding a new production company, or `company_sandbox.example.json` for a sandbox profile.
+
+### Runtime Environments (production vs sandbox)
+
+The pipeline and portal support a `sandbox` runtime profile for local development against a QBO sandbox company. Four env vars drive isolation:
+
+- `OIAT_ENV_FILE` — explicit env file path (e.g. `.oiat/env/marvin-dev.env`).
+- `STATE_ROOT` — relocates Django DB, QBO token DB, `Uploaded/`, logs, reports. Defaults to `runtime/`. Must be on local disk (SQLite does not work over network mounts, and `/tmp` is volatile).
+- `OIAT_COMPANIES_DIR` — replaces the active company JSON directory.
+- `OIAT_RUNTIME_ENV` — `production` (default) or `sandbox`. Flips the QBO API base URL and activates guards.
+
+Guards:
+- `ensure_company_runtime_compatible()` refuses to run a company JSON whose `qbo.environment` doesn't match `OIAT_RUNTIME_ENV`.
+- `verify_tokens()` checks both environment and Intuit-client fingerprint before reusing stored tokens.
+- `get_qbo_api_base_url()` routes to `sandbox-quickbooks.api.intuit.com` when sandbox.
+
+Production deployments leave all four env vars unset (defaults preserve prior behaviour). Local dev uses `./build/run-sandbox.sh` or `./build/init-dev-profile.sh <name>`. See [docs/DEV_STAGE_SETUP.md](docs/DEV_STAGE_SETUP.md) for the full flow.
 
 ### Pipeline Data Flow
 

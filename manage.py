@@ -3,8 +3,11 @@
 import os
 import sys
 
+from code_scripts.load_env import load_env_file
+
 
 def main() -> None:
+    load_env_file()
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "oiat_portal.settings")
     from django.core.management import execute_from_command_line
 

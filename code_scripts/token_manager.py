@@ -11,13 +11,19 @@ import time
 import sqlite3
 import stat
 import base64
-from pathlib import Path
+import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 import threading
 
 import requests
 
 from code_scripts.load_env import load_env_file
+from code_scripts.paths import OPS_ROOT
+from code_scripts.company_config import (
+    get_runtime_qbo_environment,
+    load_company_config,
+    normalize_qbo_environment,
+)
 
 # Load .env for shared credentials
 load_env_file()
@@ -25,13 +31,8 @@ load_env_file()
 # QBO OAuth token endpoint
 TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
 
-# These must be set via environment variables
-CLIENT_ID = os.environ.get("QBO_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("QBO_CLIENT_SECRET")
-
 # SQLite database file
-SCRIPT_DIR = Path(__file__).resolve().parent
-DB_FILE = SCRIPT_DIR / "qbo_tokens.sqlite"
+DB_FILE = OPS_ROOT / "qbo_tokens.sqlite"
 
 # Thread lock for database operations
 _db_lock = threading.Lock()
@@ -51,21 +52,73 @@ def ensure_db_initialized() -> None:
 
 def _validate_credentials() -> None:
     """Validate that required credentials are set."""
-    if not CLIENT_ID:
+    if not _current_client_id():
         raise RuntimeError(
             "QBO_CLIENT_ID environment variable is not set. "
             "Please set it in your .env file."
         )
-    if not CLIENT_SECRET:
+    if not _current_client_secret():
         raise RuntimeError(
             "QBO_CLIENT_SECRET environment variable is not set. "
             "Please set it in your .env file."
         )
 
 
+def _current_client_id() -> str | None:
+    return os.environ.get("QBO_CLIENT_ID")
+
+
+def _current_client_secret() -> str | None:
+    return os.environ.get("QBO_CLIENT_SECRET")
+
+
+def _current_client_fingerprint() -> str | None:
+    client_id = _current_client_id()
+    if not client_id:
+        return None
+    return hashlib.sha256(client_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _expected_company_environment(company_key: str) -> str:
+    try:
+        return load_company_config(company_key).qbo_environment
+    except Exception:
+        return get_runtime_qbo_environment()
+
+
+def _assert_token_compatibility(company_key: str, realm_id: str, tokens: Optional[Dict[str, Any]]) -> None:
+    if not tokens:
+        return
+
+    runtime_environment = get_runtime_qbo_environment()
+    company_environment = _expected_company_environment(company_key)
+    token_environment = normalize_qbo_environment(tokens.get("environment"), default=runtime_environment)
+    if token_environment != runtime_environment or company_environment != runtime_environment:
+        raise RuntimeError(
+            "QBO environment mismatch.\n"
+            f"Runtime environment: {runtime_environment}\n"
+            f"Company config environment: {company_environment}\n"
+            f"Stored token environment: {token_environment}\n"
+            f"Company: {company_key}\n"
+            f"Realm ID: {realm_id}\n"
+            "Refusing to use tokens from a different QBO environment."
+        )
+
+    current_fingerprint = _current_client_fingerprint()
+    stored_fingerprint = tokens.get("client_fingerprint")
+    if current_fingerprint and stored_fingerprint and current_fingerprint != stored_fingerprint:
+        raise RuntimeError(
+            "Stored QBO tokens were created with a different Intuit client ID.\n"
+            f"Company: {company_key}\n"
+            f"Realm ID: {realm_id}\n"
+            "Re-run the OAuth flow or store fresh tokens for this environment."
+        )
+
+
 def _init_database() -> None:
     """Initialize SQLite database with qbo_tokens table if it doesn't exist."""
     with _db_lock:
+        DB_FILE.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(DB_FILE)
         try:
             conn.execute("""
@@ -78,6 +131,7 @@ def _init_database() -> None:
                     refresh_expires_at INTEGER,
                     updated_at INTEGER NOT NULL,
                     environment TEXT DEFAULT 'production',
+                    client_fingerprint TEXT,
                     PRIMARY KEY (company_key, realm_id)
                 )
             """)
@@ -87,6 +141,8 @@ def _init_database() -> None:
             }
             if "refresh_expires_at" not in columns:
                 conn.execute("ALTER TABLE qbo_tokens ADD COLUMN refresh_expires_at INTEGER")
+            if "client_fingerprint" not in columns:
+                conn.execute("ALTER TABLE qbo_tokens ADD COLUMN client_fingerprint TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -117,7 +173,7 @@ def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:
         try:
             cursor = conn.execute(
                 "SELECT access_token, refresh_token, access_expires_at, refresh_expires_at, "
-                "updated_at, environment "
+                "updated_at, environment, client_fingerprint "
                 "FROM qbo_tokens WHERE company_key = ? AND realm_id = ?",
                 (company_key, realm_id)
             )
@@ -133,6 +189,7 @@ def load_tokens(company_key: str, realm_id: str) -> Optional[Dict[str, Any]]:
                 "refresh_expires_at": row[3],
                 "updated_at": row[4],
                 "environment": row[5] or "production",
+                "client_fingerprint": row[6],
             }
         finally:
             conn.close()
@@ -156,7 +213,7 @@ def load_tokens_batch(
             for company_key, realm_id in pairs:
                 cursor = conn.execute(
                     "SELECT access_token, refresh_token, access_expires_at, refresh_expires_at, "
-                    "updated_at, environment "
+                    "updated_at, environment, client_fingerprint "
                     "FROM qbo_tokens WHERE company_key = ? AND realm_id = ?",
                     (company_key, realm_id),
                 )
@@ -171,6 +228,7 @@ def load_tokens_batch(
                         "refresh_expires_at": row[3],
                         "updated_at": row[4],
                         "environment": row[5] or "production",
+                        "client_fingerprint": row[6],
                     }
         finally:
             conn.close()
@@ -202,6 +260,7 @@ def save_tokens(
     _validate_credentials()
 
     updated_at = int(time.time())
+    client_fingerprint = _current_client_fingerprint()
 
     with _db_lock:
         conn = sqlite3.connect(DB_FILE)
@@ -216,9 +275,10 @@ def save_tokens(
                     access_expires_at,
                     refresh_expires_at,
                     updated_at,
-                    environment
+                    environment,
+                    client_fingerprint
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 company_key,
                 realm_id,
@@ -228,6 +288,7 @@ def save_tokens(
                 int(refresh_expires_at) if refresh_expires_at else None,
                 updated_at,
                 environment,
+                client_fingerprint,
             ))
             conn.commit()
         finally:
@@ -266,6 +327,7 @@ def refresh_access_token(company_key: str, realm_id: str) -> Dict[str, Any]:
         )
     
     refresh_token = tokens.get("refresh_token")
+    _assert_token_compatibility(company_key, realm_id, tokens)
     if not refresh_token:
         raise RuntimeError(
             f"No refresh_token found for {company_key} (realm_id: {realm_id}). "
@@ -273,7 +335,7 @@ def refresh_access_token(company_key: str, realm_id: str) -> Dict[str, Any]:
         )
     
     # Basic auth header
-    auth_str = f"{CLIENT_ID}:{CLIENT_SECRET}".encode("utf-8")
+    auth_str = f"{_current_client_id()}:{_current_client_secret()}".encode("utf-8")
     auth_header = base64.b64encode(auth_str).decode("utf-8")
     
     headers = {
@@ -366,6 +428,7 @@ def get_access_token(company_key: str, realm_id: str) -> str:
             f"No tokens found for {company_key} (realm_id: {realm_id}). "
             "You need to run the OAuth flow first and store tokens using store_tokens_from_oauth()."
         )
+    _assert_token_compatibility(company_key, realm_id, tokens)
     
     if is_token_expired(tokens):
         tokens = refresh_access_token(company_key, realm_id)
@@ -394,6 +457,18 @@ def store_tokens_from_oauth(
         refresh_expires_in: Refresh token expiration in seconds
         environment: 'production' or 'sandbox'
     """
+    normalized_environment = normalize_qbo_environment(environment, default="production")
+    runtime_environment = get_runtime_qbo_environment()
+    company_environment = _expected_company_environment(company_key)
+    if normalized_environment != runtime_environment or company_environment != runtime_environment:
+        raise RuntimeError(
+            "Refusing to store QBO tokens for the wrong environment.\n"
+            f"Requested token environment: {normalized_environment}\n"
+            f"Runtime environment: {runtime_environment}\n"
+            f"Company config environment: {company_environment}\n"
+            f"Company: {company_key}"
+        )
+
     expires_at = time.time() + expires_in
     refresh_expires_at = (
         time.time() + refresh_expires_in
@@ -407,7 +482,7 @@ def store_tokens_from_oauth(
         refresh_token=refresh_token,
         expires_at=expires_at,
         refresh_expires_at=refresh_expires_at,
-        environment=environment
+        environment=normalized_environment
     )
 
 
@@ -422,6 +497,7 @@ def verify_realm_match(company_key: str, expected_realm_id: str) -> None:
     tokens = load_tokens(company_key, expected_realm_id)
     if tokens:
         # If we can load tokens for this realm_id, they match
+        _assert_token_compatibility(company_key, expected_realm_id, tokens)
         return
     
     # Check if there are tokens for this company_key but different realm_id

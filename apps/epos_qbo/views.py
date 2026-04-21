@@ -46,7 +46,7 @@ from .services.config_sync import (
     sync_record_to_json,
     validate_company_config,
 )
-from .services.job_runner import dispatch_next_queued_job, read_log_chunk
+from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
@@ -2568,12 +2568,8 @@ def company_toggle_active(request, company_key):
 # ---------------------------------------------------------------------------
 
 def _tools_venv_python() -> str:
-    """Resolve Python executable: prefer project venv, fall back to sys.executable."""
-    from oiat_portal.paths import BASE_DIR
-    venv_python = BASE_DIR / ".venv" / "bin" / "python"
-    if venv_python.exists():
-        return str(venv_python)
-    return sys.executable
+    """Resolve Python executable for tools-page subprocesses."""
+    return resolve_python_executable()
 
 
 def _tools_subprocess_env() -> dict:

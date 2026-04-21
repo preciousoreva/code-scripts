@@ -23,15 +23,10 @@ Usage:
 import argparse
 import sys
 import sqlite3
-from pathlib import Path
 from datetime import datetime
 
-from code_scripts.token_manager import store_tokens_from_oauth
-from code_scripts.company_config import load_company_config
-
-# SQLite database file (same as token_manager.py)
-SCRIPT_DIR = Path(__file__).resolve().parent
-DB_FILE = SCRIPT_DIR / "qbo_tokens.sqlite"
+from code_scripts.token_manager import DB_FILE, store_tokens_from_oauth
+from code_scripts.company_config import ensure_company_runtime_compatible, load_company_config
 
 
 def redact_tokens(text: str, access_token: str = "", refresh_token: str = "") -> str:
@@ -130,6 +125,7 @@ def store_tokens(
     try:
         # Load company config to get realm_id
         config = load_company_config(company_key)
+        ensure_company_runtime_compatible(config)
 
         # Store tokens
         store_tokens_from_oauth(

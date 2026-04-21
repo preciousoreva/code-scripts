@@ -8,6 +8,8 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple, Union
 
+from code_scripts.company_config import get_qbo_api_base_url
+
 # TokenManager type: use Any to avoid circular import; caller passes instance from qbo_upload
 TokenManager = Any
 
@@ -18,7 +20,7 @@ def get_or_create_service_item(
     name: str,
     income_account_id: str,
     tax_code_id: Optional[str] = None,
-    base_url: str = "https://quickbooks.api.intuit.com",
+    base_url: str = get_qbo_api_base_url(),
     make_request: Any = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """

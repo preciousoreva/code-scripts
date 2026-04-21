@@ -12,7 +12,27 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from code_scripts.paths import OPS_COMPANIES_DIR, OPS_ROOT
+from code_scripts.paths import OPS_COMPANIES_DIR, REPO_CODE_SCRIPTS_DIR
+
+
+def normalize_qbo_environment(raw_value: str | None, default: str = "production") -> str:
+    cleaned = str(raw_value or "").strip().lower()
+    if cleaned in {"sandbox", "development", "dev", "stage", "staging", "test"}:
+        return "sandbox"
+    if cleaned == "production":
+        return "production"
+    return default
+
+
+def get_runtime_qbo_environment() -> str:
+    return normalize_qbo_environment(os.getenv("OIAT_RUNTIME_ENV"), default="production")
+
+
+def get_qbo_api_base_url(environment: str | None = None) -> str:
+    resolved = normalize_qbo_environment(environment, default=get_runtime_qbo_environment())
+    if resolved == "sandbox":
+        return "https://sandbox-quickbooks.api.intuit.com"
+    return "https://quickbooks.api.intuit.com"
 
 
 class CompanyConfig:
@@ -53,6 +73,18 @@ class CompanyConfig:
     def display_name(self) -> str:
         """Human-readable company name."""
         return self._data.get("display_name", self.company_key)
+
+    @property
+    def owner(self) -> Optional[str]:
+        """Optional owner tag for developer/staging configs."""
+        value = self._data.get("owner")
+        return str(value).strip() if value is not None and str(value).strip() else None
+
+    @property
+    def source_company_key(self) -> Optional[str]:
+        """Optional pointer to the production company this sandbox config mirrors."""
+        value = self._data.get("source_company_key")
+        return str(value).strip() if value is not None and str(value).strip() else None
     
     @property
     def realm_id(self) -> str:
@@ -69,6 +101,11 @@ class CompanyConfig:
     def deposit_account(self) -> str:
         """Deposit account name for this company."""
         return self._data["qbo"]["deposit_account"]
+
+    @property
+    def qbo_environment(self) -> str:
+        """QBO environment for this company: production or sandbox."""
+        return normalize_qbo_environment(self._data.get("qbo", {}).get("environment"), default="production")
     
     @property
     def tax_mode(self) -> str:
@@ -317,7 +354,7 @@ class CompanyConfig:
     def product_mapping_file(self) -> Path:
         """Path to product category mapping CSV file (default: mappings/Product.Mapping.csv)."""
         mapping_file = self._data.get("inventory", {}).get("product_mapping_file", "mappings/Product.Mapping.csv")
-        return OPS_ROOT / mapping_file
+        return REPO_CODE_SCRIPTS_DIR / mapping_file
 
     @property
     def bypass_income_account_id(self) -> Optional[str]:
@@ -359,6 +396,22 @@ def load_company_config(company_key: str) -> CompanyConfig:
     config_path = OPS_COMPANIES_DIR / f"{company_key}.json"
     
     return CompanyConfig(config_path)
+
+
+def ensure_company_runtime_compatible(config: CompanyConfig) -> None:
+    """
+    Prevent sandbox runtimes from using production company configs and vice versa.
+    """
+    runtime_environment = get_runtime_qbo_environment()
+    company_environment = config.qbo_environment
+    if runtime_environment != company_environment:
+        raise RuntimeError(
+            "QBO environment mismatch.\n"
+            f"Runtime environment: {runtime_environment}\n"
+            f"Company config environment: {company_environment}\n"
+            f"Company: {config.company_key} ({config.display_name})\n"
+            "Use a company JSON with the matching qbo.environment or switch OIAT_RUNTIME_ENV."
+        )
 
 
 def get_available_companies() -> list:

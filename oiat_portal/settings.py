@@ -3,7 +3,10 @@
 import os
 from pathlib import Path
 
+from code_scripts.paths import STATE_ROOT
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+STATE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
@@ -121,7 +124,7 @@ WSGI_APPLICATION = "oiat_portal.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "NAME": STATE_ROOT / "db.sqlite3",
     }
 }
 

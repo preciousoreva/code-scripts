@@ -7,10 +7,20 @@ from django.utils import timezone
 from unittest.mock import Mock, patch
 
 from apps.epos_qbo.models import RunJob, RunLock, RunSchedule, RunScheduleEvent
-from apps.epos_qbo.services.job_runner import _monitor_process, build_command, dispatch_next_queued_job
+from apps.epos_qbo.services.job_runner import (
+    _monitor_process,
+    build_command,
+    dispatch_next_queued_job,
+    resolve_python_executable,
+)
 
 
 class BuildCommandTests(SimpleTestCase):
+    @patch.dict("os.environ", {"OIAT_VENV_PATH": "/tmp/custom-venv"}, clear=False)
+    @patch("apps.epos_qbo.services.job_runner.Path.exists", return_value=True)
+    def test_resolve_python_executable_prefers_configured_venv(self, _exists):
+        self.assertEqual(resolve_python_executable(), "/tmp/custom-venv/bin/python")
+
     def test_build_command_single_company_yesterday(self):
         command = build_command(
             {
@@ -68,6 +78,22 @@ class BuildCommandTests(SimpleTestCase):
         self.assertIn("2026-02-05", command)
         self.assertIn("--skip-download", command)
         self.assertIn("--continue-on-failure", command)
+
+    @patch.dict("os.environ", {"OIAT_VENV_PATH": "/tmp/custom-venv"}, clear=False)
+    @patch("apps.epos_qbo.services.job_runner.Path.exists", return_value=True)
+    def test_build_command_uses_configured_venv_python(self, _exists):
+        command = build_command(
+            {
+                "scope": RunJob.SCOPE_SINGLE,
+                "company_key": "company_sandbox",
+                "date_mode": "yesterday",
+                "target_date": None,
+                "from_date": None,
+                "to_date": None,
+                "skip_download": False,
+            }
+        )
+        self.assertEqual(command[0], "/tmp/custom-venv/bin/python")
 
     @patch("apps.epos_qbo.services.job_runner.portal_settings.get_default_parallel", return_value=4)
     @patch("apps.epos_qbo.services.job_runner.portal_settings.get_default_stagger_seconds", return_value=8)

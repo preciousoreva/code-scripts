@@ -18,7 +18,11 @@ from code_scripts.slack_notify import (
     notify_pipeline_update,
 )
 # qbo_query imported lazily (only when reconciliation is needed) to avoid QBO_REALM_ID requirement
-from code_scripts.company_config import load_company_config, get_available_companies
+from code_scripts.company_config import (
+    ensure_company_runtime_compatible,
+    get_available_companies,
+    load_company_config,
+)
 from code_scripts.token_manager import verify_realm_match
 from code_scripts.run_lock import hold_global_lock
 import pandas as pd
@@ -1115,6 +1119,7 @@ def main(
     # Load company configuration
     try:
         config = load_company_config(company_key)
+        ensure_company_runtime_compatible(config)
     except Exception as e:
         logging.error(f"Failed to load company config for '{company_key}': {e}")
         available = get_available_companies()
