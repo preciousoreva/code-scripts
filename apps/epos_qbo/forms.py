@@ -91,17 +91,18 @@ class RunTriggerForm(forms.Form):
 
 
 class InventoryTriggerForm(forms.Form):
-    """Form for triggering an inventory audit (optionally with QBO adjustments)."""
+    """Form for triggering an inventory audit (optionally with QBO adjustments).
+
+    The portal always auto-downloads a fresh EPOS StockReport CSV via
+    Playwright — there is no manual upload or path field. Advanced operators
+    who need to point at a pre-existing CSV can use the CLI directly.
+    """
 
     company_key = forms.SlugField(max_length=64)
     category = forms.CharField(
         max_length=255,
         required=False,
         help_text="Optional EPOS category filter (exact match; case-insensitive).",
-    )
-    stock_csv = forms.CharField(
-        max_length=1024,
-        help_text="Absolute path to EPOS StockReport/StockHistory CSV on the server.",
     )
     qbo_csv = forms.CharField(
         max_length=1024,
@@ -126,9 +127,6 @@ class InventoryTriggerForm(forms.Form):
         if apply_flag and dry_run:
             self.add_error("apply", "Pick either --apply or --dry-run, not both.")
         cleaned["category"] = (cleaned.get("category") or "").strip()
-        stock_csv = (cleaned.get("stock_csv") or "").strip()
-        if not stock_csv:
-            self.add_error("stock_csv", "stock_csv is required.")
         return cleaned
 
 

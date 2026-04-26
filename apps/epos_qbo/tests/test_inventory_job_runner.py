@@ -14,31 +14,40 @@ class InventoryBuildCommandTests(TestCase):
             "scope": RunJob.SCOPE_INVENTORY_SYNC,
             "company_key": "company_a",
             "date_mode": "yesterday",
-            "stock_csv": "/path/to/stock.csv",
             "inventory_options": {},
         }
         cleaned.update(overrides)
         return cleaned
 
-    def test_minimum_required_args(self):
+    def test_minimum_required_args_emits_auto_download(self):
+        """Portal-triggered audits never carry a stock_csv path; we always
+        auto-download a fresh EPOS Stock Report."""
         cmd = build_command(self._base_cleaned())
-        # Flatten to a string for easy assertions
         flat = " ".join(cmd)
         self.assertIn("-m", cmd)
         self.assertIn("code_scripts.inventory_sync", cmd)
         self.assertIn("--company", cmd)
         self.assertIn("company_a", cmd)
-        self.assertIn("--stock-csv", cmd)
-        self.assertIn("/path/to/stock.csv", cmd)
+        self.assertIn("--auto-download", cmd)
+        self.assertNotIn("--stock-csv", cmd)
         # Should NOT include any optional flags we didn't set
         self.assertNotIn("--apply", flat)
         self.assertNotIn("--dry-run", flat)
         self.assertNotIn("--allow-ambiguous", flat)
 
+    def test_explicit_stock_csv_overrides_auto_download(self):
+        """Advanced callers can pre-populate inventory_options['stock_csv']
+        to point at an existing CSV; --auto-download is suppressed."""
+        cmd = build_command(
+            self._base_cleaned(inventory_options={"stock_csv": "/path/to/stock.csv"})
+        )
+        self.assertIn("--stock-csv", cmd)
+        self.assertIn("/path/to/stock.csv", cmd)
+        self.assertNotIn("--auto-download", cmd)
+
     def test_all_optional_flags_propagate(self):
         cleaned = self._base_cleaned(
             inventory_options={
-                "stock_csv": "/p/stock.csv",
                 "qbo_csv": "/p/qbo.csv",
                 "product_filter": "WIDGET",
                 "categories": ["Beverages"],
@@ -52,6 +61,7 @@ class InventoryBuildCommandTests(TestCase):
             }
         )
         cmd = build_command(cleaned)
+        self.assertIn("--auto-download", cmd)
         self.assertIn("--qbo-csv", cmd)
         self.assertIn("/p/qbo.csv", cmd)
         self.assertIn("--product", cmd)
@@ -73,7 +83,7 @@ class InventoryBuildCommandTests(TestCase):
 
     def test_dry_run_mutually_exclusive_with_apply_is_not_enforced_here(self):
         """build_command trusts the caller; the form validates the combination."""
-        cleaned = self._base_cleaned(inventory_options={"stock_csv": "/p/s.csv", "dry_run": True})
+        cleaned = self._base_cleaned(inventory_options={"dry_run": True})
         cmd = build_command(cleaned)
         self.assertIn("--dry-run", cmd)
 
@@ -82,18 +92,16 @@ class InventoryBuildCommandTests(TestCase):
             scope=RunJob.SCOPE_INVENTORY_SYNC,
             company_key="company_a",
             inventory_options_json={
-                "stock_csv": "/p/s.csv",
                 "apply": True,
                 "max_qty_delta": 50,
             },
         )
         cmd = build_command_for_job(job)
-        self.assertIn("--stock-csv", cmd)
-        self.assertIn("/p/s.csv", cmd)
+        self.assertIn("--auto-download", cmd)
         self.assertIn("--apply", cmd)
         self.assertIn("--max-qty-delta", cmd)
         self.assertIn("50", cmd)
 
-    def test_missing_stock_csv_raises(self):
+    def test_missing_company_key_raises(self):
         with self.assertRaises(ValueError):
-            build_command(self._base_cleaned(stock_csv="", inventory_options={}))
+            build_command(self._base_cleaned(company_key=""))

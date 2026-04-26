@@ -76,22 +76,31 @@ def build_command(cleaned: dict) -> list[str]:
 def _build_inventory_command(python_exe: str, cleaned: dict) -> list[str]:
     """Build a `python -m code_scripts.inventory_sync ...` command.
 
-    Required keys in cleaned: company_key, stock_csv.
-    Optional keys pulled from inventory_options (dict): qbo_csv, product_filter, categories,
-    tolerance, apply, dry_run, allow_ambiguous, max_adjustments, max_qty_delta,
-    adjust_account_id, txn_date.
+    Portal-triggered inventory audits always auto-download a fresh EPOS Stock
+    Report — operators don't supply a CSV path through the form. Advanced
+    operators who want to point at an existing CSV can pre-populate
+    inventory_options['stock_csv'] (e.g. via API) and we'll honor it instead;
+    otherwise we emit `--auto-download`.
+
+    Required keys in cleaned: company_key.
+    Optional keys pulled from inventory_options (dict): stock_csv, qbo_csv,
+    product_filter, categories, tolerance, apply, dry_run, allow_ambiguous,
+    max_adjustments, max_qty_delta, adjust_account_id, txn_date.
     """
     opts = cleaned.get("inventory_options") or {}
     company = cleaned["company_key"]
-    stock_csv = (opts.get("stock_csv") or cleaned.get("stock_csv") or "").strip()
-    if not company or not stock_csv:
-        raise ValueError("inventory_sync requires company_key and stock_csv")
+    if not company:
+        raise ValueError("inventory_sync requires company_key")
 
     cmd: list[str] = [
         python_exe, "-m", "code_scripts.inventory_sync",
         "--company", str(company),
-        "--stock-csv", str(stock_csv),
     ]
+    stock_csv = (opts.get("stock_csv") or "").strip()
+    if stock_csv:
+        cmd.extend(["--stock-csv", stock_csv])
+    else:
+        cmd.append("--auto-download")
 
     if opts.get("qbo_csv"):
         cmd.extend(["--qbo-csv", str(opts["qbo_csv"])])

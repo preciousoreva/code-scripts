@@ -30,7 +30,7 @@ class InventoryTriggerViewTests(TestCase):
         self.client.login(username="np", password="pw")
         response = self.client.post(
             reverse("epos_qbo:run-trigger-inventory"),
-            {"company_key": "company_a", "stock_csv": "/p/s.csv"},
+            {"company_key": "company_a"},
         )
         self.assertEqual(response.status_code, 403)
 
@@ -41,7 +41,7 @@ class InventoryTriggerViewTests(TestCase):
         ):
             response = self.client.post(
                 reverse("epos_qbo:run-trigger-inventory"),
-                {"company_key": "ghost", "stock_csv": "/p/s.csv"},
+                {"company_key": "ghost"},
                 follow=False,
             )
         self.assertEqual(response.status_code, 302)
@@ -56,7 +56,6 @@ class InventoryTriggerViewTests(TestCase):
                 reverse("epos_qbo:run-trigger-inventory"),
                 {
                     "company_key": "company_a",
-                    "stock_csv": "/p/s.csv",
                     "category": "Beverages",
                     "tolerance": "0.0",
                     "dry_run": "on",
@@ -68,7 +67,7 @@ class InventoryTriggerViewTests(TestCase):
         self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_SYNC)
         self.assertEqual(job.company_key, "company_a")
         self.assertTrue(job.inventory_options_json.get("dry_run"))
-        self.assertEqual(job.inventory_options_json.get("stock_csv"), "/p/s.csv")
+        self.assertNotIn("stock_csv", job.inventory_options_json)
         self.assertEqual(job.inventory_options_json.get("categories"), ["Beverages"])
         self.assertEqual(job.inventory_options_json.get("max_adjustments"), 3)
 
@@ -81,7 +80,6 @@ class InventoryTriggerViewTests(TestCase):
                 reverse("epos_qbo:run-trigger-inventory"),
                 {
                     "company_key": "company_a",
-                    "stock_csv": "/p/s.csv",
                     "apply": "on",
                     "dry_run": "on",
                 },

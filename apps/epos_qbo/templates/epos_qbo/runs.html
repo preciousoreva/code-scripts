@@ -121,11 +121,11 @@
              x-data="inventoryAuditForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory Audit</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Compare EPOS stock against QBO Inventory QtyOnHand. Audit-only by default; tick <em>Apply</em> to post QBO InventoryAdjustment transactions.
+            Downloads a fresh EPOS Stock Report and compares it to QBO Inventory QtyOnHand. Audit-only by default; tick <em>Apply</em> to post QBO InventoryAdjustment transactions.
         </p>
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
             {% csrf_token %}
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <label class="text-xs text-slate-600 dark:text-slate-400">
                     Company
                     <select name="company_key" required x-model="companyKey" @change="category = ''" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
@@ -146,11 +146,6 @@
                     <span x-show="companyKey && availableCategories.length === 0" x-cloak class="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
                         No mapping CSV found for this company — pipeline will see all categories.
                     </span>
-                </label>
-                <label class="text-xs text-slate-600 dark:text-slate-400 md:col-span-2">
-                    EPOS Stock CSV path
-                    <input type="text" name="stock_csv" required placeholder="/abs/path/to/StockReport.csv"
-                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                 </label>
             </div>
 

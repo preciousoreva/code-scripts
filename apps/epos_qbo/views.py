@@ -1881,9 +1881,7 @@ def trigger_inventory_run(request):
         messages.error(request, "Unknown company key for inventory audit.")
         return redirect("epos_qbo:runs")
 
-    inventory_options: dict = {
-        "stock_csv": (cleaned.get("stock_csv") or "").strip(),
-    }
+    inventory_options: dict = {}
     category = (cleaned.get("category") or "").strip()
     if category:
         inventory_options["categories"] = [category]
