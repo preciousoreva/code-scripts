@@ -369,7 +369,47 @@ class CompanyConfig:
         if value is not None and str(value).strip():
             return str(value).strip()
         return self._data.get("qbo", {}).get("bypass_income_account_id")
-    
+
+    @property
+    def inventory_adjustment_account_id(self) -> Optional[str]:
+        """
+        Chart of Accounts Id used as AdjustAccountRef on InventoryAdjustment (QBO).
+
+        Config: qbo.inventory_adjustment_account_id
+        ENV:    {COMPANY_KEY}_INVENTORY_ADJUSTMENT_ACCOUNT_ID
+        """
+        env_key = f"{self.company_key.upper().replace('-', '_')}_INVENTORY_ADJUSTMENT_ACCOUNT_ID"
+        value = os.environ.get(env_key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        raw = self._data.get("qbo", {}).get("inventory_adjustment_account_id")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        return s or None
+
+    @property
+    def inventory_max_qty_delta(self) -> Optional[float]:
+        """
+        Per-item absolute qty-delta safety cap used by inventory_sync --apply.
+
+        Any InventoryAdjustment whose |QtyDiff| exceeds this cap is skipped
+        (not posted). A value of 0 or negative disables the cap.
+
+        Config: qbo.inventory_max_qty_delta
+        ENV:    {COMPANY_KEY}_INVENTORY_MAX_QTY_DELTA
+        """
+        env_key = f"{self.company_key.upper().replace('-', '_')}_INVENTORY_MAX_QTY_DELTA"
+        raw = os.environ.get(env_key)
+        if raw is None or str(raw).strip() == "":
+            raw = self._data.get("qbo", {}).get("inventory_max_qty_delta")
+        if raw is None or str(raw).strip() == "":
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
     def get_qbo_config(self) -> Dict[str, Any]:
         """Get QBO-specific configuration."""
         return self._data["qbo"].copy()
