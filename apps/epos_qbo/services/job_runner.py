@@ -51,6 +51,9 @@ def build_command(cleaned: dict) -> list[str]:
     date_mode = cleaned["date_mode"]
     python_exe = resolve_python_executable()
 
+    if scope == RunJob.SCOPE_INVENTORY_SYNC:
+        return _build_inventory_command(python_exe, cleaned)
+
     if scope == RunJob.SCOPE_SINGLE:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_pipeline.py"), "--company", cleaned["company_key"]]
     else:
@@ -66,6 +69,58 @@ def build_command(cleaned: dict) -> list[str]:
         cmd.extend(["--from-date", cleaned["from_date"].strftime("%Y-%m-%d"), "--to-date", cleaned["to_date"].strftime("%Y-%m-%d")])
         if cleaned.get("skip_download"):
             cmd.append("--skip-download")
+
+    return [str(part) for part in cmd]
+
+
+def _build_inventory_command(python_exe: str, cleaned: dict) -> list[str]:
+    """Build a `python -m code_scripts.inventory_sync ...` command.
+
+    Required keys in cleaned: company_key, stock_csv.
+    Optional keys pulled from inventory_options (dict): qbo_csv, product_filter, categories,
+    tolerance, apply, dry_run, allow_ambiguous, max_adjustments, max_qty_delta,
+    adjust_account_id, txn_date.
+    """
+    opts = cleaned.get("inventory_options") or {}
+    company = cleaned["company_key"]
+    stock_csv = (opts.get("stock_csv") or cleaned.get("stock_csv") or "").strip()
+    if not company or not stock_csv:
+        raise ValueError("inventory_sync requires company_key and stock_csv")
+
+    cmd: list[str] = [
+        python_exe, "-m", "code_scripts.inventory_sync",
+        "--company", str(company),
+        "--stock-csv", str(stock_csv),
+    ]
+
+    if opts.get("qbo_csv"):
+        cmd.extend(["--qbo-csv", str(opts["qbo_csv"])])
+    if opts.get("product_filter"):
+        cmd.extend(["--product", str(opts["product_filter"])])
+    categories = opts.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    if isinstance(categories, list):
+        for category in categories:
+            value = str(category or "").strip()
+            if value:
+                cmd.extend(["--category", value])
+    if opts.get("tolerance") is not None:
+        cmd.extend(["--tolerance", str(opts["tolerance"])])
+    if opts.get("apply"):
+        cmd.append("--apply")
+    if opts.get("dry_run"):
+        cmd.append("--dry-run")
+    if opts.get("allow_ambiguous"):
+        cmd.append("--allow-ambiguous")
+    if opts.get("max_adjustments") is not None:
+        cmd.extend(["--max-adjustments", str(int(opts["max_adjustments"]))])
+    if opts.get("max_qty_delta") is not None:
+        cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
+    if opts.get("adjust_account_id"):
+        cmd.extend(["--adjust-account-id", str(opts["adjust_account_id"])])
+    if opts.get("txn_date"):
+        cmd.extend(["--txn-date", str(opts["txn_date"])])
 
     return [str(part) for part in cmd]
 
@@ -88,6 +143,7 @@ def build_command_for_job(job: RunJob) -> list[str]:
         "parallel": job.parallel,
         "stagger_seconds": job.stagger_seconds,
         "continue_on_failure": job.continue_on_failure,
+        "inventory_options": job.inventory_options_json or {},
     }
     return build_command(cleaned)
 
@@ -186,6 +242,7 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
 
     env = dict(os.environ)
     env["OIAT_RUN_SOURCE"] = "dashboard"
+    env["OIAT_RUN_JOB_ID"] = str(job.id)
     # Ensure code_scripts package is importable when running run_pipeline.py
     pythonpath = str(BASE_DIR)
     env["PYTHONPATH"] = pythonpath + os.pathsep + env.get("PYTHONPATH", "")

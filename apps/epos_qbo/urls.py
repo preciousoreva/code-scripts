@@ -10,6 +10,7 @@ urlpatterns = [
     path("dashboard/panels/", views.overview_panels, name="overview-panels"),
     path("runs/", views.runs_list, name="runs"),
     path("runs/trigger", views.trigger_run, name="run-trigger"),
+    path("runs/trigger-inventory", views.trigger_inventory_run, name="run-trigger-inventory"),
     path("runs/<uuid:job_id>/", views.run_detail, name="run-detail"),
     path("runs/<uuid:job_id>/logs", views.run_logs, name="run-logs"),
     path("api/runs/active", views.run_active_ids, name="run-active-ids"),

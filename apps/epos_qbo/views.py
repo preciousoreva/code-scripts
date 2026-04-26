@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ from math import ceil
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
+from django.db import DatabaseError
 from django.db.models import Q
 from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -24,6 +26,7 @@ from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_
 from .forms import (
     CompanyAdvancedForm,
     CompanyBasicForm,
+    InventoryTriggerForm,
     PortalSettingsForm,
     RunScheduleForm,
     RunTriggerForm,
@@ -183,6 +186,8 @@ def _get_user_overview_defaults(request):
     try:
         pref = DashboardUserPreference.objects.get(user=request.user)
     except DashboardUserPreference.DoesNotExist:
+        return (None, "7d")
+    except DatabaseError:
         return (None, "7d")
     period = (pref.default_revenue_period or "").strip() or "7d"
     if period not in REVENUE_PERIOD_DAYS:
@@ -1474,6 +1479,60 @@ def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
     return None
 
 
+def _categories_by_company(companies) -> dict[str, list[str]]:
+    """Return {company_key: [category, ...]} read from each company's product mapping CSV.
+
+    Resolution order:
+      1. `inventory.product_mapping_file` from company config (if set)
+      2. `mappings/{company_key}_product_mapping.csv` (per-company convention)
+      3. `mappings/sandbox_product_mapping.csv` (fallback when no company mapping is configured)
+
+    Failures (missing file, unreadable, no Category column) yield an empty list
+    for that company — the dropdown then shows "All categories" only.
+    """
+    from code_scripts.paths import REPO_CODE_SCRIPTS_DIR
+
+    out: dict[str, list[str]] = {}
+    sandbox_default = REPO_CODE_SCRIPTS_DIR / "mappings" / "sandbox_product_mapping.csv"
+
+    for company in companies:
+        cfg = company.config_json or {}
+        configured = ((cfg.get("inventory") or {}).get("product_mapping_file") or "").strip()
+        if configured:
+            candidates = [REPO_CODE_SCRIPTS_DIR / configured]
+        else:
+            candidates = [
+                REPO_CODE_SCRIPTS_DIR / "mappings" / f"{company.company_key}_product_mapping.csv",
+                sandbox_default,
+            ]
+
+        categories: list[str] = []
+        for path in candidates:
+            try:
+                if not path.exists():
+                    continue
+                with open(path, newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    if not reader.fieldnames:
+                        continue
+                    lowered = {h.strip().lower(): h for h in reader.fieldnames if h and h.strip()}
+                    key = lowered.get("category") or lowered.get("categories")
+                    if not key:
+                        continue
+                    seen: set[str] = set()
+                    for row in reader:
+                        value = (row.get(key) or "").strip()
+                        if value:
+                            seen.add(value)
+                    categories = sorted(seen, key=lambda s: s.lower())
+                if categories:
+                    break
+            except Exception:
+                continue
+        out[company.company_key] = categories
+    return out
+
+
 @login_required
 def runs_list(request):
     _ensure_company_records()
@@ -1501,13 +1560,19 @@ def runs_list(request):
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
     
     active_run_ids_list = [str(id) for id in active_runs]
+
+    # Per-company EPOS category lists for the Inventory Audit dropdown.
+    # Reads each company's configured product_mapping_file. Tolerates missing
+    # files / bad headers by leaving the list empty.
+    categories_by_company = _categories_by_company(companies)
     context = {
         "run_rows": run_rows,
-        "form": form, 
+        "form": form,
         "companies": companies,
         "default_parallel": default_parallel,
         "default_stagger_seconds": default_stagger_seconds,
         "active_run_ids": active_run_ids_list,
+        "categories_by_company": categories_by_company,
         "active_run_ids_json": json.dumps(active_run_ids_list),
     }
     context.update(_nav_context())
@@ -1797,6 +1862,65 @@ def trigger_run(request):
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
     messages.info(request, f"Run queued: {job.display_label}. It will start automatically.")
+    return redirect("epos_qbo:runs")
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def trigger_inventory_run(request):
+    """Queue an inventory audit (optionally with QBO inventory adjustments)."""
+    form = InventoryTriggerForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, f"Invalid inventory trigger payload: {form.errors.as_text()}")
+        return redirect("epos_qbo:runs")
+
+    cleaned = form.cleaned_data
+    company_key = (cleaned.get("company_key") or "").strip()
+    if not CompanyConfigRecord.objects.filter(company_key=company_key).exists():
+        messages.error(request, "Unknown company key for inventory audit.")
+        return redirect("epos_qbo:runs")
+
+    inventory_options: dict = {
+        "stock_csv": (cleaned.get("stock_csv") or "").strip(),
+    }
+    category = (cleaned.get("category") or "").strip()
+    if category:
+        inventory_options["categories"] = [category]
+    for key in (
+        "qbo_csv",
+        "product_filter",
+        "tolerance",
+        "apply",
+        "dry_run",
+        "allow_ambiguous",
+        "max_adjustments",
+        "max_qty_delta",
+        "adjust_account_id",
+    ):
+        value = cleaned.get(key)
+        if value in (None, "", False):
+            continue
+        inventory_options[key] = value
+    txn_date = cleaned.get("txn_date")
+    if txn_date:
+        inventory_options["txn_date"] = txn_date.strftime("%Y-%m-%d")
+
+    job = RunJob.objects.create(
+        scope=RunJob.SCOPE_INVENTORY_SYNC,
+        company_key=company_key,
+        inventory_options_json=inventory_options,
+        requested_by=request.user,
+        status=RunJob.STATUS_QUEUED,
+    )
+    dispatch_next_queued_job()
+
+    job.refresh_from_db()
+    if job.status == RunJob.STATUS_RUNNING:
+        messages.success(request, f"Inventory audit started: {job.display_label}")
+        return redirect("epos_qbo:run-detail", job_id=job.id)
+
+    messages.info(request, f"Inventory audit queued: {job.display_label}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 
@@ -2286,6 +2410,15 @@ def _enrich_company_data(
         "records_latest_sync": records_latest_sync,
         "latest_sync_target_date": latest_sync_target_date,
         "upload_skipped_latest_sync": upload_skipped_latest_sync,
+        "latest_inventory_audit": (
+            RunArtifact.objects.filter(
+                company_key=company.company_key,
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            )
+            .select_related("run_job")
+            .order_by("-processed_at", "-imported_at")
+            .first()
+        ),
     }
 
 

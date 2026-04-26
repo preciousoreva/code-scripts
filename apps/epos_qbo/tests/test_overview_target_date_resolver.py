@@ -15,6 +15,7 @@ class OverviewTargetDateResolverTests(TestCase):
             scope=RunJob.SCOPE_SINGLE,
             company_key="company_a",
             status=RunJob.STATUS_SUCCEEDED,
+            finished_at=timezone.make_aware(datetime(2026, 2, 14, 8, 0, 0)),
         )
         RunArtifact.objects.create(
             run_job=succeeded_old,
@@ -29,6 +30,7 @@ class OverviewTargetDateResolverTests(TestCase):
             scope=RunJob.SCOPE_SINGLE,
             company_key="company_a",
             status=RunJob.STATUS_FAILED,
+            finished_at=timezone.make_aware(datetime(2026, 2, 14, 10, 0, 0)),
         )
         RunArtifact.objects.create(
             run_job=failed_newer,
@@ -39,12 +41,13 @@ class OverviewTargetDateResolverTests(TestCase):
             source_hash="a-failed",
         )
 
+        latest_processed_at = timezone.make_aware(datetime(2026, 2, 14, 12, 0, 0))
         succeeded_latest = RunJob.objects.create(
             scope=RunJob.SCOPE_SINGLE,
             company_key="company_b",
             status=RunJob.STATUS_SUCCEEDED,
+            finished_at=latest_processed_at,
         )
-        latest_processed_at = timezone.make_aware(datetime(2026, 2, 14, 12, 0, 0))
         RunArtifact.objects.create(
             run_job=succeeded_latest,
             company_key="company_b",

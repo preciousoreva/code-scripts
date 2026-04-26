@@ -90,6 +90,48 @@ class RunTriggerForm(forms.Form):
         return cleaned
 
 
+class InventoryTriggerForm(forms.Form):
+    """Form for triggering an inventory audit (optionally with QBO adjustments)."""
+
+    company_key = forms.SlugField(max_length=64)
+    category = forms.CharField(
+        max_length=255,
+        required=False,
+        help_text="Optional EPOS category filter (exact match; case-insensitive).",
+    )
+    stock_csv = forms.CharField(
+        max_length=1024,
+        help_text="Absolute path to EPOS StockReport/StockHistory CSV on the server.",
+    )
+    qbo_csv = forms.CharField(
+        max_length=1024,
+        required=False,
+        help_text="Optional path to a QBO Items export CSV. Defaults to "
+                  "STATE_ROOT/exports/<company>_products.csv when present.",
+    )
+    product_filter = forms.CharField(max_length=255, required=False)
+    tolerance = forms.FloatField(required=False, min_value=0)
+    apply = forms.BooleanField(required=False, label="Apply (post QBO InventoryAdjustment)")
+    dry_run = forms.BooleanField(required=False, label="Dry run (print payloads, no POST)")
+    allow_ambiguous = forms.BooleanField(required=False)
+    max_adjustments = forms.IntegerField(required=False, min_value=1)
+    max_qty_delta = forms.FloatField(required=False, min_value=0)
+    adjust_account_id = forms.CharField(max_length=64, required=False)
+    txn_date = forms.DateField(required=False)
+
+    def clean(self):
+        cleaned = super().clean()
+        apply_flag = cleaned.get("apply")
+        dry_run = cleaned.get("dry_run")
+        if apply_flag and dry_run:
+            self.add_error("apply", "Pick either --apply or --dry-run, not both.")
+        cleaned["category"] = (cleaned.get("category") or "").strip()
+        stock_csv = (cleaned.get("stock_csv") or "").strip()
+        if not stock_csv:
+            self.add_error("stock_csv", "stock_csv is required.")
+        return cleaned
+
+
 class CompanyBasicForm(forms.Form):
     company_key = forms.SlugField(max_length=64)
     display_name = forms.CharField(max_length=255)

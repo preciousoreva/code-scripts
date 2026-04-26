@@ -249,9 +249,11 @@ class CompanyConfigRecord(models.Model):
 class RunJob(models.Model):
     SCOPE_SINGLE = "single_company"
     SCOPE_ALL = "all_companies"
+    SCOPE_INVENTORY_SYNC = "inventory_sync"
     SCOPE_CHOICES = [
         (SCOPE_SINGLE, "Single Company"),
         (SCOPE_ALL, "All Companies"),
+        (SCOPE_INVENTORY_SYNC, "Inventory Sync"),
     ]
 
     STATUS_QUEUED = "queued"
@@ -277,6 +279,7 @@ class RunJob(models.Model):
     parallel = models.PositiveSmallIntegerField(default=1)
     stagger_seconds = models.PositiveSmallIntegerField(default=2)
     continue_on_failure = models.BooleanField(default=False)
+    inventory_options_json = models.JSONField(default=dict, blank=True)
     command_json = models.JSONField(default=list)
     command_display = models.TextField(blank=True)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
@@ -336,6 +339,14 @@ class RunArtifact(models.Model):
         (RELIABILITY_WARNING, "Warning"),
     ]
 
+    KIND_SALES_UPLOAD = "sales_upload"
+    KIND_INVENTORY_AUDIT = "inventory_audit"
+    KIND_CHOICES = [
+        (KIND_SALES_UPLOAD, "Sales Upload"),
+        (KIND_INVENTORY_AUDIT, "Inventory Audit"),
+    ]
+
+    kind = models.CharField(max_length=32, choices=KIND_CHOICES, default=KIND_SALES_UPLOAD)
     run_job = models.ForeignKey(RunJob, null=True, blank=True, on_delete=models.SET_NULL, related_name="artifacts")
     company_key = models.SlugField(max_length=64)
     target_date = models.DateField(null=True, blank=True)

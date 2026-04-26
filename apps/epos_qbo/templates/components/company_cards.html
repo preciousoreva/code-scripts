@@ -140,6 +140,37 @@
             </div>
         </div>
 
+        {% if company_data.latest_inventory_audit %}
+        <div class="p-6 border-t border-slate-100 dark:border-slate-700">
+            <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3 flex items-center gap-2">
+                <iconify-icon icon="solar:box-linear" width="16"></iconify-icon>
+                Latest Inventory Audit
+            </h4>
+            <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
+                    <span class="text-xs text-slate-500 dark:text-slate-400">{{ company_data.latest_inventory_audit.processed_at|date:"M d, Y g:i A"|default:"—" }}</span>
+                    {% with stats=company_data.latest_inventory_audit.upload_stats_json %}
+                    <span class="text-xs px-2 py-0.5 rounded-full {% if stats.apply.error %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400{% elif stats.apply.mode == 'apply' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400{% elif stats.apply.mode == 'dry_run' %}bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400{% else %}bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-300{% endif %}">{{ stats.apply.mode|default:"audit_only" }}</span>
+                    {% endwith %}
+                </div>
+                {% with stats=company_data.latest_inventory_audit.upload_stats_json %}
+                <div class="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap gap-x-4 gap-y-1">
+                    <span>Groups: {{ stats.total_groups|default:0 }}</span>
+                    <span>In sync: {{ stats.status_counts.in_sync|default:0 }}</span>
+                    <span>Needs adj.: {{ stats.status_counts.needs_adjustment|default:0 }}</span>
+                    <span>Ambiguous: {{ stats.status_counts.ambiguous_in_qbo|default:0 }}</span>
+                    <span>Missing: {{ stats.status_counts.missing_in_qbo|default:0 }}</span>
+                    {% if stats.apply.posted %}<span>Posted: {{ stats.apply.posted }}</span>{% endif %}
+                    {% if stats.apply.skipped %}<span>Skipped: {{ stats.apply.skipped }}</span>{% endif %}
+                </div>
+                {% if stats.apply.error %}
+                <p class="text-xs text-red-600 dark:text-red-400 mt-1 truncate" title="{{ stats.apply.error }}">Error: {{ stats.apply.error }}</p>
+                {% endif %}
+                {% endwith %}
+            </div>
+        </div>
+        {% endif %}
+
         {% if company_data.latest_run %}
         <div class="p-6 border-t border-slate-100 dark:border-slate-700">
             <div class="flex items-center justify-between mb-3">

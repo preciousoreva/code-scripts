@@ -10,7 +10,7 @@ from typing import Any
 
 from django.utils import timezone as dj_timezone
 
-from oiat_portal.paths import OPS_LOGS_DIR, OPS_UPLOADED_DIR
+from oiat_portal.paths import OPS_LOGS_DIR, OPS_REPORTS_DIR, OPS_UPLOADED_DIR
 
 from ..models import RunArtifact, RunJob
 
@@ -247,6 +247,9 @@ def ingest_history(days: int = 60) -> int:
 
 
 def attach_recent_artifacts_to_job(run_job: RunJob) -> int:
+    if run_job.scope == RunJob.SCOPE_INVENTORY_SYNC:
+        return _attach_inventory_artifacts_to_job(run_job)
+
     attached = 0
     for path in sorted(OPS_UPLOADED_DIR.rglob("last_*_transform.json")):
         artifact, _ = ingest_metadata_file(path)
@@ -264,3 +267,125 @@ def attach_recent_artifacts_to_job(run_job: RunJob) -> int:
         if artifact.run_job_id == run_job.id:
             attached += 1
     return attached
+
+
+def parse_inventory_audit_metadata(path: Path) -> dict[str, Any] | None:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not str(data.get("company_key") or "").strip():
+        return None
+    return data
+
+
+def ingest_inventory_audit_file(path: Path, run_job: RunJob | None = None) -> tuple[RunArtifact | None, bool]:
+    """Create/update a RunArtifact row for an inventory audit sidecar JSON.
+
+    The audit's report CSV lives next to the sidecar (same stem, .csv). The
+    sidecar itself is what we hash/store as the canonical source.
+    """
+    data = parse_inventory_audit_metadata(path)
+    if data is None:
+        return None, False
+
+    company_key = str(data["company_key"]).strip()
+    processed_at = _parse_dt(data.get("processed_at"))
+    source_hash = _sha256(path)
+    apply_stats = data.get("apply") if isinstance(data.get("apply"), dict) else {}
+    status_counts = data.get("status_counts") if isinstance(data.get("status_counts"), dict) else {}
+
+    upload_stats_json = {
+        "status_counts": {str(k): int(v) for k, v in status_counts.items()},
+        "total_groups": _safe_int(data.get("total_groups")),
+        "apply": apply_stats,
+        "report_csv": str(data.get("report_csv") or ""),
+        "stock_csv": str(data.get("stock_csv") or ""),
+        "qbo_csv": str(data.get("qbo_csv") or ""),
+    }
+
+    artifact, created = RunArtifact.objects.get_or_create(
+        company_key=company_key,
+        target_date=None,
+        processed_at=processed_at,
+        source_hash=source_hash,
+        defaults={
+            "kind": RunArtifact.KIND_INVENTORY_AUDIT,
+            "run_job": run_job,
+            "source_path": str(path),
+            "reliability_status": RunArtifact.RELIABILITY_HIGH,
+            "upload_stats_json": upload_stats_json,
+            "raw_file": str(data.get("stock_csv") or ""),
+            "processed_files_json": [str(data.get("report_csv") or "")],
+            "nearest_log_file": _nearest_log(processed_at, company_key),
+        },
+    )
+
+    updated_fields: list[str] = []
+    if artifact.kind != RunArtifact.KIND_INVENTORY_AUDIT:
+        artifact.kind = RunArtifact.KIND_INVENTORY_AUDIT
+        updated_fields.append("kind")
+    if run_job and artifact.run_job_id is None:
+        artifact.run_job = run_job
+        updated_fields.append("run_job")
+    if not artifact.source_path:
+        artifact.source_path = str(path)
+        updated_fields.append("source_path")
+    artifact.upload_stats_json = upload_stats_json
+    updated_fields.append("upload_stats_json")
+    if updated_fields:
+        artifact.save(update_fields=updated_fields)
+
+    return artifact, created
+
+
+def _attach_inventory_artifacts_to_job(run_job: RunJob) -> int:
+    attached = 0
+    if not OPS_REPORTS_DIR.exists():
+        return 0
+    for path in sorted(OPS_REPORTS_DIR.rglob("inventory_audit_*.json")):
+        data = parse_inventory_audit_metadata(path)
+        if data is None:
+            continue
+        meta_job_id = str(data.get("run_job_id") or "").strip()
+        if meta_job_id and meta_job_id != str(run_job.id):
+            continue
+        if not meta_job_id:
+            if run_job.company_key and str(data.get("company_key") or "") != run_job.company_key:
+                continue
+            processed_at = _parse_dt(data.get("processed_at"))
+            anchor = run_job.dispatched_at or run_job.started_at or run_job.created_at
+            if processed_at is None or anchor is None:
+                continue
+            if abs((processed_at - anchor).total_seconds()) > 12 * 3600:
+                continue
+        artifact, _ = ingest_inventory_audit_file(path, run_job=run_job)
+        if artifact is None:
+            continue
+        if artifact.run_job_id is None:
+            artifact.run_job = run_job
+            artifact.save(update_fields=["run_job"])
+        if artifact.run_job_id == run_job.id:
+            attached += 1
+    return attached
+
+
+def ingest_inventory_audit_history(days: int = 60) -> int:
+    cutoff = dj_timezone.now() - timedelta(days=days)
+    created_count = 0
+    if not OPS_REPORTS_DIR.exists():
+        return 0
+    for path in sorted(OPS_REPORTS_DIR.rglob("inventory_audit_*.json")):
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if modified < cutoff:
+            continue
+        _, created = ingest_inventory_audit_file(path)
+        if created:
+            created_count += 1
+    return created_count
