@@ -153,11 +153,6 @@
                 <summary class="cursor-pointer text-sm font-medium text-slate-700 dark:text-slate-300 select-none">Advanced options</summary>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
                     <label class="text-xs text-slate-600 dark:text-slate-400">
-                        QBO Items CSV (optional)
-                        <input type="text" name="qbo_csv" placeholder="STATE_ROOT/exports/<company>_products.csv"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                    </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
                         Product filter
                         <input type="text" name="product_filter"
                             class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
@@ -172,21 +167,6 @@
                         <input type="number" min="1" name="max_adjustments"
                             class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                     </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Max qty delta per item
-                        <input type="number" step="any" min="0" name="max_qty_delta"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                    </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Adjust account id (apply mode)
-                        <input type="text" name="adjust_account_id"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                    </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Txn date
-                        <input type="date" name="txn_date"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                    </label>
                 </div>
                 <div class="flex flex-wrap gap-4 mt-4">
                     <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
@@ -197,11 +177,13 @@
                         <input type="checkbox" name="dry_run">
                         Dry run (print payloads only)
                     </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                        <input type="checkbox" name="allow_ambiguous">
-                        Allow ambiguous mappings
-                    </label>
                 </div>
+                <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-3">
+                    Apply mode posts to the QBO Inventory Adjustment account configured per company
+                    (<code>qbo.inventory_adjustment_account_id</code>). Per-item qty-delta safety cap comes
+                    from <code>qbo.inventory_max_qty_delta</code>. Configure both on the company's
+                    settings page.
+                </p>
             </details>
 
             <div class="flex items-center justify-end">

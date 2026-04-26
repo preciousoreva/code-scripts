@@ -93,9 +93,19 @@ class RunTriggerForm(forms.Form):
 class InventoryTriggerForm(forms.Form):
     """Form for triggering an inventory audit (optionally with QBO adjustments).
 
-    The portal always auto-downloads a fresh EPOS StockReport CSV via
-    Playwright — there is no manual upload or path field. Advanced operators
-    who need to point at a pre-existing CSV can use the CLI directly.
+    The form is intentionally minimal — operator picks a company + category,
+    chooses Audit-only or Audit+Apply, and optionally narrows by product
+    name or tightens the match tolerance.
+
+    Things deliberately NOT exposed in the form:
+    - stock_csv: portal always auto-downloads a fresh EPOS Stock Report
+    - txn_date: defaults to today (CLI default) — apply runs date as 'now'
+    - adjust_account_id: belongs in per-company QBO config
+      (qbo.inventory_adjustment_account_id), set once and reused
+    - max_qty_delta: per-company safety cap from
+      qbo.inventory_max_qty_delta config
+    - allow_ambiguous: defaults to False; operator who needs it uses CLI
+    - qbo_csv: debug-time override only useful from the CLI
     """
 
     company_key = forms.SlugField(max_length=64)
@@ -104,21 +114,11 @@ class InventoryTriggerForm(forms.Form):
         required=False,
         help_text="Optional EPOS category filter (exact match; case-insensitive).",
     )
-    qbo_csv = forms.CharField(
-        max_length=1024,
-        required=False,
-        help_text="Optional path to a QBO Items export CSV. Defaults to "
-                  "STATE_ROOT/exports/<company>_products.csv when present.",
-    )
     product_filter = forms.CharField(max_length=255, required=False)
     tolerance = forms.FloatField(required=False, min_value=0)
     apply = forms.BooleanField(required=False, label="Apply (post QBO InventoryAdjustment)")
     dry_run = forms.BooleanField(required=False, label="Dry run (print payloads, no POST)")
-    allow_ambiguous = forms.BooleanField(required=False)
     max_adjustments = forms.IntegerField(required=False, min_value=1)
-    max_qty_delta = forms.FloatField(required=False, min_value=0)
-    adjust_account_id = forms.CharField(max_length=64, required=False)
-    txn_date = forms.DateField(required=False)
 
     def clean(self):
         cleaned = super().clean()

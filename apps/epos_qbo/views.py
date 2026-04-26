@@ -1886,23 +1886,16 @@ def trigger_inventory_run(request):
     if category:
         inventory_options["categories"] = [category]
     for key in (
-        "qbo_csv",
         "product_filter",
         "tolerance",
         "apply",
         "dry_run",
-        "allow_ambiguous",
         "max_adjustments",
-        "max_qty_delta",
-        "adjust_account_id",
     ):
         value = cleaned.get(key)
         if value in (None, "", False):
             continue
         inventory_options[key] = value
-    txn_date = cleaned.get("txn_date")
-    if txn_date:
-        inventory_options["txn_date"] = txn_date.strftime("%Y-%m-%d")
 
     job = RunJob.objects.create(
         scope=RunJob.SCOPE_INVENTORY_SYNC,
