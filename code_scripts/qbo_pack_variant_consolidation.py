@@ -289,6 +289,28 @@ def write_report(plan: list[dict[str, Any]], output_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def build_doc_number(txn_date: str, base_item_id: str) -> str:
+    """Deterministic InventoryAdjustment DocNumber for a given (date, base item).
+
+    QBO requires a non-null ``DocNumber`` on the ``InventoryAdjustment``
+    entity (rejects the POST with HTTP 400 / code 2010 otherwise).  We
+    derive a stable, idempotent value from the operation's ``TxnDate``
+    and the base QBO Item id::
+
+        INVCON-{YYYYMMDD}-{base_item_id}
+
+    Same company, same date, same base -> same DocNumber.  Re-runs of the
+    same consolidation against the same item on the same day will collide
+    on DocNumber and QBO will surface that as a duplicate, which is the
+    behaviour we want (no accidental double-posting).
+    """
+    date_compact = str(txn_date or "").strip()[:10].replace("-", "")
+    item_str = str(base_item_id or "").strip()
+    if not date_compact or not item_str:
+        return ""
+    return f"INVCON-{date_compact}-{item_str}"
+
+
 def build_lines_from_plan_row(row: dict[str, Any]) -> list[dict[str, Any]]:
     """Convert one consolidation_plan_available row into InventoryAdjustment lines.
 
@@ -704,11 +726,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 no_op += 1
                 print(f"[SKIP] base={row['base_name']!r} has no non-zero diffs; nothing to post.")
                 continue
+            doc_number = build_doc_number(
+                txn_date=txn_date,
+                base_item_id=str(row.get("base_qbo_item_id", "")),
+            )
             payload = build_inventory_adjustment_payload(
                 adjust_account_id=adjust_account_id or "",
                 txn_date=txn_date,
                 private_note=build_private_note(row, scope_description=scope_desc),
                 lines=lines,
+                doc_number=doc_number,
             )
             print(
                 f"[{mode_label}-PLAN] base={row['base_name']!r} "

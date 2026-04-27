@@ -9,6 +9,7 @@ from unittest import mock
 from code_scripts import qbo_pack_variant_consolidation as consolidation
 from code_scripts.qbo_pack_variant_consolidation import (
     build_consolidation_plan,
+    build_doc_number,
     build_lines_from_plan_row,
     build_private_note,
     write_report,
@@ -308,6 +309,35 @@ class TrophyPayloadTest(unittest.TestCase):
         self.assertIn("scope: category=ALCOHOLS & SPIRITS", note)
 
 
+class DocNumberTest(unittest.TestCase):
+    def test_trophy_doc_number_matches_required_format(self):
+        # Required by QBO: payload must carry a non-null DocNumber.
+        # Format: INVCON-YYYYMMDD-{base_item_id}
+        self.assertEqual(
+            build_doc_number(txn_date="2026-04-27", base_item_id="9364"),
+            "INVCON-20260427-9364",
+        )
+
+    def test_doc_number_is_deterministic_per_date_and_base(self):
+        a = build_doc_number(txn_date="2026-04-27", base_item_id="9364")
+        b = build_doc_number(txn_date="2026-04-27", base_item_id="9364")
+        self.assertEqual(a, b)
+
+    def test_doc_number_changes_with_date(self):
+        d1 = build_doc_number(txn_date="2026-04-27", base_item_id="9364")
+        d2 = build_doc_number(txn_date="2026-04-28", base_item_id="9364")
+        self.assertNotEqual(d1, d2)
+
+    def test_doc_number_changes_with_base_item(self):
+        a = build_doc_number(txn_date="2026-04-27", base_item_id="9364")
+        b = build_doc_number(txn_date="2026-04-27", base_item_id="9999")
+        self.assertNotEqual(a, b)
+
+    def test_doc_number_empty_when_inputs_missing(self):
+        self.assertEqual(build_doc_number("", "9364"), "")
+        self.assertEqual(build_doc_number("2026-04-27", ""), "")
+
+
 class SafetyCapTest(unittest.TestCase):
     def _row(self, action="consolidation_plan_available", base_diff=10, line_count=3, name="P"):
         r = dict(_TROPHY_PLAN_ROW)
@@ -538,6 +568,8 @@ class DryRunPayloadTest(unittest.TestCase):
         # Expected TROPHY payload from the requirements
         self.assertEqual(payload["TxnDate"], "2026-04-27")
         self.assertEqual(payload["AdjustAccountRef"]["value"], "82")
+        # QBO requires a non-null DocNumber; we generate a deterministic one.
+        self.assertEqual(payload["DocNumber"], "INVCON-20260427-9364")
         line_pairs = [
             (l["ItemAdjustmentLineDetail"]["ItemRef"]["value"],
              l["ItemAdjustmentLineDetail"]["QtyDiff"])
@@ -618,6 +650,8 @@ class ApplyEndToEndTest(unittest.TestCase):
         ])
         self.assertEqual(posts[0]["AdjustAccountRef"]["value"], "82")
         self.assertEqual(posts[0]["TxnDate"], "2026-04-27")
+        # QBO requires a non-null DocNumber; we generate a deterministic one.
+        self.assertEqual(posts[0]["DocNumber"], "INVCON-20260427-9364")
         # Snapshot stale must be marked once with the right reason
         stale_mock.assert_called_once()
         all_args = list(stale_mock.call_args.args) + list(stale_mock.call_args.kwargs.values())
