@@ -20,3 +20,7 @@ def qbo_snapshots_dir() -> Path:
 
 def inventory_audit_reports_dir(now: datetime | None = None) -> Path:
     return OPS_REPORTS_DIR / "inventory_sync" / artifact_day_stamp(now)
+
+
+def qbo_pack_variant_reports_dir(now: datetime | None = None) -> Path:
+    return OPS_REPORTS_DIR / "qbo_pack_variant_audit" / artifact_day_stamp(now)
