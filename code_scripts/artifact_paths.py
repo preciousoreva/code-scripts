@@ -24,3 +24,7 @@ def inventory_audit_reports_dir(now: datetime | None = None) -> Path:
 
 def qbo_pack_variant_reports_dir(now: datetime | None = None) -> Path:
     return OPS_REPORTS_DIR / "qbo_pack_variant_audit" / artifact_day_stamp(now)
+
+
+def qbo_pack_variant_migration_reports_dir(now: datetime | None = None) -> Path:
+    return OPS_REPORTS_DIR / "qbo_pack_variant_migration" / artifact_day_stamp(now)
