@@ -108,6 +108,15 @@ class InventoryTriggerForm(forms.Form):
     - qbo_csv: debug-time override only useful from the CLI
     """
 
+    MODE_AUDIT_ONLY = "audit_only"
+    MODE_DRY_RUN = "dry_run"
+    MODE_APPLY = "apply"
+    MODE_CHOICES = [
+        (MODE_AUDIT_ONLY, "Audit only"),
+        (MODE_DRY_RUN, "Dry run"),
+        (MODE_APPLY, "Apply"),
+    ]
+
     company_key = forms.SlugField(max_length=64)
     category = forms.CharField(
         max_length=255,
@@ -115,18 +124,42 @@ class InventoryTriggerForm(forms.Form):
         help_text="Optional EPOS category filter (exact match; case-insensitive).",
     )
     product_filter = forms.CharField(max_length=255, required=False)
+    mode = forms.ChoiceField(choices=MODE_CHOICES, required=False, initial=MODE_AUDIT_ONLY)
     tolerance = forms.FloatField(required=False, min_value=0)
-    apply = forms.BooleanField(required=False, label="Apply (post QBO InventoryAdjustment)")
-    dry_run = forms.BooleanField(required=False, label="Dry run (print payloads, no POST)")
+    apply = forms.BooleanField(required=False, widget=forms.HiddenInput)
+    dry_run = forms.BooleanField(required=False, widget=forms.HiddenInput)
     max_adjustments = forms.IntegerField(required=False, min_value=1)
 
     def clean(self):
         cleaned = super().clean()
-        apply_flag = cleaned.get("apply")
-        dry_run = cleaned.get("dry_run")
-        if apply_flag and dry_run:
-            self.add_error("apply", "Pick either --apply or --dry-run, not both.")
-        cleaned["category"] = (cleaned.get("category") or "").strip()
+        mode = cleaned.get("mode") or self.MODE_AUDIT_ONLY
+        legacy_apply = bool(cleaned.get("apply"))
+        legacy_dry_run = bool(cleaned.get("dry_run"))
+        if legacy_apply and legacy_dry_run:
+            self.add_error("mode", "Pick apply or dry-run, not both.")
+        if legacy_apply and mode not in (self.MODE_AUDIT_ONLY, self.MODE_APPLY):
+            self.add_error("mode", "Pick apply or dry-run, not both.")
+        if legacy_dry_run and mode not in (self.MODE_AUDIT_ONLY, self.MODE_DRY_RUN):
+            self.add_error("mode", "Pick apply or dry-run, not both.")
+
+        if legacy_apply:
+            mode = self.MODE_APPLY
+        elif legacy_dry_run:
+            mode = self.MODE_DRY_RUN
+
+        category = (cleaned.get("category") or "").strip()
+        product_filter = (cleaned.get("product_filter") or "").strip()
+        cleaned["mode"] = mode
+        cleaned["category"] = category
+        cleaned["product_filter"] = product_filter
+        cleaned["apply"] = mode == self.MODE_APPLY
+        cleaned["dry_run"] = mode == self.MODE_DRY_RUN
+
+        if mode == self.MODE_APPLY:
+            if not cleaned.get("max_adjustments"):
+                self.add_error("max_adjustments", "Max adjustments is required before posting inventory adjustments.")
+            if not category and not product_filter:
+                self.add_error("category", "Pick a category or product filter before posting inventory adjustments.")
         return cleaned
 
 

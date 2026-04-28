@@ -87,6 +87,26 @@ class InventoryBuildCommandTests(TestCase):
         cmd = build_command(cleaned)
         self.assertIn("--dry-run", cmd)
 
+    def test_category_product_mode_and_cap_become_cli_args(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "categories": ["ALCOHOLS & SPIRITS"],
+                    "product_filter": "TROPHY",
+                    "dry_run": True,
+                    "max_adjustments": 3,
+                }
+            )
+        )
+        self.assertIn("--auto-download", cmd)
+        self.assertIn("--category", cmd)
+        self.assertIn("ALCOHOLS & SPIRITS", cmd)
+        self.assertIn("--product", cmd)
+        self.assertIn("TROPHY", cmd)
+        self.assertIn("--dry-run", cmd)
+        self.assertIn("--max-adjustments", cmd)
+        self.assertIn("3", cmd)
+
     def test_build_command_for_job_uses_inventory_options(self):
         job = RunJob.objects.create(
             scope=RunJob.SCOPE_INVENTORY_SYNC,

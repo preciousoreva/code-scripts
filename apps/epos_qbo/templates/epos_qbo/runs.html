@@ -121,11 +121,11 @@
              x-data="inventoryAuditForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory Audit</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Downloads a fresh EPOS Stock Report and compares it to QBO Inventory QtyOnHand. Audit-only by default; tick <em>Apply</em> to post QBO InventoryAdjustment transactions.
+            Downloads a fresh EPOS Stock Report and compares it to QBO Inventory QtyOnHand.
         </p>
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
             {% csrf_token %}
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <label class="text-xs text-slate-600 dark:text-slate-400">
                     Company
                     <select name="company_key" required x-model="companyKey" @change="category = ''" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
@@ -136,7 +136,7 @@
                     </select>
                 </label>
                 <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Category (optional)
+                    Category
                     <select name="category" x-model="category" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 disabled:opacity-60">
                         <option value="">All categories</option>
                         <template x-for="c in availableCategories" :key="c">
@@ -144,50 +144,50 @@
                         </template>
                     </select>
                     <span x-show="companyKey && availableCategories.length === 0" x-cloak class="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
-                        No mapping CSV found for this company — pipeline will see all categories.
+                        No saved category list found for this company.
                     </span>
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Product filter
+                    <input type="text" name="product_filter"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                 </label>
             </div>
 
-            <details class="border border-slate-200 dark:border-slate-600 rounded-lg p-3">
-                <summary class="cursor-pointer text-sm font-medium text-slate-700 dark:text-slate-300 select-none">Advanced options</summary>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Product filter
-                        <input type="text" name="product_filter"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+            <fieldset class="space-y-2">
+                <legend class="text-xs text-slate-600 dark:text-slate-400">Mode</legend>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
+                        <input type="radio" name="mode" value="audit_only" x-model="mode">
+                        <span>Audit only</span>
                     </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Tolerance
-                        <input type="number" step="any" min="0" name="tolerance" value="0"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
+                        <input type="radio" name="mode" value="dry_run" x-model="mode">
+                        <span>Dry-run</span>
                     </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Max adjustments (apply mode)
-                        <input type="number" min="1" name="max_adjustments"
-                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
+                        <input type="radio" name="mode" value="apply" x-model="mode">
+                        <span>Apply</span>
                     </label>
                 </div>
-                <div class="flex flex-wrap gap-4 mt-4">
-                    <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                        <input type="checkbox" name="apply">
-                        Apply (post QBO InventoryAdjustment)
-                    </label>
-                    <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                        <input type="checkbox" name="dry_run">
-                        Dry run (print payloads only)
-                    </label>
-                </div>
-                <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-3">
-                    Apply mode posts to the QBO Inventory Adjustment account configured per company
-                    (<code>qbo.inventory_adjustment_account_id</code>). Per-item qty-delta safety cap comes
-                    from <code>qbo.inventory_max_qty_delta</code>. Configure both on the company's
-                    settings page.
-                </p>
-            </details>
+                <p class="text-[11px] text-slate-500 dark:text-slate-400" x-text="helperText"></p>
+            </fieldset>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Tolerance
+                    <input type="number" step="any" min="0" name="tolerance" value="0"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Max adjustments
+                    <input type="number" min="1" name="max_adjustments" :required="mode === 'apply'"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                </label>
+            </div>
 
             <div class="flex items-center justify-end">
-                <button type="submit" class="btn btn-primary">Queue inventory audit</button>
+                <button type="submit" class="btn btn-primary" x-text="ctaText">Queue inventory audit</button>
             </div>
         </form>
     </section>
@@ -286,11 +286,26 @@
         return {
             companyKey: "",
             category: "",
+            mode: "audit_only",
             categoriesByCompany: dataEl ? JSON.parse(dataEl.textContent) : {},
             get availableCategories() {
                 if (!this.companyKey) return [];
                 const list = this.categoriesByCompany[this.companyKey];
                 return Array.isArray(list) ? list : [];
+            },
+            get ctaText() {
+                if (this.mode === "apply") return "Post inventory adjustments";
+                if (this.mode === "dry_run") return "Preview inventory adjustments";
+                return "Queue inventory audit";
+            },
+            get helperText() {
+                if (this.mode === "apply") {
+                    return "Posts QBO InventoryAdjustment transactions using the company-configured adjustment account and safety caps.";
+                }
+                if (this.mode === "dry_run") {
+                    return "Builds the adjustment payloads for review without posting to QBO.";
+                }
+                return "Downloads stock, refreshes the QBO snapshot, and writes an inventory audit report.";
             },
         };
     }

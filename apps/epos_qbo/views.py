@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import os
 import subprocess
@@ -50,6 +49,7 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
+from .services.inventory_categories import load_inventory_categories_by_company
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
@@ -1479,60 +1479,6 @@ def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
     return None
 
 
-def _categories_by_company(companies) -> dict[str, list[str]]:
-    """Return {company_key: [category, ...]} read from each company's product mapping CSV.
-
-    Resolution order:
-      1. `inventory.product_mapping_file` from company config (if set)
-      2. `mappings/{company_key}_product_mapping.csv` (per-company convention)
-      3. `mappings/sandbox_product_mapping.csv` (fallback when no company mapping is configured)
-
-    Failures (missing file, unreadable, no Category column) yield an empty list
-    for that company — the dropdown then shows "All categories" only.
-    """
-    from code_scripts.paths import REPO_CODE_SCRIPTS_DIR
-
-    out: dict[str, list[str]] = {}
-    sandbox_default = REPO_CODE_SCRIPTS_DIR / "mappings" / "sandbox_product_mapping.csv"
-
-    for company in companies:
-        cfg = company.config_json or {}
-        configured = ((cfg.get("inventory") or {}).get("product_mapping_file") or "").strip()
-        if configured:
-            candidates = [REPO_CODE_SCRIPTS_DIR / configured]
-        else:
-            candidates = [
-                REPO_CODE_SCRIPTS_DIR / "mappings" / f"{company.company_key}_product_mapping.csv",
-                sandbox_default,
-            ]
-
-        categories: list[str] = []
-        for path in candidates:
-            try:
-                if not path.exists():
-                    continue
-                with open(path, newline="", encoding="utf-8") as handle:
-                    reader = csv.DictReader(handle)
-                    if not reader.fieldnames:
-                        continue
-                    lowered = {h.strip().lower(): h for h in reader.fieldnames if h and h.strip()}
-                    key = lowered.get("category") or lowered.get("categories")
-                    if not key:
-                        continue
-                    seen: set[str] = set()
-                    for row in reader:
-                        value = (row.get(key) or "").strip()
-                        if value:
-                            seen.add(value)
-                    categories = sorted(seen, key=lambda s: s.lower())
-                if categories:
-                    break
-            except Exception:
-                continue
-        out[company.company_key] = categories
-    return out
-
-
 @login_required
 def runs_list(request):
     _ensure_company_records()
@@ -1561,10 +1507,7 @@ def runs_list(request):
     
     active_run_ids_list = [str(id) for id in active_runs]
 
-    # Per-company EPOS category lists for the Inventory Audit dropdown.
-    # Reads each company's configured product_mapping_file. Tolerates missing
-    # files / bad headers by leaving the list empty.
-    categories_by_company = _categories_by_company(companies)
+    categories_by_company = load_inventory_categories_by_company(companies)
     context = {
         "run_rows": run_rows,
         "form": form,
@@ -1872,7 +1815,7 @@ def trigger_inventory_run(request):
     """Queue an inventory audit (optionally with QBO inventory adjustments)."""
     form = InventoryTriggerForm(request.POST)
     if not form.is_valid():
-        messages.error(request, f"Invalid inventory trigger payload: {form.errors.as_text()}")
+        messages.error(request, f"Invalid inventory trigger payload: {form.errors.get_json_data()}")
         return redirect("epos_qbo:runs")
 
     cleaned = form.cleaned_data
