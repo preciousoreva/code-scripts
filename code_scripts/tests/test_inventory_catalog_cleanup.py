@@ -291,6 +291,90 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertIn("--auto-fetch-qbo", str(ctx.exception))
         self.assertIn("--qbo-csv", str(ctx.exception))
 
+    def test_auto_fetch_qbo_calls_fetch_helper_and_uses_returned_path(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A", "epos_single_units": 1.0, "catalog_issue_type": "missing_from_qbo"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "A", "base_name": "A", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+            ]
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=None), \
+             mock.patch.object(inventory_catalog_cleanup, "get_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "fetch_qbo_inventory_items_snapshot", return_value=Path(td) / "qbo.csv") as fetch_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows) as load_rows_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--auto-fetch-qbo",
+            ])
+        self.assertEqual(exit_code, 0)
+        fetch_mock.assert_called_once()
+        load_rows_mock.assert_called()
+
+    def test_qbo_force_refresh_passes_flag_through(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A", "epos_single_units": 1.0, "catalog_issue_type": "missing_from_qbo"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "A", "base_name": "A", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+            ]
+        )
+        recorded = {}
+
+        def fake_fetch(**kwargs):
+            recorded.update(kwargs)
+            return Path(kwargs["output_path"])
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=None), \
+             mock.patch.object(inventory_catalog_cleanup, "get_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "fetch_qbo_inventory_items_snapshot", side_effect=fake_fetch), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--auto-fetch-qbo",
+                "--qbo-force-refresh",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(recorded.get("force_refresh"))
+
     def test_apply_requires_max_products(self):
         fake_cfg = mock.Mock(
             company_key="company_a",

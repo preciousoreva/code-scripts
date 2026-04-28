@@ -159,6 +159,8 @@ def _build_inventory_catalog_cleanup_command(python_exe: str, cleaned: dict) -> 
         "--company",
         str(company),
         "--auto-download",
+        "--auto-fetch-qbo",
+        "--qbo-force-refresh",
     ]
 
     if opts.get("product_filter"):

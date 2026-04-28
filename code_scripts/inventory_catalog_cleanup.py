@@ -19,6 +19,7 @@ from code_scripts.inventory_sync import (
     _auto_download_stock_csv,
     _collapse_spaces,
     _time_stamp,
+    fetch_qbo_inventory_items_snapshot,
     load_epos_stock_snapshot,
     load_qbo_inventory_item_rows,
     load_qbo_inventory_snapshot,
@@ -37,7 +38,7 @@ from code_scripts.qbo_pack_variant_consolidation import (
     build_consolidation_plan,
     is_duplicate_doc_number_error,
 )
-from code_scripts.qbo_snapshot_cache import mark_qbo_snapshot_stale
+from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path, mark_qbo_snapshot_stale
 from code_scripts.qbo_upload import TokenManager
 from code_scripts.run_lock import GlobalRunLock
 from code_scripts.token_manager import verify_realm_match
@@ -108,6 +109,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to QBO Item export CSV (defaults to the standard snapshot path if present).",
     )
     p.add_argument(
+        "--auto-fetch-qbo",
+        action="store_true",
+        help="Fetch/update the QBO Items snapshot before loading (writes the standard snapshot path unless --qbo-csv is provided).",
+    )
+    p.add_argument(
+        "--qbo-force-refresh",
+        action="store_true",
+        help="When using --auto-fetch-qbo, ignore any cached snapshot and always re-query QBO.",
+    )
+    p.add_argument(
         "--from-report",
         default=None,
         help="Use an existing inventory audit CSV as the source instead of regenerating.",
@@ -156,8 +167,6 @@ def _default_output_path(company_key: str, *, now: datetime | None = None) -> Pa
 
 def _default_qbo_snapshot_path(company_key: str) -> Optional[Path]:
     # Keep this planner intentionally read-only; reuse the snapshot file if it exists.
-    from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path
-
     path = get_qbo_snapshot_path(company_key)
     return path if path.exists() else None
 
@@ -485,9 +494,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         if stock_path is None:
             stock_path = _auto_download_stock_csv(cfg)
         qbo_path = Path(args.qbo_csv).expanduser() if args.qbo_csv else _default_qbo_snapshot_path(cfg.company_key)
+        if args.auto_fetch_qbo and not args.qbo_csv:
+            qbo_path = fetch_qbo_inventory_items_snapshot(
+                company_key=cfg.company_key,
+                realm_id=cfg.realm_id,
+                output_path=get_qbo_snapshot_path(cfg.company_key),
+                force_refresh=bool(args.qbo_force_refresh),
+            )
         if qbo_path is None or not qbo_path.exists():
             raise SystemExit(
-                "QBO snapshot not found. Run inventory_sync with --auto-fetch-qbo first, or pass --qbo-csv."
+                "QBO snapshot not found. Pass --auto-fetch-qbo (optionally with --qbo-force-refresh) "
+                "or pass --qbo-csv."
             )
 
         epos = load_epos_stock_snapshot(
@@ -512,6 +529,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 .str.contains(needle, na=False, regex=False)
             ].copy()
         qbo_path = Path(args.qbo_csv).expanduser() if args.qbo_csv else _default_qbo_snapshot_path(cfg.company_key)
+        if args.auto_fetch_qbo and not args.qbo_csv:
+            qbo_path = fetch_qbo_inventory_items_snapshot(
+                company_key=cfg.company_key,
+                realm_id=cfg.realm_id,
+                output_path=get_qbo_snapshot_path(cfg.company_key),
+                force_refresh=bool(args.qbo_force_refresh),
+            )
         if qbo_path and qbo_path.exists():
             print(f"[INFO] QBO snapshot: {qbo_path}")
         qbo_item_rows = load_qbo_inventory_item_rows(str(qbo_path)) if qbo_path and qbo_path.exists() else None

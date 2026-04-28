@@ -149,6 +149,8 @@ class CatalogCleanupBuildCommandTests(TestCase):
         self.assertIn("--company", cmd)
         self.assertIn("company_a", cmd)
         self.assertIn("--auto-download", cmd)
+        self.assertIn("--auto-fetch-qbo", cmd)
+        self.assertIn("--qbo-force-refresh", cmd)
         self.assertNotIn("--apply", flat)
         self.assertNotIn("--dry-run", flat)
         self.assertNotIn("--max-products", flat)
@@ -172,6 +174,8 @@ class CatalogCleanupBuildCommandTests(TestCase):
         self.assertIn("--dry-run", cmd)
         self.assertIn("--max-products", cmd)
         self.assertIn("2", cmd)
+        self.assertIn("--auto-fetch-qbo", cmd)
+        self.assertIn("--qbo-force-refresh", cmd)
 
     def test_apply_mode_becomes_cli_args(self):
         cmd = build_command(
@@ -185,6 +189,8 @@ class CatalogCleanupBuildCommandTests(TestCase):
         self.assertIn("--apply", cmd)
         self.assertIn("--max-products", cmd)
         self.assertIn("1", cmd)
+        self.assertIn("--auto-fetch-qbo", cmd)
+        self.assertIn("--qbo-force-refresh", cmd)
 
     def test_build_command_for_job_uses_inventory_options(self):
         job = RunJob.objects.create(
@@ -200,3 +206,5 @@ class CatalogCleanupBuildCommandTests(TestCase):
         self.assertIn("--dry-run", cmd)
         self.assertIn("--max-products", cmd)
         self.assertIn("1", cmd)
+        self.assertIn("--auto-fetch-qbo", cmd)
+        self.assertIn("--qbo-force-refresh", cmd)
