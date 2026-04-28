@@ -330,8 +330,10 @@ def _run_apply_for_existing_base_pack_variants(
     if skipped_due_to_cap:
         print(f"[INFO] Cap active: skipped_due_to_cap={skipped_due_to_cap}")
 
-    verify_realm_match(cfg.company_key, cfg.realm_id)
-    token_mgr = TokenManager(cfg.company_key, cfg.realm_id) if not dry_run else None
+    token_mgr = None
+    if not dry_run:
+        verify_realm_match(cfg.company_key, cfg.realm_id)
+        token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
 
     run_lock = None
     if not dry_run:

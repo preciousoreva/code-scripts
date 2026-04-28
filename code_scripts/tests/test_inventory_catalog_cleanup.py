@@ -337,6 +337,8 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
              mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
              mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
              mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match") as verify_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager") as token_mock, \
              mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment") as post_mock, \
              mock.patch.object(inventory_catalog_cleanup, "_post_inactivate") as inact_mock, \
              mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale") as stale_mock, \
@@ -354,6 +356,8 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         post_mock.assert_not_called()
         inact_mock.assert_not_called()
         stale_mock.assert_not_called()
+        verify_mock.assert_not_called()
+        token_mock.assert_not_called()
 
     def test_apply_processes_only_consolidate_rows_and_respects_cap(self):
         fake_cfg = mock.Mock(
@@ -390,8 +394,8 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
              mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
              mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
              mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
-             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
-             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match") as verify_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()) as token_mock, \
              mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}) as post_mock, \
              mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch_item), \
              mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
@@ -411,6 +415,8 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertEqual(post_mock.call_count, 1)
         self.assertGreaterEqual(inact_mock.call_count, 1)
         stale_mock.assert_called()
+        verify_mock.assert_called_once()
+        token_mock.assert_called_once()
 
     def test_snapshot_path_is_printed_when_loading_from_report(self):
         fake_cfg = mock.Mock(
