@@ -44,6 +44,13 @@ _PLANNER_COLUMNS = [
     "source_inventory_report",
 ]
 
+_ACTIONABLE_CATALOG_ISSUE_TYPES = {
+    "base_with_pack_variants",
+    "only_pack_variant_exists",
+    "multiple_active_base_items",
+    "missing_from_qbo",
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -86,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="No-op mode; still writes the planner CSV and prints summary.",
+    )
+    p.add_argument(
+        "--include-no-action",
+        action="store_true",
+        help="Include exact-match / no_action rows in the report (default: exclude).",
     )
     p.add_argument(
         "--output",
@@ -242,7 +254,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             stock_path = _auto_download_stock_csv(cfg)
         qbo_path = Path(args.qbo_csv).expanduser() if args.qbo_csv else _default_qbo_snapshot_path(cfg.company_key)
         if qbo_path is None or not qbo_path.exists():
-            raise SystemExit("QBO snapshot not found. Provide --qbo-csv or create a snapshot via inventory_sync.")
+            raise SystemExit(
+                "QBO snapshot not found. Run inventory_sync with --auto-fetch-qbo first, or pass --qbo-csv."
+            )
 
         epos = load_epos_stock_snapshot(
             str(stock_path),
@@ -265,12 +279,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         source_inventory_report=source_inventory_report,
     )
 
+    if not args.include_no_action:
+        plan_df = plan_df[plan_df["catalog_issue_type"].isin(_ACTIONABLE_CATALOG_ISSUE_TYPES)].copy()
+
     out_path = Path(args.output).expanduser() if args.output else _default_output_path(cfg.company_key)
     _write_csv(out_path, plan_df)
 
     counts = plan_df["planned_action"].value_counts().to_dict()
     print("=" * 68)
     print(f"Catalog cleanup plan: {cfg.display_name} ({cfg.company_key})")
+    print(f"Rows planned: {len(plan_df)}")
     print(f"Wrote report: {out_path}")
     print("-" * 68)
     for key in [
@@ -278,10 +296,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "create_base_then_consolidate_pack_variant",
         "manual_review_duplicate_base_items",
         "create_inventory_item",
-        "no_action",
     ]:
         if key in counts:
             print(f"{key}: {int(counts[key])}")
+    if args.include_no_action and "no_action" in counts:
+        print(f"no_action: {int(counts['no_action'])}")
     print("=" * 68)
 
     return 0

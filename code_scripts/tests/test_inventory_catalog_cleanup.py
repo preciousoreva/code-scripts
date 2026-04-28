@@ -137,6 +137,92 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         for col in inventory_catalog_cleanup._PLANNER_COLUMNS:
             self.assertIn(col, plan.columns)
 
+    def test_default_output_excludes_no_action_rows(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A", "epos_single_units": 1.0, "catalog_issue_type": "exact_name_match"},
+                {"base_name": "B", "epos_single_units": 1.0, "catalog_issue_type": "missing_from_qbo"},
+            ]
+        )
+        captured = {}
+
+        def fake_write(_path, df):
+            captured["df"] = df
+
+        with mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=None), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv", side_effect=fake_write), \
+             redirect_stdout(io.StringIO()):
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(captured["df"]), 1)
+        self.assertEqual(captured["df"].iloc[0]["base_name"], "B")
+
+    def test_include_no_action_includes_exact_match_rows(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A", "epos_single_units": 1.0, "catalog_issue_type": "exact_name_match"},
+                {"base_name": "B", "epos_single_units": 1.0, "catalog_issue_type": "missing_from_qbo"},
+            ]
+        )
+        captured = {}
+
+        def fake_write(_path, df):
+            captured["df"] = df
+
+        with mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=None), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv", side_effect=fake_write), \
+             redirect_stdout(io.StringIO()):
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--include-no-action",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(set(captured["df"]["base_name"].tolist()), {"A", "B"})
+
+    def test_missing_qbo_snapshot_error_is_actionable(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+        )
+        with mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_auto_download_stock_csv", return_value=Path("/tmp/stock.csv")), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=None):
+            with self.assertRaises(SystemExit) as ctx:
+                inventory_catalog_cleanup.main([
+                    "--company", "company_a",
+                    "--auto-download",
+                ])
+        self.assertIn("--auto-fetch-qbo", str(ctx.exception))
+        self.assertIn("--qbo-csv", str(ctx.exception))
+
     def test_main_does_not_call_qbo_write_functions(self):
         # Smoke test: running planner from report should not post or mutate QBO.
         fake_cfg = mock.Mock(
