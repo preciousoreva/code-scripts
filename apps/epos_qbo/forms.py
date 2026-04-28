@@ -163,6 +163,42 @@ class InventoryTriggerForm(forms.Form):
         return cleaned
 
 
+class CatalogCleanupTriggerForm(forms.Form):
+    """Form for triggering inventory catalog cleanup (existing base + pack variants only)."""
+
+    MODE_PLAN_ONLY = "plan_only"
+    MODE_PREVIEW = "preview"
+    MODE_APPLY = "apply"
+    MODE_CHOICES = [
+        (MODE_PLAN_ONLY, "Plan only"),
+        (MODE_PREVIEW, "Preview cleanup"),
+        (MODE_APPLY, "Apply cleanup"),
+    ]
+
+    company_key = forms.SlugField(max_length=64)
+    category = forms.CharField(max_length=255, required=False)
+    product_filter = forms.CharField(max_length=255, required=False)
+    mode = forms.ChoiceField(choices=MODE_CHOICES, required=False, initial=MODE_PLAN_ONLY)
+    max_products = forms.IntegerField(required=False, min_value=1)
+
+    def clean(self):
+        cleaned = super().clean()
+        mode = cleaned.get("mode") or self.MODE_PLAN_ONLY
+        category = (cleaned.get("category") or "").strip()
+        product_filter = (cleaned.get("product_filter") or "").strip()
+        cleaned["mode"] = mode
+        cleaned["category"] = category
+        cleaned["product_filter"] = product_filter
+
+        if mode == self.MODE_PREVIEW:
+            if not cleaned.get("max_products"):
+                cleaned["max_products"] = 1
+        elif mode == self.MODE_APPLY:
+            if not cleaned.get("max_products"):
+                self.add_error("max_products", "Max products is required before applying catalog cleanup.")
+        return cleaned
+
+
 class CompanyBasicForm(forms.Form):
     company_key = forms.SlugField(max_length=64)
     display_name = forms.CharField(max_length=255)

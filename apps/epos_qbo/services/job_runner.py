@@ -54,6 +54,9 @@ def build_command(cleaned: dict) -> list[str]:
     if scope == RunJob.SCOPE_INVENTORY_SYNC:
         return _build_inventory_command(python_exe, cleaned)
 
+    if scope == RunJob.SCOPE_INVENTORY_CATALOG_CLEANUP:
+        return _build_inventory_catalog_cleanup_command(python_exe, cleaned)
+
     if scope == RunJob.SCOPE_SINGLE:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_pipeline.py"), "--company", cleaned["company_key"]]
     else:
@@ -130,6 +133,51 @@ def _build_inventory_command(python_exe: str, cleaned: dict) -> list[str]:
         cmd.extend(["--adjust-account-id", str(opts["adjust_account_id"])])
     if opts.get("txn_date"):
         cmd.extend(["--txn-date", str(opts["txn_date"])])
+
+    return [str(part) for part in cmd]
+
+
+def _build_inventory_catalog_cleanup_command(python_exe: str, cleaned: dict) -> list[str]:
+    """Build a `python -m code_scripts.inventory_catalog_cleanup ...` command.
+
+    Portal-triggered catalog cleanup always auto-downloads a fresh EPOS Stock
+    Report and uses the CLI planner/apply safety caps (max-products).
+
+    Required keys in cleaned: company_key.
+    Optional keys pulled from inventory_options (dict): product_filter, categories,
+    apply, dry_run, max_products.
+    """
+    opts = cleaned.get("inventory_options") or {}
+    company = cleaned["company_key"]
+    if not company:
+        raise ValueError("inventory_catalog_cleanup requires company_key")
+
+    cmd: list[str] = [
+        python_exe,
+        "-m",
+        "code_scripts.inventory_catalog_cleanup",
+        "--company",
+        str(company),
+        "--auto-download",
+    ]
+
+    if opts.get("product_filter"):
+        cmd.extend(["--product", str(opts["product_filter"])])
+    categories = opts.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    if isinstance(categories, list):
+        for category in categories:
+            value = str(category or "").strip()
+            if value:
+                cmd.extend(["--category", value])
+
+    if opts.get("dry_run"):
+        cmd.append("--dry-run")
+    if opts.get("apply"):
+        cmd.append("--apply")
+    if opts.get("max_products") is not None:
+        cmd.extend(["--max-products", str(int(opts["max_products"]))])
 
     return [str(part) for part in cmd]
 

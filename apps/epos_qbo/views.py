@@ -23,6 +23,7 @@ from django.views.decorators.http import require_GET, require_POST
 from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
 
 from .forms import (
+    CatalogCleanupTriggerForm,
     CompanyAdvancedForm,
     CompanyBasicForm,
     InventoryTriggerForm,
@@ -1855,6 +1856,55 @@ def trigger_inventory_run(request):
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
     messages.info(request, f"Inventory audit queued: {job.display_label}. It will start automatically.")
+    return redirect("epos_qbo:runs")
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def trigger_inventory_catalog_cleanup_run(request):
+    """Queue an inventory catalog cleanup plan / dry-run / apply."""
+    form = CatalogCleanupTriggerForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, f"Invalid catalog cleanup trigger payload: {form.errors.get_json_data()}")
+        return redirect("epos_qbo:runs")
+
+    cleaned = form.cleaned_data
+    company_key = (cleaned.get("company_key") or "").strip()
+    if not CompanyConfigRecord.objects.filter(company_key=company_key).exists():
+        messages.error(request, "Unknown company key for catalog cleanup.")
+        return redirect("epos_qbo:runs")
+
+    mode = cleaned.get("mode") or CatalogCleanupTriggerForm.MODE_PLAN_ONLY
+    opts: dict = {}
+    category = (cleaned.get("category") or "").strip()
+    if category:
+        opts["categories"] = [category]
+    product_filter = (cleaned.get("product_filter") or "").strip()
+    if product_filter:
+        opts["product_filter"] = product_filter
+    if mode == CatalogCleanupTriggerForm.MODE_PREVIEW:
+        opts["dry_run"] = True
+        opts["max_products"] = int(cleaned.get("max_products") or 1)
+    elif mode == CatalogCleanupTriggerForm.MODE_APPLY:
+        opts["apply"] = True
+        opts["max_products"] = int(cleaned["max_products"])
+
+    job = RunJob.objects.create(
+        scope=RunJob.SCOPE_INVENTORY_CATALOG_CLEANUP,
+        company_key=company_key,
+        inventory_options_json=opts,
+        requested_by=request.user,
+        status=RunJob.STATUS_QUEUED,
+    )
+    dispatch_next_queued_job()
+
+    job.refresh_from_db()
+    if job.status == RunJob.STATUS_RUNNING:
+        messages.success(request, f"Catalog cleanup started: {job.display_label}")
+        return redirect("epos_qbo:run-detail", job_id=job.id)
+
+    messages.info(request, f"Catalog cleanup queued: {job.display_label}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 
