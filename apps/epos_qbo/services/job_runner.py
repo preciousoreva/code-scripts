@@ -82,6 +82,7 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
     company = cleaned["company_key"]
     if not company:
         raise ValueError("inventory_pipeline requires company_key")
+    product_filter = str(opts.get("product_filter") or "").strip()
 
     cmd: list[str] = [
         python_exe,
@@ -101,8 +102,8 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
     else:
         cmd.extend(["--auto-fetch-qbo", "--qbo-force-refresh"])
 
-    if opts.get("product_filter"):
-        cmd.extend(["--product", str(opts["product_filter"])])
+    if product_filter:
+        cmd.extend(["--product", product_filter])
     categories = opts.get("categories") or []
     if isinstance(categories, str):
         categories = [categories]
@@ -112,14 +113,20 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
             if value:
                 cmd.extend(["--category", value])
 
-    max_catalog_fixes = opts.get("max_catalog_fixes")
-    max_quantity_adjustments = opts.get("max_quantity_adjustments")
-    if max_catalog_fixes is None:
-        max_catalog_fixes = 5
-    if max_quantity_adjustments is None:
-        max_quantity_adjustments = 10
-    cmd.extend(["--max-catalog-fixes", str(int(max_catalog_fixes))])
-    cmd.extend(["--max-quantity-adjustments", str(int(max_quantity_adjustments))])
+    default_catalog_fixes = 1 if product_filter else 5
+    default_quantity_adjustments = 1 if product_filter else 10
+    max_catalog_fixes = _positive_inventory_limit(
+        opts.get("max_catalog_fixes"),
+        default_catalog_fixes,
+        "max_catalog_fixes",
+    )
+    max_quantity_adjustments = _positive_inventory_limit(
+        opts.get("max_quantity_adjustments"),
+        default_quantity_adjustments,
+        "max_quantity_adjustments",
+    )
+    cmd.extend(["--max-catalog-fixes", str(max_catalog_fixes)])
+    cmd.extend(["--max-quantity-adjustments", str(max_quantity_adjustments)])
 
     if opts.get("max_qty_delta") is not None:
         cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
@@ -131,6 +138,18 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
         cmd.append("--dry-run")
 
     return [str(part) for part in cmd]
+
+
+def _positive_inventory_limit(value: object, default: int, option_name: str) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"inventory_pipeline requires positive {option_name}") from exc
+    if parsed < 1:
+        raise ValueError(f"inventory_pipeline requires positive {option_name}")
+    return parsed
 
 
 def _build_inventory_command(python_exe: str, cleaned: dict) -> list[str]:

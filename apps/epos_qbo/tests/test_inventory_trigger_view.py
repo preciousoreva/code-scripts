@@ -5,8 +5,9 @@ from unittest import mock
 from django.contrib.auth.models import Permission, User
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
-from apps.epos_qbo.models import CompanyConfigRecord, RunJob
+from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
 
 
 class InventoryTriggerViewTests(TestCase):
@@ -81,6 +82,8 @@ class InventoryTriggerViewTests(TestCase):
                 reverse("epos_qbo:run-trigger-inventory"),
                 {
                     "company_key": "company_a",
+                    "max_catalog_fixes": "",
+                    "max_quantity_adjustments": "",
                 },
             )
         self.assertEqual(response.status_code, 302)
@@ -88,6 +91,26 @@ class InventoryTriggerViewTests(TestCase):
         self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
         self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 5)
         self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 10)
+
+    def test_product_filter_infers_single_product_caps(self):
+        self.client.login(username="op", password="pw")
+        with mock.patch(
+            "apps.epos_qbo.views.dispatch_next_queued_job", return_value=(None, "queued")
+        ):
+            response = self.client.post(
+                reverse("epos_qbo:run-trigger-inventory"),
+                {
+                    "company_key": "company_a",
+                    "product_filter": "Widget",
+                    "max_catalog_fixes": "",
+                    "max_quantity_adjustments": "",
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        job = RunJob.objects.get()
+        self.assertEqual(job.inventory_options_json.get("product_filter"), "Widget")
+        self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 1)
+        self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 1)
 
     def test_runs_context_includes_inventory_categories_by_company(self):
         self.client.login(username="op", password="pw")
@@ -117,7 +140,47 @@ class InventoryTriggerViewTests(TestCase):
             "Downloads EPOS stock, checks QuickBooks inventory, fixes safe pack-variant catalog issues, and syncs quantities.",
             html,
         )
-        self.assertIn("Max catalog fixes per run", html)
-        self.assertIn("Max quantity adjustments per run", html)
+        self.assertIn("Catalog fixes limit", html)
+        self.assertIn("Quantity updates limit", html)
+        self.assertIn(
+            "These safety limits cap how many QuickBooks changes can happen in one run. Leave defaults unless you are intentionally running a larger batch.",
+            html,
+        )
+        self.assertIn(
+            "Catalog fixes clean up base item + pack variant issues before stock is synced.",
+            html,
+        )
+        self.assertIn("Quantity updates adjust QuickBooks stock counts to match EPOS.", html)
+        self.assertNotIn("Max catalog fixes per run", html)
+        self.assertNotIn("Max quantity adjustments per run", html)
         self.assertNotIn("Catalog Cleanup", html)
         self.assertNotIn("Inventory Audit", html)
+
+    def test_run_detail_shows_inventory_pipeline_report_artifact(self):
+        self.client.login(username="op", password="pw")
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            exit_code=0,
+        )
+        RunArtifact.objects.create(
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            run_job=job,
+            company_key="company_a",
+            processed_at=timezone.now(),
+            source_path="/tmp/inventory_pipeline_company_a_120000.json",
+            source_hash="a" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            rows_total=1,
+            rows_kept=1,
+            upload_stats_json={"report_type": "inventory_pipeline"},
+        )
+
+        response = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Inventory pipeline report", html)
+        self.assertNotIn("Run succeeded but no artifacts were linked", html)
+        self.assertNotIn("Reconciliation did not run or failed", html)

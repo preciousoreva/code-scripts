@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -226,6 +228,32 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertEqual(resolve_mock.call_count, 2)
             self.assertEqual(summary["qbo_csv"], str(qbo_after_catalog))
             self.assertEqual(summary["catalog_fixes_applied"], 1)
+
+    def test_summary_includes_run_job_id_from_dashboard_env(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            self._patch_common(td, plan=self._supported_plan(), qbo_paths=[qbo_path, qbo_path])
+            with mock.patch.object(
+                inventory_pipeline,
+                "_run_apply_for_existing_base_pack_variants",
+                return_value=0,
+            ), mock.patch.object(
+                inventory_pipeline,
+                "_apply_exact_match_quantity_adjustments",
+                return_value={
+                    "posted": 0,
+                    "planned": 0,
+                    "skipped": 0,
+                    "skipped_due_to_cap": 0,
+                    "skipped_non_exact": 0,
+                    "changed_qbo": False,
+                },
+            ), mock.patch.dict(os.environ, {"OIAT_RUN_JOB_ID": "job-123"}):
+                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+
+            self.assertEqual(summary["run_job_id"], "job-123")
+            payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["run_job_id"], "job-123")
 
     def test_unsupported_catalog_issue_types_are_reported_not_applied(self):
         with tempfile.TemporaryDirectory() as td:

@@ -94,7 +94,9 @@
                         <td class="px-3 py-2">{{ artifact.upload_stats_json.skipped|default:"-" }}</td>
                         <td class="px-3 py-2">{{ artifact.upload_stats_json.failed|default:"-" }}</td>
                         <td class="px-3 py-2">
-                            {% if artifact.reliability_status == 'warning' %}
+                            {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
+                            <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">Inventory pipeline report</span>
+                            {% elif artifact.reliability_status == 'warning' %}
                             <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Rolling (last_*)</span>
                             {% else %}
                             <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">Snapshot (dated)</span>

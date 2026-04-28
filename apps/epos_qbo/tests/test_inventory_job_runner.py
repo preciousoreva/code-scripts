@@ -56,6 +56,19 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("7", cmd)
 
+    def test_product_filter_without_caps_uses_single_product_limits(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "product_filter": "TROPHY",
+                }
+            )
+        )
+        self.assertIn("--product", cmd)
+        self.assertIn("TROPHY", cmd)
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "1")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "1")
+
     def test_build_command_for_job_uses_pipeline_options(self):
         job = RunJob.objects.create(
             scope=RunJob.SCOPE_INVENTORY_PIPELINE,

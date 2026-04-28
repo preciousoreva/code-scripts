@@ -166,13 +166,33 @@ class InventoryCategoryLoadingTests(TestCase):
 
 
 class InventoryTriggerFormTests(TestCase):
-    def test_pipeline_caps_default(self):
-        form = InventoryTriggerForm(data={"company_key": "company_a"})
+    def test_without_product_filter_defaults_caps_to_batch_values(self):
+        form = InventoryTriggerForm(
+            data={
+                "company_key": "company_a",
+                "max_catalog_fixes": "",
+                "max_quantity_adjustments": "",
+            }
+        )
         self.assertTrue(form.is_valid(), form.errors.as_text())
         self.assertEqual(form.cleaned_data["max_catalog_fixes"], 5)
         self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 10)
 
-    def test_pipeline_accepts_optional_scope_and_caps(self):
+    def test_product_filter_defaults_blank_caps_to_one(self):
+        form = InventoryTriggerForm(
+            data={
+                "company_key": "company_a",
+                "product_filter": " Trophy ",
+                "max_catalog_fixes": "",
+                "max_quantity_adjustments": "",
+            }
+        )
+        self.assertTrue(form.is_valid(), form.errors.as_text())
+        self.assertEqual(form.cleaned_data["product_filter"], "Trophy")
+        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 1)
+        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 1)
+
+    def test_user_provided_caps_are_respected(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
@@ -188,7 +208,7 @@ class InventoryTriggerFormTests(TestCase):
         self.assertEqual(form.cleaned_data["max_catalog_fixes"], 3)
         self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 8)
 
-    def test_zero_caps_are_allowed(self):
+    def test_zero_caps_are_rejected(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
@@ -196,6 +216,6 @@ class InventoryTriggerFormTests(TestCase):
                 "max_quantity_adjustments": "0",
             }
         )
-        self.assertTrue(form.is_valid(), form.errors.as_text())
-        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 0)
-        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 0)
+        self.assertFalse(form.is_valid())
+        self.assertIn("max_catalog_fixes", form.errors)
+        self.assertIn("max_quantity_adjustments", form.errors)

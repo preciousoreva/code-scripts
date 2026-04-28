@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -613,6 +614,9 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "child_reports": child_reports,
         "finished_at": _now_utc_iso(),
     }
+    run_job_id = os.environ.get("OIAT_RUN_JOB_ID", "").strip()
+    if run_job_id:
+        summary["run_job_id"] = run_job_id
     summary_json, summary_csv = _write_summary_reports(
         summary,
         output_dir=args.summary_output_dir,

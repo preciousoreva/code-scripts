@@ -1466,10 +1466,17 @@ def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
     if job.status != RunJob.STATUS_SUCCEEDED:
         return None
     if not artifacts:
+        if job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+            return (
+                "Run succeeded but no inventory reports were linked. "
+                "Check pipeline logs and reports/inventory_pipeline/."
+            )
         return (
             "Run succeeded but no artifacts were linked. "
             "Check pipeline logs and that metadata files exist under Uploaded/."
         )
+    if job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+        return None
     statuses = [a.reconcile_status for a in artifacts if getattr(a, "reconcile_status", None)]
     label = _reconciliation_label_for_job(str(job.id), {str(job.id): statuses})
     if label == "Mismatch":

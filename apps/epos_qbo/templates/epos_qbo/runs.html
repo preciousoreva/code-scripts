@@ -156,16 +156,21 @@
 
             <details class="border border-slate-200 dark:border-slate-600 rounded-lg p-3">
                 <summary class="cursor-pointer text-sm font-medium text-slate-700 dark:text-slate-300 select-none">Advanced</summary>
+                <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                    These safety limits cap how many QuickBooks changes can happen in one run. Leave defaults unless you are intentionally running a larger batch.
+                </p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
                     <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Max catalog fixes per run
-                        <input type="number" min="0" name="max_catalog_fixes" value="5"
+                        Catalog fixes limit
+                        <input type="number" min="1" name="max_catalog_fixes" placeholder="Auto"
                             class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                        <span class="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">Catalog fixes clean up base item + pack variant issues before stock is synced.</span>
                     </label>
                     <label class="text-xs text-slate-600 dark:text-slate-400">
-                        Max quantity adjustments per run
-                        <input type="number" min="0" name="max_quantity_adjustments" value="10"
+                        Quantity updates limit
+                        <input type="number" min="1" name="max_quantity_adjustments" placeholder="Auto"
                             class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                        <span class="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">Quantity updates adjust QuickBooks stock counts to match EPOS.</span>
                     </label>
                 </div>
             </details>
