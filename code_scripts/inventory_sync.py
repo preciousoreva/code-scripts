@@ -1062,7 +1062,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     format_inventory_audit_summary(
                         company_display_name=config.display_name,
                         company_key=config.company_key,
-                        mode="dry-run" if args.dry_run else "apply",
+                        mode="apply",
                         scope=format_scope(category=list(args.categories or []), product=args.product_filter),
                         counts={"posted": posted, "skipped": skipped, "txn_date": txn_date},
                         report_path=str(out_path),

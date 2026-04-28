@@ -202,7 +202,7 @@ class InventorySyncSlackNotificationTest(unittest.TestCase):
         cfg.slack_webhook_url = "https://hooks.slack.test/example"
         return cfg
 
-    def _run_audit(self, extra_args=None, env_extra=None):
+    def _run_audit(self, extra_args=None, env_extra=None, qbo_qty=5):
         import tempfile
         from pathlib import Path
 
@@ -223,7 +223,7 @@ class InventorySyncSlackNotificationTest(unittest.TestCase):
             qbo_csv = tdp / "qbo.csv"
             qbo_csv.write_text(
                 "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
-                "10,Widget,Inventory,true,5\n",
+                f"10,Widget,Inventory,true,{qbo_qty}\n",
                 encoding="utf-8",
             )
             report_path = tdp / "report.csv"
@@ -257,6 +257,14 @@ class InventorySyncSlackNotificationTest(unittest.TestCase):
         exit_code, slack_mock = self._run_audit(env_extra={"OIAT_RUN_JOB_ID": "job-123"})
         self.assertEqual(exit_code, 0)
         slack_mock.assert_called_once()
+
+    def test_dry_run_does_not_notify_slack_by_default(self):
+        exit_code, slack_mock = self._run_audit(
+            ["--dry-run", "--adjust-account-id", "88"],
+            qbo_qty=1,
+        )
+        self.assertEqual(exit_code, 0)
+        slack_mock.assert_not_called()
 
 
 class InventorySyncAutoDownloadWiringTest(unittest.TestCase):
