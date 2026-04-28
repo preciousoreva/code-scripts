@@ -92,6 +92,14 @@ def _collapse_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def build_inventory_adjustment_doc_number(txn_date: str, item_id: str | int) -> str:
+    compact_date = str(txn_date or "").strip().replace("-", "")
+    if not re.fullmatch(r"\d{8}", compact_date):
+        parsed = datetime.fromisoformat(str(txn_date).strip()).date()
+        compact_date = parsed.strftime("%Y%m%d")
+    return f"INVADJ-{compact_date}-{str(item_id).strip()}"
+
+
 def _normalize_category_value(value: Any) -> str:
     return _collapse_spaces(str(value or ""))
 
@@ -990,9 +998,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 f"OIAT inventory sync | base={base!r} | pick={reason} | "
                 f"epos_single_units={epos_target} | qbo_item_qty={current_qty} | delta={qty_diff}"
             )
+            doc_number = build_inventory_adjustment_doc_number(txn_date=str(txn_date), item_id=item_id)
             payload = build_inventory_adjustment_payload(
                 adjust_account_id=str(adjust_account_id),
                 txn_date=str(txn_date),
+                doc_number=doc_number,
                 private_note=memo[:950],
                 lines=[{"item_id": item_id, "qty_diff": qty_diff}],
             )

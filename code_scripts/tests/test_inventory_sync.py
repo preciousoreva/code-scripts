@@ -12,6 +12,16 @@ from code_scripts.qbo_inventory_adjustment import build_inventory_adjustment_pay
 
 
 class InventorySyncHelpersTest(unittest.TestCase):
+    def test_build_inventory_adjustment_doc_number(self):
+        self.assertEqual(
+            inventory_sync.build_inventory_adjustment_doc_number("2026-04-28", 9124),
+            "INVADJ-20260428-9124",
+        )
+        self.assertEqual(
+            inventory_sync.build_inventory_adjustment_doc_number("2026-04-28", "9124"),
+            "INVADJ-20260428-9124",
+        )
+
     def test_choose_canonical_prefers_exact_base_name(self):
         rows = pd.DataFrame(
             [
@@ -731,6 +741,77 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         mock_mark.assert_called_once_with("company_a", reason="inventory_adjustments_posted")
+
+    def test_dry_run_and_apply_payload_include_doc_number(self):
+        import tempfile
+        from pathlib import Path
+
+        fake_config = self._build_fake_config()
+        fake_config.inventory_adjustment_account_id = "88"
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "33 EXPORT LAGER BEER CAN 50cl,ALCOHOLS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "9124,33 EXPORT LAGER BEER CAN 50cl,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+
+            env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
+
+            # Dry-run: verify printed payload includes DocNumber.
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 redirect_stdout(buf):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--dry-run",
+                    "--adjust-account-id", "88",
+                    "--txn-date", "2026-04-28",
+                    "--max-adjustments", "1",
+                ])
+            self.assertEqual(exit_code, 0)
+            self.assertIn('"DocNumber": "INVADJ-20260428-9124"', buf.getvalue())
+
+            # Apply: verify payload passed to post_inventory_adjustment includes DocNumber.
+            captured: dict = {}
+
+            def fake_post(_token_mgr, _realm_id, payload):
+                captured["payload"] = payload
+                return {"InventoryAdjustment": {"Id": "99"}}
+
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(inventory_sync, "post_inventory_adjustment", side_effect=fake_post), \
+                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale"), \
+                 redirect_stdout(io.StringIO()):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--apply",
+                    "--txn-date", "2026-04-28",
+                    "--max-adjustments", "1",
+                ])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                captured["payload"].get("DocNumber"),
+                "INVADJ-20260428-9124",
+            )
 
 
 if __name__ == "__main__":
