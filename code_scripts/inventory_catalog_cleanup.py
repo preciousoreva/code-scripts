@@ -97,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional EPOS category filter (repeatable).",
     )
     p.add_argument(
+        "--product",
+        dest="product_filter",
+        default=None,
+        help="Optional substring filter on EPOS/QBO base product name (case-insensitive).",
+    )
+    p.add_argument(
         "--qbo-csv",
         default=None,
         help="Optional path to QBO Item export CSV (defaults to the standard snapshot path if present).",
@@ -476,15 +482,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         epos = load_epos_stock_snapshot(
             str(stock_path),
             categories=list(args.categories or []),
+            product_filter=args.product_filter,
         )
         qbo_grouped = load_qbo_inventory_snapshot(str(qbo_path))
         audit_df = build_audit_report(epos, qbo_grouped, tolerance=0.0)
         source_inventory_report = ""
+        print(f"[INFO] QBO snapshot: {qbo_path}")
         qbo_item_rows = load_qbo_inventory_item_rows(str(qbo_path))
     else:
         audit_df = _read_inventory_report(report_path)
         source_inventory_report = str(report_path)
+        if args.product_filter:
+            needle = str(args.product_filter).strip().lower()
+            audit_df = audit_df[audit_df["base_name"].astype(str).str.lower().str.contains(needle, na=False)].copy()
         qbo_path = Path(args.qbo_csv).expanduser() if args.qbo_csv else _default_qbo_snapshot_path(cfg.company_key)
+        if qbo_path and qbo_path.exists():
+            print(f"[INFO] QBO snapshot: {qbo_path}")
         qbo_item_rows = load_qbo_inventory_item_rows(str(qbo_path)) if qbo_path and qbo_path.exists() else None
 
     plan_df = plan_catalog_cleanup(
