@@ -251,13 +251,11 @@ class RunJob(models.Model):
     SCOPE_ALL = "all_companies"
     SCOPE_INVENTORY_PIPELINE = "inventory_pipeline"
     SCOPE_INVENTORY_SYNC = "inventory_sync"
-    SCOPE_INVENTORY_CATALOG_CLEANUP = "inventory_catalog_cleanup"
     SCOPE_CHOICES = [
         (SCOPE_SINGLE, "Single Company"),
         (SCOPE_ALL, "All Companies"),
         (SCOPE_INVENTORY_PIPELINE, "Inventory"),
         (SCOPE_INVENTORY_SYNC, "Inventory Sync"),
-        (SCOPE_INVENTORY_CATALOG_CLEANUP, "Catalog Cleanup"),
     ]
 
     STATUS_QUEUED = "queued"
@@ -347,7 +345,7 @@ class RunArtifact(models.Model):
     KIND_INVENTORY_AUDIT = "inventory_audit"
     KIND_CHOICES = [
         (KIND_SALES_UPLOAD, "Sales Upload"),
-        (KIND_INVENTORY_AUDIT, "Inventory Audit"),
+        (KIND_INVENTORY_AUDIT, "Inventory"),
     ]
 
     kind = models.CharField(max_length=32, choices=KIND_CHOICES, default=KIND_SALES_UPLOAD)

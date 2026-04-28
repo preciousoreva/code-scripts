@@ -121,7 +121,7 @@
              x-data="inventoryForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Downloads EPOS stock, compares with QBO, fixes safe catalog issues, and syncs quantities.
+            Downloads EPOS stock, checks QuickBooks inventory, fixes safe pack-variant catalog issues, and syncs quantities.
         </p>
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
             {% csrf_token %}
