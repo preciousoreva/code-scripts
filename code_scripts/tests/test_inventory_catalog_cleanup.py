@@ -223,6 +223,177 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertIn("--auto-fetch-qbo", str(ctx.exception))
         self.assertIn("--qbo-csv", str(ctx.exception))
 
+    def test_apply_requires_max_products(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        with mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]):
+            with self.assertRaises(SystemExit) as ctx:
+                inventory_catalog_cleanup.main([
+                    "--company", "company_a",
+                    "--from-report", "/tmp/r.csv",
+                    "--apply",
+                ])
+        self.assertIn("--max-products", str(ctx.exception))
+
+    def test_dry_run_does_not_call_qbo_write_functions(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "GOLDBERG CAN 50cl", "epos_single_units": 8.0, "catalog_issue_type": "base_with_pack_variants"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "GOLDBERG CAN 50cl", "base_name": "GOLDBERG CAN 50cl", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+                {"Id": "11", "Name": "GOLDBERG CAN 50cl*6", "base_name": "GOLDBERG CAN 50cl", "qbo_has_pack": True, "qbo_qty_on_hand": 1},
+            ]
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment") as post_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate") as inact_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale") as stale_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--dry-run",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 0)
+        post_mock.assert_not_called()
+        inact_mock.assert_not_called()
+        stale_mock.assert_not_called()
+
+    def test_apply_processes_only_consolidate_rows_and_respects_cap(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A", "epos_single_units": 8.0, "catalog_issue_type": "base_with_pack_variants"},
+                {"base_name": "B", "epos_single_units": 8.0, "catalog_issue_type": "base_with_pack_variants"},
+                {"base_name": "C", "epos_single_units": 8.0, "catalog_issue_type": "only_pack_variant_exists"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "A", "base_name": "A", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+                {"Id": "11", "Name": "A*6", "base_name": "A", "qbo_has_pack": True, "qbo_qty_on_hand": 1},
+                {"Id": "20", "Name": "B", "base_name": "B", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+                {"Id": "21", "Name": "B*6", "base_name": "B", "qbo_has_pack": True, "qbo_qty_on_hand": 1},
+            ]
+        )
+
+        def fake_fetch_item(_tm, _realm, item_id):
+            return {"Id": item_id, "Name": f"X*6", "SyncToken": "0", "QtyOnHand": 0}
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}) as post_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch_item), \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale") as stale_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--apply",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertGreaterEqual(inact_mock.call_count, 1)
+        stale_mock.assert_called()
+
+    def test_partial_failure_when_cleanup_fails_after_consolidation(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A", "epos_single_units": 8.0, "catalog_issue_type": "base_with_pack_variants"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "A", "base_name": "A", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+                {"Id": "11", "Name": "A*6", "base_name": "A", "qbo_has_pack": True, "qbo_qty_on_hand": 1},
+            ]
+        )
+
+        def fake_fetch_item(_tm, _realm, item_id):
+            return {"Id": item_id, "Name": f"A*6", "SyncToken": "0", "QtyOnHand": 0}
+
+        buf = io.StringIO()
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}), \
+             mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch_item), \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", side_effect=RuntimeError("boom")), \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale"), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(buf):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--apply",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("partial", buf.getvalue().lower())
+
     def test_main_does_not_call_qbo_write_functions(self):
         # Smoke test: running planner from report should not post or mutate QBO.
         fake_cfg = mock.Mock(

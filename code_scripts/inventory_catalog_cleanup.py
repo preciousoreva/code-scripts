@@ -24,6 +24,23 @@ from code_scripts.inventory_sync import (
     load_qbo_inventory_snapshot,
     build_audit_report,
 )
+from code_scripts.qbo_inventory_adjustment import build_inventory_adjustment_payload, post_inventory_adjustment
+from code_scripts.qbo_pack_variant_cleanup import (
+    _fetch_item_with_sync_token,
+    _post_inactivate,
+    build_inactivate_payload,
+)
+from code_scripts.qbo_pack_variant_consolidation import (
+    build_doc_number as build_consolidation_doc_number,
+    build_lines_from_plan_row,
+    build_private_note,
+    build_consolidation_plan,
+    is_duplicate_doc_number_error,
+)
+from code_scripts.qbo_snapshot_cache import mark_qbo_snapshot_stale
+from code_scripts.qbo_upload import TokenManager
+from code_scripts.run_lock import GlobalRunLock
+from code_scripts.token_manager import verify_realm_match
 
 
 _PLANNER_COLUMNS = [
@@ -90,9 +107,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use an existing inventory audit CSV as the source instead of regenerating.",
     )
     p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply catalog cleanup for eligible rows. CLI-only; supports only existing-base pack consolidation.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
-        help="No-op mode; still writes the planner CSV and prints summary.",
+        help="Preview what --apply would do (no QBO writes).",
+    )
+    p.add_argument(
+        "--max-products",
+        type=int,
+        default=None,
+        help="Required with --apply. Hard cap on number of base products to process.",
+    )
+    p.add_argument(
+        "--txn-date",
+        default=None,
+        help="TxnDate for InventoryAdjustments (YYYY-MM-DD). Defaults to today.",
     )
     p.add_argument(
         "--include-no-action",
@@ -239,10 +272,192 @@ def _write_csv(path: Path, df: pd.DataFrame) -> None:
     df.to_csv(path, index=False, quoting=csv.QUOTE_MINIMAL)
 
 
+def _plan_summary_counts(plan_df: pd.DataFrame) -> dict[str, int]:
+    vc = plan_df["planned_action"].value_counts().to_dict() if not plan_df.empty else {}
+    return {str(k): int(v) for k, v in vc.items()}
+
+
+def _run_apply_for_existing_base_pack_variants(
+    *,
+    cfg,
+    plan_df: pd.DataFrame,
+    qbo_item_rows: pd.DataFrame,
+    txn_date: str,
+    max_products: int,
+    dry_run: bool,
+) -> int:
+    """
+    Apply-mode runner: only supports planned_action=consolidate_existing_base_pack_variants.
+    """
+    attempted = consolidated = cleaned_up = skipped = failed = 0
+    partial_failures: list[str] = []
+
+    # Enforce exact scope: only existing-base consolidation.
+    supported = plan_df[plan_df["planned_action"] == "consolidate_existing_base_pack_variants"].copy()
+    unsupported = plan_df[plan_df["planned_action"] != "consolidate_existing_base_pack_variants"].copy()
+    if not unsupported.empty:
+        for _, r in unsupported.iterrows():
+            skipped += 1
+            print(
+                f"[SKIP] base={str(r.get('base_name') or '')!r} planned_action={r.get('planned_action')} "
+                "reason=unsupported_planned_action"
+            )
+
+    eligible = supported[supported["action_eligible"] == True].copy()  # noqa: E712
+    ineligible = supported[supported["action_eligible"] != True].copy()  # noqa: E712
+    if not ineligible.empty:
+        for _, r in ineligible.iterrows():
+            skipped += 1
+            print(
+                f"[SKIP] base={str(r.get('base_name') or '')!r} planned_action={r.get('planned_action')} "
+                f"reason={str(r.get('block_reason') or 'not_eligible')}"
+            )
+
+    if eligible.empty:
+        print("[INFO] No eligible rows to apply for existing-base pack consolidation.")
+        print(f"Apply summary: attempted={attempted} consolidated={consolidated} cleaned_up={cleaned_up} skipped={skipped} failed={failed}")
+        return 0
+
+    capped = eligible.head(int(max_products)).copy()
+    skipped_due_to_cap = max(0, len(eligible) - len(capped))
+    skipped += skipped_due_to_cap
+    if skipped_due_to_cap:
+        print(f"[INFO] Cap active: skipped_due_to_cap={skipped_due_to_cap}")
+
+    verify_realm_match(cfg.company_key, cfg.realm_id)
+    token_mgr = TokenManager(cfg.company_key, cfg.realm_id) if not dry_run else None
+
+    run_lock = None
+    if not dry_run:
+        run_lock = GlobalRunLock(holder=f"inventory_catalog_cleanup:{cfg.company_key}")
+        lock_result = run_lock.acquire()
+        if not lock_result.acquired:
+            print(f"Error: another pipeline run is active ({lock_result.reason}); refusing to --apply.", flush=True)
+            return 2
+
+    try:
+        # Build consolidation plan rows from the live QBO snapshot for *only* the selected bases,
+        # so we reuse the proven consolidation math without duplicating it.
+        qbo_rows = qbo_item_rows.to_dict(orient="records")
+        epos_targets = {
+            str(r["base_name"]).strip().lower(): float(r.get("epos_single_units") or 0.0)
+            for _, r in capped.iterrows()
+            if str(r.get("base_name") or "").strip()
+        }
+        in_scope = set(epos_targets.keys())
+        consolidation_plan = build_consolidation_plan(
+            qbo_rows=qbo_rows,
+            epos_targets=epos_targets,
+            company_key=cfg.company_key,
+            in_scope_bases=in_scope,
+        )
+        # Only post rows where the consolidation planner says it's safe/available.
+        postable = [r for r in consolidation_plan if r.get("consolidation_recommended_action") == "consolidation_plan_available"]
+
+        for row in postable[: int(max_products)]:
+            attempted += 1
+            base_name = str(row.get("base_name") or "").strip()
+            base_item_id = str(row.get("base_qbo_item_id") or "").strip()
+            pack_ids = str(row.get("pack_variant_item_ids") or "").strip()
+            print(f"[PLAN] base={base_name!r} base_item_id={base_item_id} packs={pack_ids}")
+
+            lines = build_lines_from_plan_row(row)
+            doc_number = build_consolidation_doc_number(txn_date=txn_date, base_item_id=base_item_id)
+            payload = build_inventory_adjustment_payload(
+                adjust_account_id=str((cfg.inventory_adjustment_account_id or "")).strip(),
+                txn_date=txn_date,
+                private_note=build_private_note(row),
+                lines=lines,
+                doc_number=doc_number,
+            )
+
+            if dry_run:
+                print("[DRY-RUN] would post InventoryAdjustment payload=" + str(payload))
+                consolidated += 1
+            else:
+                assert token_mgr is not None
+                try:
+                    post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
+                    consolidated += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    if is_duplicate_doc_number_error(exc):
+                        print(f"[FAIL] base={base_name!r} duplicate DocNumber={doc_number}: {exc}")
+                    else:
+                        print(f"[FAIL] base={base_name!r} consolidation failed: {exc}")
+                    continue
+
+            # Cleanup step: inactivate now-zero pack variants (best-effort per base).
+            pack_ids_list = [p.strip() for p in str(row.get("pack_variant_item_ids") or "").split("|") if p.strip()]
+            cleanup_failed = False
+            if dry_run:
+                print(f"[DRY-RUN] would cleanup/inactivate pack variants: {pack_ids_list}")
+                cleaned_up += 1 if pack_ids_list else 0
+            else:
+                assert token_mgr is not None
+                for pid in pack_ids_list:
+                    try:
+                        live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, pid)
+                        qty = float(live.get("QtyOnHand", 0) or 0)
+                        if qty != 0:
+                            print(f"[SKIP] pack_variant_id={pid} qty_on_hand={qty} reason=nonzero_qty_on_hand")
+                            continue
+                        sync_token = str(live.get("SyncToken", "")).strip()
+                        payload_inactivate = build_inactivate_payload(
+                            item_id=pid,
+                            sync_token=sync_token,
+                            original_name=str(live.get("Name", "") or "").strip(),
+                        )
+                        _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
+                    except Exception as exc:  # noqa: BLE001
+                        cleanup_failed = True
+                        failed += 1
+                        partial_failures.append(f"base={base_name} cleanup_failed pack_id={pid}: {exc}")
+                        print(f"[FAIL] base={base_name!r} cleanup failed for pack_id={pid}: {exc}")
+                        break
+                if not cleanup_failed:
+                    cleaned_up += 1 if pack_ids_list else 0
+
+            if cleanup_failed:
+                print(f"[WARN] base={base_name!r} consolidation succeeded but cleanup failed (partial).")
+
+    finally:
+        if not dry_run:
+            if consolidated > 0 or cleaned_up > 0:
+                mark_qbo_snapshot_stale(cfg.company_key, reason="inventory_catalog_cleanup_applied")
+                print("[INFO] Marked cached QBO snapshot stale after catalog cleanup apply.")
+            if run_lock is not None:
+                run_lock.release()
+
+    print(
+        "Apply summary: "
+        f"attempted={attempted} consolidated={consolidated} cleaned_up={cleaned_up} "
+        f"skipped={skipped} failed={failed}"
+    )
+    if partial_failures:
+        for line in partial_failures[:10]:
+            print("  partial_failure: " + line)
+    return 0 if failed == 0 else 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = load_company_config(args.company)
     ensure_company_runtime_compatible(cfg)
+
+    if args.apply and args.dry_run:
+        raise SystemExit("Error: pass either --apply or --dry-run, not both.")
+    if args.apply:
+        if args.max_products is None:
+            raise SystemExit("Error: --apply requires --max-products.")
+        if int(args.max_products) <= 0:
+            raise SystemExit("Error: --max-products must be > 0.")
+        adjust_account_id = str(getattr(cfg, "inventory_adjustment_account_id", "") or "").strip()
+        if not adjust_account_id:
+            raise SystemExit(
+                "Error: qbo.inventory_adjustment_account_id is not configured; "
+                "apply mode refuses to post without an adjust account."
+            )
 
     report_path = Path(args.from_report).expanduser() if args.from_report else None
     stock_path = Path(args.stock_csv).expanduser() if args.stock_csv else None
@@ -285,7 +500,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     out_path = Path(args.output).expanduser() if args.output else _default_output_path(cfg.company_key)
     _write_csv(out_path, plan_df)
 
-    counts = plan_df["planned_action"].value_counts().to_dict()
+    counts = _plan_summary_counts(plan_df)
     print("=" * 68)
     print(f"Catalog cleanup plan: {cfg.display_name} ({cfg.company_key})")
     print(f"Rows planned: {len(plan_df)}")
@@ -303,7 +518,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"no_action: {int(counts['no_action'])}")
     print("=" * 68)
 
-    return 0
+    if not args.apply and not args.dry_run:
+        return 0
+
+    if qbo_item_rows is None or qbo_item_rows.empty:
+        raise SystemExit(
+            "QBO snapshot not found. Run inventory_sync with --auto-fetch-qbo first, or pass --qbo-csv."
+        )
+
+    txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
+    return _run_apply_for_existing_base_pack_variants(
+        cfg=cfg,
+        plan_df=plan_df,
+        qbo_item_rows=qbo_item_rows,
+        txn_date=txn_date,
+        max_products=int(args.max_products or 0),
+        dry_run=bool(args.dry_run),
+    )
 
 
 if __name__ == "__main__":
