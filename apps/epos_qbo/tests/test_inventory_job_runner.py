@@ -29,21 +29,17 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--auto-download", cmd)
         self.assertIn("--auto-fetch-qbo", cmd)
         self.assertIn("--qbo-force-refresh", cmd)
-        self.assertIn("--max-catalog-fixes", cmd)
-        self.assertIn("5", cmd)
-        self.assertIn("--max-quantity-adjustments", cmd)
-        self.assertIn("10", cmd)
+        self.assertNotIn("--max-catalog-fixes", cmd)
+        self.assertNotIn("--max-quantity-adjustments", cmd)
         self.assertNotIn("code_scripts.inventory_catalog_cleanup", flat)
         self.assertNotIn("code_scripts.inventory_sync --apply", flat)
 
-    def test_category_product_and_caps_become_cli_args(self):
+    def test_category_and_product_become_cli_args_without_caps(self):
         cmd = build_command(
             self._base_cleaned(
                 inventory_options={
                     "categories": ["ALCOHOLS & SPIRITS"],
                     "product_filter": "TROPHY",
-                    "max_catalog_fixes": 3,
-                    "max_quantity_adjustments": 7,
                 }
             )
         )
@@ -51,12 +47,22 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("ALCOHOLS & SPIRITS", cmd)
         self.assertIn("--product", cmd)
         self.assertIn("TROPHY", cmd)
-        self.assertIn("--max-catalog-fixes", cmd)
-        self.assertIn("3", cmd)
-        self.assertIn("--max-quantity-adjustments", cmd)
-        self.assertIn("7", cmd)
+        self.assertNotIn("--max-catalog-fixes", cmd)
+        self.assertNotIn("--max-quantity-adjustments", cmd)
 
-    def test_product_filter_without_caps_uses_single_product_limits(self):
+    def test_explicit_caps_become_cli_args_for_internal_callers(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "max_catalog_fixes": 3,
+                    "max_quantity_adjustments": 7,
+                }
+            )
+        )
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "3")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "7")
+
+    def test_product_filter_without_caps_omits_limit_flags(self):
         cmd = build_command(
             self._base_cleaned(
                 inventory_options={
@@ -66,8 +72,8 @@ class InventoryPipelineBuildCommandTests(TestCase):
         )
         self.assertIn("--product", cmd)
         self.assertIn("TROPHY", cmd)
-        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "1")
-        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "1")
+        self.assertNotIn("--max-catalog-fixes", cmd)
+        self.assertNotIn("--max-quantity-adjustments", cmd)
 
     def test_build_command_for_job_uses_pipeline_options(self):
         job = RunJob.objects.create(

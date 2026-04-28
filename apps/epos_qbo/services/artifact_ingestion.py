@@ -399,6 +399,7 @@ def ingest_inventory_pipeline_file(path: Path, run_job: RunJob | None = None) ->
         "already_correct": _safe_int(data.get("already_correct")),
         "catalog_fixes_applied": _safe_int(data.get("catalog_fixes_applied")),
         "quantity_updates_applied": _safe_int(data.get("quantity_updates_applied")),
+        "skipped_unsupported": _safe_int(data.get("skipped_unsupported")),
         "skipped_safely": _safe_int(data.get("skipped_safely")),
         "still_needs_review": _safe_int(data.get("still_needs_review")),
         "max_catalog_fixes": _safe_int(data.get("max_catalog_fixes")),

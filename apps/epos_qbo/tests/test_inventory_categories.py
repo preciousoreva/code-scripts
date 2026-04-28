@@ -166,56 +166,36 @@ class InventoryCategoryLoadingTests(TestCase):
 
 
 class InventoryTriggerFormTests(TestCase):
-    def test_without_product_filter_defaults_caps_to_batch_values(self):
+    def test_inventory_form_accepts_company_only(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
-                "max_catalog_fixes": "",
-                "max_quantity_adjustments": "",
             }
         )
         self.assertTrue(form.is_valid(), form.errors.as_text())
-        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 5)
-        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 10)
+        self.assertEqual(form.cleaned_data["category"], "")
+        self.assertEqual(form.cleaned_data["product_filter"], "")
 
-    def test_product_filter_defaults_blank_caps_to_one(self):
-        form = InventoryTriggerForm(
-            data={
-                "company_key": "company_a",
-                "product_filter": " Trophy ",
-                "max_catalog_fixes": "",
-                "max_quantity_adjustments": "",
-            }
-        )
-        self.assertTrue(form.is_valid(), form.errors.as_text())
-        self.assertEqual(form.cleaned_data["product_filter"], "Trophy")
-        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 1)
-        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 1)
-
-    def test_user_provided_caps_are_respected(self):
+    def test_inventory_form_strips_optional_filters(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
                 "category": " ALCOHOLS & SPIRITS ",
                 "product_filter": " Trophy ",
-                "max_catalog_fixes": "3",
-                "max_quantity_adjustments": "8",
             }
         )
         self.assertTrue(form.is_valid(), form.errors.as_text())
         self.assertEqual(form.cleaned_data["category"], "ALCOHOLS & SPIRITS")
         self.assertEqual(form.cleaned_data["product_filter"], "Trophy")
-        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 3)
-        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 8)
 
-    def test_zero_caps_are_rejected(self):
+    def test_inventory_form_ignores_dashboard_cap_fields(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
-                "max_catalog_fixes": "0",
-                "max_quantity_adjustments": "0",
+                "max_catalog_fixes": "3",
+                "max_quantity_adjustments": "8",
             }
         )
-        self.assertFalse(form.is_valid())
-        self.assertIn("max_catalog_fixes", form.errors)
-        self.assertIn("max_quantity_adjustments", form.errors)
+        self.assertTrue(form.is_valid(), form.errors.as_text())
+        self.assertNotIn("max_catalog_fixes", form.cleaned_data)
+        self.assertNotIn("max_quantity_adjustments", form.cleaned_data)

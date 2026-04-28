@@ -1838,8 +1838,6 @@ def trigger_inventory_run(request):
     product_filter = (cleaned.get("product_filter") or "").strip()
     if product_filter:
         inventory_options["product_filter"] = product_filter
-    inventory_options["max_catalog_fixes"] = int(cleaned.get("max_catalog_fixes"))
-    inventory_options["max_quantity_adjustments"] = int(cleaned.get("max_quantity_adjustments"))
 
     job = RunJob.objects.create(
         scope=RunJob.SCOPE_INVENTORY_PIPELINE,

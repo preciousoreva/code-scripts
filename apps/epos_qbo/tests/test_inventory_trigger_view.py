@@ -59,8 +59,6 @@ class InventoryTriggerViewTests(TestCase):
                     "company_key": "company_a",
                     "category": "Beverages",
                     "product_filter": "Widget",
-                    "max_catalog_fixes": "3",
-                    "max_quantity_adjustments": "8",
                 },
             )
         self.assertEqual(response.status_code, 302)
@@ -70,8 +68,8 @@ class InventoryTriggerViewTests(TestCase):
         self.assertNotIn("stock_csv", job.inventory_options_json)
         self.assertEqual(job.inventory_options_json.get("categories"), ["Beverages"])
         self.assertEqual(job.inventory_options_json.get("product_filter"), "Widget")
-        self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 3)
-        self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 8)
+        self.assertNotIn("max_catalog_fixes", job.inventory_options_json)
+        self.assertNotIn("max_quantity_adjustments", job.inventory_options_json)
 
     def test_inventory_scope_filters_are_optional(self):
         self.client.login(username="op", password="pw")
@@ -82,17 +80,14 @@ class InventoryTriggerViewTests(TestCase):
                 reverse("epos_qbo:run-trigger-inventory"),
                 {
                     "company_key": "company_a",
-                    "max_catalog_fixes": "",
-                    "max_quantity_adjustments": "",
                 },
             )
         self.assertEqual(response.status_code, 302)
         job = RunJob.objects.get()
         self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
-        self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 5)
-        self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 10)
+        self.assertEqual(job.inventory_options_json, {})
 
-    def test_product_filter_infers_single_product_caps(self):
+    def test_product_filter_stores_scope_without_caps(self):
         self.client.login(username="op", password="pw")
         with mock.patch(
             "apps.epos_qbo.views.dispatch_next_queued_job", return_value=(None, "queued")
@@ -102,15 +97,13 @@ class InventoryTriggerViewTests(TestCase):
                 {
                     "company_key": "company_a",
                     "product_filter": "Widget",
-                    "max_catalog_fixes": "",
-                    "max_quantity_adjustments": "",
                 },
             )
         self.assertEqual(response.status_code, 302)
         job = RunJob.objects.get()
         self.assertEqual(job.inventory_options_json.get("product_filter"), "Widget")
-        self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 1)
-        self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 1)
+        self.assertNotIn("max_catalog_fixes", job.inventory_options_json)
+        self.assertNotIn("max_quantity_adjustments", job.inventory_options_json)
 
     def test_runs_context_includes_inventory_categories_by_company(self):
         self.client.login(username="op", password="pw")
@@ -137,20 +130,14 @@ class InventoryTriggerViewTests(TestCase):
         self.assertIn(f'action="{reverse("epos_qbo:run-trigger-inventory")}"', html)
         self.assertIn("Sync Inventory", html)
         self.assertIn(
-            "Downloads EPOS stock, checks QuickBooks inventory, fixes safe pack-variant catalog issues, and syncs quantities.",
+            "Downloads EPOS stock, checks QuickBooks inventory, fixes supported pack-variant catalog issues, and syncs quantities.",
             html,
         )
-        self.assertIn("Catalog fixes limit", html)
-        self.assertIn("Quantity updates limit", html)
-        self.assertIn(
-            "These safety limits cap how many QuickBooks changes can happen in one run. Leave defaults unless you are intentionally running a larger batch.",
-            html,
-        )
-        self.assertIn(
-            "Catalog fixes clean up base item + pack variant issues before stock is synced.",
-            html,
-        )
-        self.assertIn("Quantity updates adjust QuickBooks stock counts to match EPOS.", html)
+        self.assertNotIn("Catalog fixes limit", html)
+        self.assertNotIn("Quantity updates limit", html)
+        self.assertNotIn("max_catalog_fixes", html)
+        self.assertNotIn("max_quantity_adjustments", html)
+        self.assertNotIn("These safety limits cap how many QuickBooks changes can happen", html)
         self.assertNotIn("Max catalog fixes per run", html)
         self.assertNotIn("Max quantity adjustments per run", html)
         self.assertNotIn("Catalog Cleanup", html)

@@ -71,7 +71,6 @@ UNSUPPORTED_CATALOG_ISSUE_TYPES = {
     "missing_from_qbo",
     "multiple_active_base_items",
 }
-PIPELINE_CATALOG_ISSUE_TYPES = SAFE_CATALOG_ISSUE_TYPES | UNSUPPORTED_CATALOG_ISSUE_TYPES
 
 
 @dataclass(frozen=True)
@@ -99,8 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qbo-export-path", default=None)
     parser.add_argument("--category", dest="categories", action="append", default=[])
     parser.add_argument("--product", dest="product_filter", default=None)
-    parser.add_argument("--max-catalog-fixes", type=int, default=5)
-    parser.add_argument("--max-quantity-adjustments", type=int, default=10)
+    parser.add_argument("--max-catalog-fixes", type=int, default=None)
+    parser.add_argument("--max-quantity-adjustments", type=int, default=None)
     parser.add_argument("--max-qty-delta", type=float, default=None)
     parser.add_argument("--adjust-account-id", default=None)
     parser.add_argument("--txn-date", default=None)
@@ -118,9 +117,9 @@ def _now_utc_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _non_negative_int(value: int | None, *, default: int) -> int:
+def _optional_non_negative_int(value: int | None) -> int | None:
     if value is None:
-        return default
+        return None
     return max(0, int(value))
 
 
@@ -226,9 +225,8 @@ def _run_audit_phase(
 def _filter_catalog_plan_for_pipeline(plan_df: pd.DataFrame) -> pd.DataFrame:
     if plan_df.empty or "catalog_issue_type" not in plan_df.columns:
         return plan_df.copy()
-    return plan_df[
-        plan_df["catalog_issue_type"].astype(str).isin(PIPELINE_CATALOG_ISSUE_TYPES)
-    ].copy()
+    issue = plan_df["catalog_issue_type"].astype(str).str.strip()
+    return plan_df[(issue != "") & (issue != "exact_name_match") & (issue != "nan")].copy()
 
 
 def _catalog_counts(plan_df: pd.DataFrame) -> dict[str, int]:
@@ -254,7 +252,7 @@ def _apply_catalog_cleanup(
     plan_df: pd.DataFrame,
     qbo_item_rows: pd.DataFrame,
     txn_date: str,
-    max_catalog_fixes: int,
+    max_catalog_fixes: int | None,
     dry_run: bool,
 ) -> dict[str, Any]:
     action_plan = _filter_catalog_plan_for_pipeline(plan_df)
@@ -263,10 +261,12 @@ def _apply_catalog_cleanup(
     print(f"[INFO] Wrote catalog cleanup report: {catalog_report_path}")
 
     supported = _supported_catalog_rows(action_plan)
-    unsupported = action_plan[
-        action_plan["catalog_issue_type"].astype(str).isin(UNSUPPORTED_CATALOG_ISSUE_TYPES)
-    ].copy() if not action_plan.empty else action_plan.copy()
-    skipped_due_to_cap = max(0, len(supported) - int(max_catalog_fixes))
+    unsupported = (
+        action_plan.drop(index=supported.index).copy() if not action_plan.empty else action_plan.copy()
+    )
+    skipped_due_to_cap = 0
+    if max_catalog_fixes is not None:
+        skipped_due_to_cap = max(0, len(supported) - int(max_catalog_fixes))
 
     result = {
         "report_path": str(catalog_report_path),
@@ -278,19 +278,21 @@ def _apply_catalog_cleanup(
         "exit_code": 0,
     }
 
-    if supported.empty or max_catalog_fixes <= 0:
+    if supported.empty or (max_catalog_fixes is not None and max_catalog_fixes <= 0):
         if unsupported.empty:
             print("[INFO] No catalog cleanup rows require action.")
         else:
             print("[INFO] Catalog rows needing manual review were reported; none were applied.")
         return result
 
+    apply_limit = len(supported) if max_catalog_fixes is None else int(max_catalog_fixes)
+
     apply_result = _run_apply_for_existing_base_pack_variants(
         cfg=cfg,
         plan_df=action_plan,
         qbo_item_rows=qbo_item_rows,
         txn_date=txn_date,
-        max_products=int(max_catalog_fixes),
+        max_products=int(apply_limit),
         dry_run=bool(dry_run),
         return_stats=True,
     )
@@ -300,7 +302,7 @@ def _apply_catalog_cleanup(
         cleaned_up = int(apply_result.get("cleaned_up", 0))
     else:
         exit_code = int(apply_result)
-        consolidated = min(int(max_catalog_fixes), len(supported))
+        consolidated = min(int(apply_limit), len(supported))
         cleaned_up = consolidated
     result["exit_code"] = int(exit_code)
     if exit_code != 0:
@@ -317,7 +319,7 @@ def _apply_exact_match_quantity_adjustments(
     cfg,
     audit_df: pd.DataFrame,
     qbo_item_rows: pd.DataFrame,
-    max_quantity_adjustments: int,
+    max_quantity_adjustments: int | None,
     max_qty_delta: float | None,
     adjust_account_id: str | None,
     txn_date: str,
@@ -332,7 +334,7 @@ def _apply_exact_match_quantity_adjustments(
         "changed_qbo": False,
     }
 
-    if audit_df.empty or max_quantity_adjustments <= 0:
+    if audit_df.empty:
         return result
 
     candidates = audit_df[
@@ -343,8 +345,12 @@ def _apply_exact_match_quantity_adjustments(
         print("[INFO] No exact-match quantity adjustments required.")
         return result
 
-    result["skipped_due_to_cap"] = max(0, len(candidates) - int(max_quantity_adjustments))
-    candidates = candidates.head(int(max_quantity_adjustments)).copy()
+    if max_quantity_adjustments is not None:
+        if max_quantity_adjustments <= 0:
+            result["skipped_due_to_cap"] = int(len(candidates))
+            return result
+        result["skipped_due_to_cap"] = max(0, len(candidates) - int(max_quantity_adjustments))
+        candidates = candidates.head(int(max_quantity_adjustments)).copy()
 
     account_id = (adjust_account_id or "").strip() or str(
         getattr(cfg, "inventory_adjustment_account_id", "") or ""
@@ -450,6 +456,7 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
         "already_correct": payload.get("already_correct"),
         "catalog_fixes_applied": payload.get("catalog_fixes_applied"),
         "quantity_updates_applied": payload.get("quantity_updates_applied"),
+        "skipped_unsupported": payload.get("skipped_unsupported"),
         "skipped_safely": payload.get("skipped_safely"),
         "still_needs_review": payload.get("still_needs_review"),
         "summary_json": str(json_path),
@@ -469,19 +476,46 @@ def _final_counts(report: pd.DataFrame) -> dict[str, int]:
 
 
 def _format_final_summary(summary: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            f"Inventory sync finished for {summary['display_name']} ({summary['company_key']})",
-            f"Scope: {summary['scope'] or 'all products'}",
-            f"Products checked: {summary['products_checked']}",
-            f"Already correct: {summary['already_correct']}",
-            f"Catalog fixes applied: {summary['catalog_fixes_applied']}",
-            f"Quantity updates applied: {summary['quantity_updates_applied']}",
-            f"Skipped safely: {summary['skipped_safely']}",
-            f"Still needs review: {summary['still_needs_review']}",
-            f"Report path: {summary['summary_json']}",
-        ]
-    )
+    lines = [
+        f"Inventory sync finished for {summary['display_name']} ({summary['company_key']})",
+        f"Scope: {summary['scope'] or 'all products'}",
+        f"Products checked: {summary['products_checked']}",
+        f"Already correct: {summary['already_correct']}",
+        f"Catalog fixes applied: {summary['catalog_fixes_applied']}",
+        f"Quantity updates applied: {summary['quantity_updates_applied']}",
+        f"Skipped unsupported: {summary['skipped_unsupported']}",
+        f"Still needs review: {summary['still_needs_review']}",
+    ]
+    unsupported_line = _format_unsupported_breakdown(summary.get("unsupported_catalog_issues") or {})
+    if unsupported_line:
+        lines.append(f"Unsupported breakdown: {unsupported_line}")
+    if summary.get("max_catalog_fixes") is not None:
+        lines.append(f"Catalog fixes limit: {summary['max_catalog_fixes']}")
+    if summary.get("max_quantity_adjustments") is not None:
+        lines.append(f"Quantity updates limit: {summary['max_quantity_adjustments']}")
+    if summary.get("run_url"):
+        lines.append(f"View run: {summary['run_url']}")
+    lines.append(f"Report path: {summary['summary_json']}")
+    return "\n".join(lines)
+
+
+def _format_unsupported_breakdown(unsupported_counts: dict[str, Any]) -> str:
+    labels = {
+        "base_with_pack_variants": "Unsupported pack-variant action",
+        "only_pack_variant_exists": "Only pack variant exists",
+        "missing_from_qbo": "Missing from QuickBooks",
+        "multiple_active_base_items": "Multiple base items",
+    }
+    parts: list[str] = []
+    for key, raw_value in unsupported_counts.items():
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        parts.append(f"{labels.get(str(key), str(key))}: {value}")
+    return "; ".join(parts)
 
 
 def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
@@ -489,8 +523,8 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     cfg = load_company_config(args.company)
     ensure_company_runtime_compatible(cfg)
 
-    max_catalog_fixes = _non_negative_int(args.max_catalog_fixes, default=5)
-    max_quantity_adjustments = _non_negative_int(args.max_quantity_adjustments, default=10)
+    max_catalog_fixes = _optional_non_negative_int(args.max_catalog_fixes)
+    max_quantity_adjustments = _optional_non_negative_int(args.max_quantity_adjustments)
     categories = [str(c).strip() for c in list(args.categories or []) if str(c).strip()]
     product_filter = (args.product_filter or "").strip() or None
     txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
@@ -501,6 +535,14 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     scope_text = format_scope(category=categories, product=product_filter)
     if scope_text:
         print(f"Scope: {scope_text}")
+    print(
+        "Catalog fixes limit: "
+        + ("unlimited" if max_catalog_fixes is None else str(max_catalog_fixes))
+    )
+    print(
+        "Quantity updates limit: "
+        + ("unlimited" if max_quantity_adjustments is None else str(max_quantity_adjustments))
+    )
     print("=" * 68)
 
     stock_path = _resolve_stock_path(args, cfg)
@@ -606,6 +648,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "already_correct": int(counts.get("in_sync", 0)),
         "catalog_fixes_applied": int(catalog_result["applied"]),
         "quantity_updates_applied": int(quantity_result["posted"]),
+        "skipped_unsupported": int(unsupported_total),
         "skipped_safely": int(skipped_safely),
         "still_needs_review": int(still_needs_review),
         "final_status_counts": counts,
@@ -617,6 +660,9 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     run_job_id = os.environ.get("OIAT_RUN_JOB_ID", "").strip()
     if run_job_id:
         summary["run_job_id"] = run_job_id
+    run_url = os.environ.get("OIAT_RUN_URL", "").strip()
+    if run_url:
+        summary["run_url"] = run_url
     summary_json, summary_csv = _write_summary_reports(
         summary,
         output_dir=args.summary_output_dir,

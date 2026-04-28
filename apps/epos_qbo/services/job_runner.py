@@ -113,20 +113,18 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
             if value:
                 cmd.extend(["--category", value])
 
-    default_catalog_fixes = 1 if product_filter else 5
-    default_quantity_adjustments = 1 if product_filter else 10
     max_catalog_fixes = _positive_inventory_limit(
         opts.get("max_catalog_fixes"),
-        default_catalog_fixes,
         "max_catalog_fixes",
     )
     max_quantity_adjustments = _positive_inventory_limit(
         opts.get("max_quantity_adjustments"),
-        default_quantity_adjustments,
         "max_quantity_adjustments",
     )
-    cmd.extend(["--max-catalog-fixes", str(max_catalog_fixes)])
-    cmd.extend(["--max-quantity-adjustments", str(max_quantity_adjustments)])
+    if max_catalog_fixes is not None:
+        cmd.extend(["--max-catalog-fixes", str(max_catalog_fixes)])
+    if max_quantity_adjustments is not None:
+        cmd.extend(["--max-quantity-adjustments", str(max_quantity_adjustments)])
 
     if opts.get("max_qty_delta") is not None:
         cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
@@ -140,9 +138,9 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
     return [str(part) for part in cmd]
 
 
-def _positive_inventory_limit(value: object, default: int, option_name: str) -> int:
+def _positive_inventory_limit(value: object, option_name: str) -> int | None:
     if value is None or str(value).strip() == "":
-        return default
+        return None
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:

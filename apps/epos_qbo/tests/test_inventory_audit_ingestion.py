@@ -56,6 +56,7 @@ def _pipeline_payload(**overrides) -> dict:
         "already_correct": 1,
         "catalog_fixes_applied": 1,
         "quantity_updates_applied": 0,
+        "skipped_unsupported": 0,
         "skipped_safely": 0,
         "still_needs_review": 0,
         "max_catalog_fixes": 1,

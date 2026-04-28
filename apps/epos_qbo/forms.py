@@ -100,26 +100,11 @@ class InventoryTriggerForm(forms.Form):
         help_text="Optional EPOS category filter (exact match; case-insensitive).",
     )
     product_filter = forms.CharField(max_length=255, required=False)
-    max_catalog_fixes = forms.IntegerField(required=False, min_value=1)
-    max_quantity_adjustments = forms.IntegerField(required=False, min_value=1)
 
     def clean(self):
         cleaned = super().clean()
         cleaned["category"] = (cleaned.get("category") or "").strip()
         cleaned["product_filter"] = (cleaned.get("product_filter") or "").strip()
-        product_filter = cleaned["product_filter"]
-        default_catalog_fixes = 1 if product_filter else 5
-        default_quantity_adjustments = 1 if product_filter else 10
-        max_catalog_fixes = cleaned.get("max_catalog_fixes")
-        max_quantity_adjustments = cleaned.get("max_quantity_adjustments")
-        cleaned["max_catalog_fixes"] = (
-            default_catalog_fixes if max_catalog_fixes is None else int(max_catalog_fixes)
-        )
-        cleaned["max_quantity_adjustments"] = (
-            default_quantity_adjustments
-            if max_quantity_adjustments is None
-            else int(max_quantity_adjustments)
-        )
         return cleaned
 
 
