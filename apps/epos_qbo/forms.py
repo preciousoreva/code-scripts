@@ -91,31 +91,7 @@ class RunTriggerForm(forms.Form):
 
 
 class InventoryTriggerForm(forms.Form):
-    """Form for triggering an inventory audit (optionally with QBO adjustments).
-
-    The form is intentionally minimal — operator picks a company + category,
-    chooses Audit-only or Audit+Apply, and optionally narrows by product
-    name or tightens the match tolerance.
-
-    Things deliberately NOT exposed in the form:
-    - stock_csv: portal always auto-downloads a fresh EPOS Stock Report
-    - txn_date: defaults to today (CLI default) — apply runs date as 'now'
-    - adjust_account_id: belongs in per-company QBO config
-      (qbo.inventory_adjustment_account_id), set once and reused
-    - max_qty_delta: per-company safety cap from
-      qbo.inventory_max_qty_delta config
-    - allow_ambiguous: defaults to False; operator who needs it uses CLI
-    - qbo_csv: debug-time override only useful from the CLI
-    """
-
-    MODE_AUDIT_ONLY = "audit_only"
-    MODE_DRY_RUN = "dry_run"
-    MODE_APPLY = "apply"
-    MODE_CHOICES = [
-        (MODE_AUDIT_ONLY, "Audit only"),
-        (MODE_DRY_RUN, "Dry run"),
-        (MODE_APPLY, "Apply"),
-    ]
+    """Operator-facing form for the unified Inventory pipeline."""
 
     company_key = forms.SlugField(max_length=64)
     category = forms.CharField(
@@ -124,42 +100,19 @@ class InventoryTriggerForm(forms.Form):
         help_text="Optional EPOS category filter (exact match; case-insensitive).",
     )
     product_filter = forms.CharField(max_length=255, required=False)
-    mode = forms.ChoiceField(choices=MODE_CHOICES, required=False, initial=MODE_AUDIT_ONLY)
-    tolerance = forms.FloatField(required=False, min_value=0)
-    apply = forms.BooleanField(required=False, widget=forms.HiddenInput)
-    dry_run = forms.BooleanField(required=False, widget=forms.HiddenInput)
-    max_adjustments = forms.IntegerField(required=False, min_value=1)
+    max_catalog_fixes = forms.IntegerField(required=False, min_value=0, initial=5)
+    max_quantity_adjustments = forms.IntegerField(required=False, min_value=0, initial=10)
 
     def clean(self):
         cleaned = super().clean()
-        mode = cleaned.get("mode") or self.MODE_AUDIT_ONLY
-        legacy_apply = bool(cleaned.get("apply"))
-        legacy_dry_run = bool(cleaned.get("dry_run"))
-        if legacy_apply and legacy_dry_run:
-            self.add_error("mode", "Pick apply or dry-run, not both.")
-        if legacy_apply and mode not in (self.MODE_AUDIT_ONLY, self.MODE_APPLY):
-            self.add_error("mode", "Pick apply or dry-run, not both.")
-        if legacy_dry_run and mode not in (self.MODE_AUDIT_ONLY, self.MODE_DRY_RUN):
-            self.add_error("mode", "Pick apply or dry-run, not both.")
-
-        if legacy_apply:
-            mode = self.MODE_APPLY
-        elif legacy_dry_run:
-            mode = self.MODE_DRY_RUN
-
-        category = (cleaned.get("category") or "").strip()
-        product_filter = (cleaned.get("product_filter") or "").strip()
-        cleaned["mode"] = mode
-        cleaned["category"] = category
-        cleaned["product_filter"] = product_filter
-        cleaned["apply"] = mode == self.MODE_APPLY
-        cleaned["dry_run"] = mode == self.MODE_DRY_RUN
-
-        if mode == self.MODE_APPLY:
-            if not cleaned.get("max_adjustments"):
-                self.add_error("max_adjustments", "Max adjustments is required before posting inventory adjustments.")
-            if not category and not product_filter:
-                self.add_error("category", "Pick a category or product filter before posting inventory adjustments.")
+        cleaned["category"] = (cleaned.get("category") or "").strip()
+        cleaned["product_filter"] = (cleaned.get("product_filter") or "").strip()
+        max_catalog_fixes = cleaned.get("max_catalog_fixes")
+        max_quantity_adjustments = cleaned.get("max_quantity_adjustments")
+        cleaned["max_catalog_fixes"] = 5 if max_catalog_fixes is None else int(max_catalog_fixes)
+        cleaned["max_quantity_adjustments"] = (
+            10 if max_quantity_adjustments is None else int(max_quantity_adjustments)
+        )
         return cleaned
 
 

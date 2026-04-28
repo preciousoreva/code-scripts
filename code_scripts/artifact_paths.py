@@ -36,3 +36,7 @@ def qbo_pack_variant_consolidation_reports_dir(now: datetime | None = None) -> P
 
 def inventory_catalog_cleanup_reports_dir(now: datetime | None = None) -> Path:
     return OPS_REPORTS_DIR / "inventory_catalog_cleanup" / artifact_day_stamp(now)
+
+
+def inventory_pipeline_reports_dir(now: datetime | None = None) -> Path:
+    return OPS_REPORTS_DIR / "inventory_pipeline" / artifact_day_stamp(now)

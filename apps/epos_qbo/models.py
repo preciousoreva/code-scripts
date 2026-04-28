@@ -249,11 +249,13 @@ class CompanyConfigRecord(models.Model):
 class RunJob(models.Model):
     SCOPE_SINGLE = "single_company"
     SCOPE_ALL = "all_companies"
+    SCOPE_INVENTORY_PIPELINE = "inventory_pipeline"
     SCOPE_INVENTORY_SYNC = "inventory_sync"
     SCOPE_INVENTORY_CATALOG_CLEANUP = "inventory_catalog_cleanup"
     SCOPE_CHOICES = [
         (SCOPE_SINGLE, "Single Company"),
         (SCOPE_ALL, "All Companies"),
+        (SCOPE_INVENTORY_PIPELINE, "Inventory"),
         (SCOPE_INVENTORY_SYNC, "Inventory Sync"),
         (SCOPE_INVENTORY_CATALOG_CLEANUP, "Catalog Cleanup"),
     ]

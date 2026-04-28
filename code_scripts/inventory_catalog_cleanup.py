@@ -300,12 +300,25 @@ def _run_apply_for_existing_base_pack_variants(
     txn_date: str,
     max_products: int,
     dry_run: bool,
-) -> int:
+    return_stats: bool = False,
+) -> int | dict[str, int]:
     """
     Apply-mode runner: only supports planned_action=consolidate_existing_base_pack_variants.
     """
     attempted = consolidated = cleaned_up = skipped = failed = 0
     partial_failures: list[str] = []
+
+    def _result(exit_code: int) -> int | dict[str, int]:
+        if return_stats:
+            return {
+                "exit_code": int(exit_code),
+                "attempted": int(attempted),
+                "consolidated": int(consolidated),
+                "cleaned_up": int(cleaned_up),
+                "skipped": int(skipped),
+                "failed": int(failed),
+            }
+        return int(exit_code)
 
     # Enforce exact scope: only existing-base consolidation.
     supported = plan_df[plan_df["planned_action"] == "consolidate_existing_base_pack_variants"].copy()
@@ -331,7 +344,7 @@ def _run_apply_for_existing_base_pack_variants(
     if eligible.empty:
         print("[INFO] No eligible rows to apply for existing-base pack consolidation.")
         print(f"Apply summary: attempted={attempted} consolidated={consolidated} cleaned_up={cleaned_up} skipped={skipped} failed={failed}")
-        return 0
+        return _result(0)
 
     capped = eligible.head(int(max_products)).copy()
     skipped_due_to_cap = max(0, len(eligible) - len(capped))
@@ -350,7 +363,7 @@ def _run_apply_for_existing_base_pack_variants(
         lock_result = run_lock.acquire()
         if not lock_result.acquired:
             print(f"Error: another pipeline run is active ({lock_result.reason}); refusing to --apply.", flush=True)
-            return 2
+            return _result(2)
 
     try:
         # Build consolidation plan rows from the live QBO snapshot for *only* the selected bases,
@@ -463,7 +476,7 @@ def _run_apply_for_existing_base_pack_variants(
     if partial_failures:
         for line in partial_failures[:10]:
             print("  partial_failure: " + line)
-    return 0 if failed == 0 else 1
+    return _result(0 if failed == 0 else 1)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -592,4 +605,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

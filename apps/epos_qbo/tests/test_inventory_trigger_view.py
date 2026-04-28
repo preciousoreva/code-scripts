@@ -58,22 +58,21 @@ class InventoryTriggerViewTests(TestCase):
                     "company_key": "company_a",
                     "category": "Beverages",
                     "product_filter": "Widget",
-                    "tolerance": "0.0",
-                    "mode": "dry_run",
-                    "max_adjustments": "3",
+                    "max_catalog_fixes": "3",
+                    "max_quantity_adjustments": "8",
                 },
             )
         self.assertEqual(response.status_code, 302)
         job = RunJob.objects.get()
-        self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_SYNC)
+        self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
         self.assertEqual(job.company_key, "company_a")
-        self.assertTrue(job.inventory_options_json.get("dry_run"))
         self.assertNotIn("stock_csv", job.inventory_options_json)
         self.assertEqual(job.inventory_options_json.get("categories"), ["Beverages"])
         self.assertEqual(job.inventory_options_json.get("product_filter"), "Widget")
-        self.assertEqual(job.inventory_options_json.get("max_adjustments"), 3)
+        self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 3)
+        self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 8)
 
-    def test_form_rejects_apply_without_scope(self):
+    def test_inventory_scope_filters_are_optional(self):
         self.client.login(username="op", password="pw")
         with mock.patch(
             "apps.epos_qbo.views.dispatch_next_queued_job", return_value=(None, "queued")
@@ -82,12 +81,13 @@ class InventoryTriggerViewTests(TestCase):
                 reverse("epos_qbo:run-trigger-inventory"),
                 {
                     "company_key": "company_a",
-                    "mode": "apply",
-                    "max_adjustments": "3",
                 },
             )
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(RunJob.objects.count(), 0)
+        job = RunJob.objects.get()
+        self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
+        self.assertEqual(job.inventory_options_json.get("max_catalog_fixes"), 5)
+        self.assertEqual(job.inventory_options_json.get("max_quantity_adjustments"), 10)
 
     def test_runs_context_includes_inventory_categories_by_company(self):
         self.client.login(username="op", password="pw")
@@ -102,6 +102,19 @@ class InventoryTriggerViewTests(TestCase):
             response.context["categories_by_company"],
             {"company_a": ["ALCOHOLS & SPIRITS"]},
         )
+
+    def test_runs_page_shows_simple_inventory_workflow(self):
+        self.client.login(username="op", password="pw")
+        response = self.client.get(reverse("epos_qbo:runs"))
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn(">Sales", html)
+        self.assertIn(">Inventory", html)
+        self.assertIn("Sync Inventory", html)
+        self.assertIn("Max catalog fixes per run", html)
+        self.assertIn("Max quantity adjustments per run", html)
+        self.assertNotIn("Catalog Cleanup", html)
+        self.assertNotIn("Inventory Audit", html)
 
 
 class CatalogCleanupTriggerViewTests(TestCase):

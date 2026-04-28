@@ -54,6 +54,9 @@ def build_command(cleaned: dict) -> list[str]:
     if scope == RunJob.SCOPE_INVENTORY_SYNC:
         return _build_inventory_command(python_exe, cleaned)
 
+    if scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return _build_inventory_pipeline_command(python_exe, cleaned)
+
     if scope == RunJob.SCOPE_INVENTORY_CATALOG_CLEANUP:
         return _build_inventory_catalog_cleanup_command(python_exe, cleaned)
 
@@ -72,6 +75,63 @@ def build_command(cleaned: dict) -> list[str]:
         cmd.extend(["--from-date", cleaned["from_date"].strftime("%Y-%m-%d"), "--to-date", cleaned["to_date"].strftime("%Y-%m-%d")])
         if cleaned.get("skip_download"):
             cmd.append("--skip-download")
+
+    return [str(part) for part in cmd]
+
+
+def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[str]:
+    """Build the operator-facing unified inventory pipeline command."""
+    opts = cleaned.get("inventory_options") or {}
+    company = cleaned["company_key"]
+    if not company:
+        raise ValueError("inventory_pipeline requires company_key")
+
+    cmd: list[str] = [
+        python_exe,
+        "-m",
+        "code_scripts.inventory_pipeline",
+        "--company",
+        str(company),
+    ]
+    stock_csv = (opts.get("stock_csv") or "").strip()
+    if stock_csv:
+        cmd.extend(["--stock-csv", stock_csv])
+    else:
+        cmd.append("--auto-download")
+
+    if opts.get("qbo_csv"):
+        cmd.extend(["--qbo-csv", str(opts["qbo_csv"])])
+    else:
+        cmd.extend(["--auto-fetch-qbo", "--qbo-force-refresh"])
+
+    if opts.get("product_filter"):
+        cmd.extend(["--product", str(opts["product_filter"])])
+    categories = opts.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    if isinstance(categories, list):
+        for category in categories:
+            value = str(category or "").strip()
+            if value:
+                cmd.extend(["--category", value])
+
+    max_catalog_fixes = opts.get("max_catalog_fixes")
+    max_quantity_adjustments = opts.get("max_quantity_adjustments")
+    if max_catalog_fixes is None:
+        max_catalog_fixes = 5
+    if max_quantity_adjustments is None:
+        max_quantity_adjustments = 10
+    cmd.extend(["--max-catalog-fixes", str(int(max_catalog_fixes))])
+    cmd.extend(["--max-quantity-adjustments", str(int(max_quantity_adjustments))])
+
+    if opts.get("max_qty_delta") is not None:
+        cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
+    if opts.get("adjust_account_id"):
+        cmd.extend(["--adjust-account-id", str(opts["adjust_account_id"])])
+    if opts.get("txn_date"):
+        cmd.extend(["--txn-date", str(opts["txn_date"])])
+    if opts.get("dry_run"):
+        cmd.append("--dry-run")
 
     return [str(part) for part in cmd]
 

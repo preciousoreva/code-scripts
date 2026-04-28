@@ -14,25 +14,20 @@
 
     {% if perms.epos_qbo.can_trigger_runs %}
     {% comment %}
-    Tabbed trigger panel — keeps two distinct workflows (sales sync vs inventory
-    audit) visually separated so operators don't accidentally pick the wrong form.
+    Tabbed trigger panel — keeps the two operator workflows visually separated
+    without exposing low-level inventory remediation tools as separate actions.
     {% endcomment %}
     <div x-data="{ tab: 'sales' }">
         <div role="tablist" aria-label="Run trigger" class="flex border-b border-slate-200 dark:border-slate-700 mb-4">
             <button type="button" role="tab" :aria-selected="tab === 'sales'" @click="tab = 'sales'"
                 :class="tab === 'sales' ? 'border-blue-600 text-blue-600 dark:text-blue-400 dark:border-blue-400' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'"
                 class="px-4 py-2 -mb-px border-b-2 text-sm font-medium transition-colors">
-                Sales Sync
+                Sales
             </button>
             <button type="button" role="tab" :aria-selected="tab === 'inventory'" @click="tab = 'inventory'"
                 :class="tab === 'inventory' ? 'border-blue-600 text-blue-600 dark:text-blue-400 dark:border-blue-400' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'"
                 class="px-4 py-2 -mb-px border-b-2 text-sm font-medium transition-colors">
-                Inventory Audit
-            </button>
-            <button type="button" role="tab" :aria-selected="tab === 'catalog'" @click="tab = 'catalog'"
-                :class="tab === 'catalog' ? 'border-blue-600 text-blue-600 dark:text-blue-400 dark:border-blue-400' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'"
-                class="px-4 py-2 -mb-px border-b-2 text-sm font-medium transition-colors">
-                Catalog Cleanup
+                Inventory
             </button>
         </div>
 
@@ -123,10 +118,10 @@
     </section>
 
     <section x-show="tab === 'inventory'" x-cloak class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm"
-             x-data="inventoryAuditForm()">
-        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory Audit</h2>
+             x-data="inventoryForm()">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Downloads a fresh EPOS Stock Report and compares it to QBO Inventory QtyOnHand.
+            Downloads EPOS stock, compares with QBO, fixes safe catalog issues, and syncs quantities.
         </p>
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
             {% csrf_token %}
@@ -159,109 +154,24 @@
                 </label>
             </div>
 
-            <fieldset class="space-y-2">
-                <legend class="text-xs text-slate-600 dark:text-slate-400">Mode</legend>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
-                        <input type="radio" name="mode" value="audit_only" x-model="mode">
-                        <span>Audit only</span>
+            <details class="border border-slate-200 dark:border-slate-600 rounded-lg p-3">
+                <summary class="cursor-pointer text-sm font-medium text-slate-700 dark:text-slate-300 select-none">Advanced</summary>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                    <label class="text-xs text-slate-600 dark:text-slate-400">
+                        Max catalog fixes per run
+                        <input type="number" min="0" name="max_catalog_fixes" value="5"
+                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                     </label>
-                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
-                        <input type="radio" name="mode" value="dry_run" x-model="mode">
-                        <span>Dry-run</span>
-                    </label>
-                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
-                        <input type="radio" name="mode" value="apply" x-model="mode">
-                        <span>Apply</span>
+                    <label class="text-xs text-slate-600 dark:text-slate-400">
+                        Max quantity adjustments per run
+                        <input type="number" min="0" name="max_quantity_adjustments" value="10"
+                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                     </label>
                 </div>
-                <p class="text-[11px] text-slate-500 dark:text-slate-400" x-text="helperText"></p>
-            </fieldset>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Tolerance
-                    <input type="number" step="any" min="0" name="tolerance" value="0"
-                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                </label>
-                <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Max adjustments
-                    <input type="number" min="1" name="max_adjustments" :required="mode === 'apply'"
-                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                </label>
-            </div>
+            </details>
 
             <div class="flex items-center justify-end">
-                <button type="submit" class="btn btn-primary" x-text="ctaText">Queue inventory audit</button>
-            </div>
-        </form>
-    </section>
-
-    <section x-show="tab === 'catalog'" x-cloak class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm"
-             x-data="catalogCleanupForm()">
-        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Catalog Cleanup</h2>
-        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Resolves existing base item + pack variant cases only. It does not create new QBO items yet.
-        </p>
-        <form method="post" action="{% url 'epos_qbo:run-trigger-catalog-cleanup' %}" class="space-y-4">
-            {% csrf_token %}
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Company
-                    <select name="company_key" required x-model="companyKey" @change="category = ''" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                        <option value="">Select company</option>
-                        {% for company in companies %}
-                        <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
-                        {% endfor %}
-                    </select>
-                </label>
-                <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Category
-                    <select name="category" x-model="category" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 disabled:opacity-60">
-                        <option value="">All categories</option>
-                        <template x-for="c in availableCategories" :key="c">
-                            <option :value="c" x-text="c"></option>
-                        </template>
-                    </select>
-                    <span x-show="companyKey && availableCategories.length === 0" x-cloak class="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
-                        No saved category list found for this company.
-                    </span>
-                </label>
-                <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Product filter
-                    <input type="text" name="product_filter"
-                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                </label>
-            </div>
-
-            <fieldset class="space-y-2">
-                <legend class="text-xs text-slate-600 dark:text-slate-400">Mode</legend>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
-                        <input type="radio" name="mode" value="plan_only" x-model="mode">
-                        <span>Plan only</span>
-                    </label>
-                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
-                        <input type="radio" name="mode" value="preview" x-model="mode">
-                        <span>Preview cleanup</span>
-                    </label>
-                    <label class="border border-slate-200 dark:border-slate-600 rounded-md px-3 py-2 text-sm text-slate-700 dark:text-slate-200 flex items-start gap-2">
-                        <input type="radio" name="mode" value="apply" x-model="mode">
-                        <span>Apply cleanup</span>
-                    </label>
-                </div>
-                <p class="text-[11px] text-slate-500 dark:text-slate-400" x-text="helperText"></p>
-            </fieldset>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <label class="text-xs text-slate-600 dark:text-slate-400">
-                    Max products
-                    <input type="number" min="1" name="max_products" :required="mode !== 'plan_only'"
-                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
-                </label>
-                <div class="flex items-end justify-end">
-                    <button type="submit" class="btn btn-primary w-full justify-center" x-text="ctaText"></button>
-                </div>
+                <button type="submit" class="btn btn-primary">Sync Inventory</button>
             </div>
         </form>
     </section>
@@ -355,60 +265,16 @@
         };
     }
 
-    function inventoryAuditForm() {
+    function inventoryForm() {
         const dataEl = document.getElementById("inventory-categories-by-company");
         return {
             companyKey: "",
             category: "",
-            mode: "audit_only",
             categoriesByCompany: dataEl ? JSON.parse(dataEl.textContent) : {},
             get availableCategories() {
                 if (!this.companyKey) return [];
                 const list = this.categoriesByCompany[this.companyKey];
                 return Array.isArray(list) ? list : [];
-            },
-            get ctaText() {
-                if (this.mode === "apply") return "Post inventory adjustments";
-                if (this.mode === "dry_run") return "Preview inventory adjustments";
-                return "Queue inventory audit";
-            },
-            get helperText() {
-                if (this.mode === "apply") {
-                    return "Posts QBO InventoryAdjustment transactions using the company-configured adjustment account and safety caps.";
-                }
-                if (this.mode === "dry_run") {
-                    return "Builds the adjustment payloads for review without posting to QBO.";
-                }
-                return "Downloads stock, refreshes the QBO snapshot, and writes an inventory audit report.";
-            },
-        };
-    }
-
-    function catalogCleanupForm() {
-        const dataEl = document.getElementById("inventory-categories-by-company");
-        return {
-            companyKey: "",
-            category: "",
-            mode: "plan_only",
-            categoriesByCompany: dataEl ? JSON.parse(dataEl.textContent) : {},
-            get availableCategories() {
-                if (!this.companyKey) return [];
-                const list = this.categoriesByCompany[this.companyKey];
-                return Array.isArray(list) ? list : [];
-            },
-            get ctaText() {
-                if (this.mode === "apply") return "Apply catalog cleanup";
-                if (this.mode === "preview") return "Preview catalog cleanup";
-                return "Plan catalog cleanup";
-            },
-            get helperText() {
-                if (this.mode === "apply") {
-                    return "Applies cleanup in QBO (existing base + pack variants only) and marks the cached QBO snapshot stale.";
-                }
-                if (this.mode === "preview") {
-                    return "Previews the cleanup plan without posting to QBO.";
-                }
-                return "Plans catalog cleanup actions and writes a report (no QBO changes).";
             },
         };
     }

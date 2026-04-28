@@ -1813,7 +1813,7 @@ def trigger_run(request):
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_POST
 def trigger_inventory_run(request):
-    """Queue an inventory audit (optionally with QBO inventory adjustments)."""
+    """Queue the unified inventory sync pipeline."""
     form = InventoryTriggerForm(request.POST)
     if not form.is_valid():
         messages.error(request, f"Invalid inventory trigger payload: {form.errors.get_json_data()}")
@@ -1822,27 +1822,21 @@ def trigger_inventory_run(request):
     cleaned = form.cleaned_data
     company_key = (cleaned.get("company_key") or "").strip()
     if not CompanyConfigRecord.objects.filter(company_key=company_key).exists():
-        messages.error(request, "Unknown company key for inventory audit.")
+        messages.error(request, "Unknown company key for inventory.")
         return redirect("epos_qbo:runs")
 
     inventory_options: dict = {}
     category = (cleaned.get("category") or "").strip()
     if category:
         inventory_options["categories"] = [category]
-    for key in (
-        "product_filter",
-        "tolerance",
-        "apply",
-        "dry_run",
-        "max_adjustments",
-    ):
-        value = cleaned.get(key)
-        if value in (None, "", False):
-            continue
-        inventory_options[key] = value
+    product_filter = (cleaned.get("product_filter") or "").strip()
+    if product_filter:
+        inventory_options["product_filter"] = product_filter
+    inventory_options["max_catalog_fixes"] = int(cleaned.get("max_catalog_fixes"))
+    inventory_options["max_quantity_adjustments"] = int(cleaned.get("max_quantity_adjustments"))
 
     job = RunJob.objects.create(
-        scope=RunJob.SCOPE_INVENTORY_SYNC,
+        scope=RunJob.SCOPE_INVENTORY_PIPELINE,
         company_key=company_key,
         inventory_options_json=inventory_options,
         requested_by=request.user,
@@ -1852,10 +1846,10 @@ def trigger_inventory_run(request):
 
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Inventory audit started: {job.display_label}")
+        messages.success(request, f"Inventory sync started: {job.display_label}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.info(request, f"Inventory audit queued: {job.display_label}. It will start automatically.")
+    messages.info(request, f"Inventory sync queued: {job.display_label}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 

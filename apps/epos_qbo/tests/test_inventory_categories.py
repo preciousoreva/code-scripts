@@ -166,44 +166,36 @@ class InventoryCategoryLoadingTests(TestCase):
 
 
 class InventoryTriggerFormTests(TestCase):
-    def test_audit_mode_is_default(self):
+    def test_pipeline_caps_default(self):
         form = InventoryTriggerForm(data={"company_key": "company_a"})
         self.assertTrue(form.is_valid(), form.errors.as_text())
-        self.assertFalse(form.cleaned_data["apply"])
-        self.assertFalse(form.cleaned_data["dry_run"])
+        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 5)
+        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 10)
 
-    def test_dry_run_mode_sets_dry_run_only(self):
-        form = InventoryTriggerForm(data={"company_key": "company_a", "mode": "dry_run"})
-        self.assertTrue(form.is_valid(), form.errors.as_text())
-        self.assertFalse(form.cleaned_data["apply"])
-        self.assertTrue(form.cleaned_data["dry_run"])
-
-    def test_apply_requires_max_adjustments_and_scope(self):
-        form = InventoryTriggerForm(data={"company_key": "company_a", "mode": "apply"})
-        self.assertFalse(form.is_valid())
-        self.assertIn("max_adjustments", form.errors)
-        self.assertIn("category", form.errors)
-
-    def test_apply_accepts_category_scope_and_cap(self):
+    def test_pipeline_accepts_optional_scope_and_caps(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
-                "mode": "apply",
-                "category": "ALCOHOLS & SPIRITS",
-                "max_adjustments": "3",
+                "category": " ALCOHOLS & SPIRITS ",
+                "product_filter": " Trophy ",
+                "max_catalog_fixes": "3",
+                "max_quantity_adjustments": "8",
             }
         )
         self.assertTrue(form.is_valid(), form.errors.as_text())
-        self.assertTrue(form.cleaned_data["apply"])
-        self.assertFalse(form.cleaned_data["dry_run"])
+        self.assertEqual(form.cleaned_data["category"], "ALCOHOLS & SPIRITS")
+        self.assertEqual(form.cleaned_data["product_filter"], "Trophy")
+        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 3)
+        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 8)
 
-    def test_legacy_apply_and_dry_run_flags_conflict(self):
+    def test_zero_caps_are_allowed(self):
         form = InventoryTriggerForm(
             data={
                 "company_key": "company_a",
-                "apply": "on",
-                "dry_run": "on",
+                "max_catalog_fixes": "0",
+                "max_quantity_adjustments": "0",
             }
         )
-        self.assertFalse(form.is_valid())
-        self.assertIn("mode", form.errors)
+        self.assertTrue(form.is_valid(), form.errors.as_text())
+        self.assertEqual(form.cleaned_data["max_catalog_fixes"], 0)
+        self.assertEqual(form.cleaned_data["max_quantity_adjustments"], 0)

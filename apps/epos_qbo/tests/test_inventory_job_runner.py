@@ -8,6 +8,71 @@ from apps.epos_qbo.models import RunJob
 from apps.epos_qbo.services.job_runner import build_command, build_command_for_job
 
 
+class InventoryPipelineBuildCommandTests(TestCase):
+    def _base_cleaned(self, **overrides) -> dict:
+        cleaned = {
+            "scope": RunJob.SCOPE_INVENTORY_PIPELINE,
+            "company_key": "company_a",
+            "date_mode": "yesterday",
+            "inventory_options": {},
+        }
+        cleaned.update(overrides)
+        return cleaned
+
+    def test_minimum_required_args_emits_unified_pipeline(self):
+        cmd = build_command(self._base_cleaned())
+        flat = " ".join(cmd)
+        self.assertIn("-m", cmd)
+        self.assertIn("code_scripts.inventory_pipeline", cmd)
+        self.assertIn("--company", cmd)
+        self.assertIn("company_a", cmd)
+        self.assertIn("--auto-download", cmd)
+        self.assertIn("--auto-fetch-qbo", cmd)
+        self.assertIn("--qbo-force-refresh", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("5", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("10", cmd)
+        self.assertNotIn("code_scripts.inventory_catalog_cleanup", flat)
+        self.assertNotIn("code_scripts.inventory_sync --apply", flat)
+
+    def test_category_product_and_caps_become_cli_args(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "categories": ["ALCOHOLS & SPIRITS"],
+                    "product_filter": "TROPHY",
+                    "max_catalog_fixes": 3,
+                    "max_quantity_adjustments": 7,
+                }
+            )
+        )
+        self.assertIn("--category", cmd)
+        self.assertIn("ALCOHOLS & SPIRITS", cmd)
+        self.assertIn("--product", cmd)
+        self.assertIn("TROPHY", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("3", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("7", cmd)
+
+    def test_build_command_for_job_uses_pipeline_options(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "max_catalog_fixes": 2,
+                "max_quantity_adjustments": 4,
+            },
+        )
+        cmd = build_command_for_job(job)
+        self.assertIn("code_scripts.inventory_pipeline", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("2", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("4", cmd)
+
+
 class InventoryBuildCommandTests(TestCase):
     def _base_cleaned(self, **overrides) -> dict:
         cleaned = {
