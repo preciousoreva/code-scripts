@@ -387,6 +387,7 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
             return {"Id": item_id, "Name": f"X*6", "SyncToken": "0", "QtyOnHand": 0}
 
         import tempfile
+        buf = io.StringIO()
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
              mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
@@ -401,7 +402,7 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
              mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
              mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale") as stale_mock, \
              mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
-             redirect_stdout(io.StringIO()):
+             redirect_stdout(buf):
             (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
             exit_code = inventory_catalog_cleanup.main([
                 "--company", "company_a",
@@ -417,6 +418,9 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         stale_mock.assert_called()
         verify_mock.assert_called_once()
         token_mock.assert_called_once()
+        out = buf.getvalue()
+        self.assertIn("[OK] Posted InventoryAdjustment", out)
+        self.assertIn("[OK] Inactivated pack_variant_id=", out)
 
     def test_snapshot_path_is_printed_when_loading_from_report(self):
         fake_cfg = mock.Mock(

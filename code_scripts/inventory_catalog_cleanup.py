@@ -385,8 +385,15 @@ def _run_apply_for_existing_base_pack_variants(
             else:
                 assert token_mgr is not None
                 try:
-                    post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
+                    resp = post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
                     consolidated += 1
+                    inv_id = ""
+                    try:
+                        inv_id = str(((resp or {}).get("InventoryAdjustment") or {}).get("Id") or "").strip()
+                    except Exception:  # noqa: BLE001
+                        inv_id = ""
+                    suffix = f"id={inv_id}" if inv_id else f"doc={doc_number}"
+                    print(f"[OK] Posted InventoryAdjustment {suffix} for base={base_name!r}")
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
                     if is_duplicate_doc_number_error(exc):
@@ -417,6 +424,8 @@ def _run_apply_for_existing_base_pack_variants(
                             original_name=str(live.get("Name", "") or "").strip(),
                         )
                         _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
+                        nm = str(live.get("Name", "") or "").strip()
+                        print(f"[OK] Inactivated pack_variant_id={pid} {nm!r}")
                     except Exception as exc:  # noqa: BLE001
                         cleanup_failed = True
                         failed += 1
