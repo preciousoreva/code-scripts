@@ -1164,7 +1164,7 @@ def main(
             logging.info(f"Using provided target_date: {target_date}")
         date_range_str = target_date
     
-    pipeline_name = f"{config.display_name} -> QuickBooks Pipeline"
+    pipeline_name = f"{config.display_name} -> Sales Receipt Pipeline"
 
     logging.info(f"Starting {pipeline_name}...\n")
     

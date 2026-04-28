@@ -190,6 +190,75 @@ class InventoryAuditMetadataSidecarTest(unittest.TestCase):
         self.assertEqual(data["run_job_id"], "abc-123")
 
 
+class InventorySyncSlackNotificationTest(unittest.TestCase):
+    def _build_fake_config(self):
+        cfg = mock.Mock()
+        cfg.company_key = "company_a"
+        cfg.display_name = "ACME"
+        cfg.qbo_environment = "production"
+        cfg.realm_id = "REALM123"
+        cfg.inventory_max_qty_delta = None
+        cfg.inventory_adjustment_account_id = ""
+        cfg.slack_webhook_url = "https://hooks.slack.test/example"
+        return cfg
+
+    def _run_audit(self, extra_args=None, env_extra=None):
+        import tempfile
+        from pathlib import Path
+
+        fake_config = self._build_fake_config()
+        extra_args = list(extra_args or [])
+        env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
+        env.pop("OIAT_RUN_JOB_ID", None)
+        if env_extra:
+            env.update(env_extra)
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\nWidget,ALCOHOLS,5\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,Widget,Inventory,true,5\n",
+                encoding="utf-8",
+            )
+            report_path = tdp / "report.csv"
+
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 mock.patch.object(inventory_sync, "send_slack_success") as slack_mock, \
+                 redirect_stdout(io.StringIO()):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--output", str(report_path),
+                    *extra_args,
+                ])
+
+        return exit_code, slack_mock
+
+    def test_audit_only_cli_does_not_notify_slack_by_default(self):
+        exit_code, slack_mock = self._run_audit()
+        self.assertEqual(exit_code, 0)
+        slack_mock.assert_not_called()
+
+    def test_audit_only_notify_slack_flag_opts_in(self):
+        exit_code, slack_mock = self._run_audit(["--notify-slack"])
+        self.assertEqual(exit_code, 0)
+        slack_mock.assert_called_once()
+
+    def test_audit_only_job_context_notifies_slack(self):
+        exit_code, slack_mock = self._run_audit(env_extra={"OIAT_RUN_JOB_ID": "job-123"})
+        self.assertEqual(exit_code, 0)
+        slack_mock.assert_called_once()
+
+
 class InventorySyncAutoDownloadWiringTest(unittest.TestCase):
     """--auto-download wires inventory_sync to the EPOS StockReport Playwright
     downloader without requiring the operator to pre-fetch a CSV.

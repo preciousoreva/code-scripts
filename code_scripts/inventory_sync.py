@@ -45,6 +45,10 @@ from code_scripts.qbo_snapshot_cache import (
     get_qbo_snapshot_stale_reason,
     mark_qbo_snapshot_stale,
 )
+from code_scripts.inventory_notifications import (
+    format_inventory_audit_summary,
+    format_scope,
+)
 from code_scripts.run_lock import GlobalRunLock
 from code_scripts.slack_notify import send_slack_success
 from code_scripts.qbo_upload import TokenManager, _make_qbo_request, get_repo_root
@@ -241,6 +245,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print InventoryAdjustment JSON payloads for applicable rows but do not POST (no tokens required).",
+    )
+    p.add_argument(
+        "--notify-slack",
+        action="store_true",
+        help=(
+            "Send an audit-only Slack summary when a company webhook is configured. "
+            "Apply runs still notify automatically; normal CLI audits are quiet by default."
+        ),
     )
     p.add_argument(
         "--txn-date",
@@ -732,6 +744,15 @@ def _write_audit_metadata(
     return meta_path
 
 
+def _should_notify_audit_only(args: argparse.Namespace) -> bool:
+    """Keep exploratory CLI audits quiet unless explicitly opted in.
+
+    Portal/job-triggered audits set OIAT_RUN_JOB_ID in the subprocess
+    environment, so those runs can still emit the operational summary.
+    """
+    return bool(args.notify_slack or os.environ.get("OIAT_RUN_JOB_ID", "").strip())
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -843,6 +864,30 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if not args.apply and not args.dry_run:
         _emit_metadata({"mode": "audit_only", "posted": 0, "skipped": 0})
+        webhook = config.slack_webhook_url if _should_notify_audit_only(args) else None
+        if webhook:
+            try:
+                manual_review = int(counts.get("ambiguous_in_qbo", 0)) + int(counts.get("missing_in_qbo", 0))
+                send_slack_success(
+                    format_inventory_audit_summary(
+                        company_display_name=config.display_name,
+                        company_key=config.company_key,
+                        mode="audit",
+                        scope=format_scope(category=list(args.categories or []), product=args.product_filter),
+                        counts={
+                            "total_groups": len(report),
+                            "in_sync": int(counts.get("in_sync", 0)),
+                            "needs_adjustment": int(counts.get("needs_adjustment", 0)),
+                            "ambiguous_in_qbo": int(counts.get("ambiguous_in_qbo", 0)),
+                            "missing_in_qbo": int(counts.get("missing_in_qbo", 0)),
+                        },
+                        report_path=str(out_path),
+                        warnings_count=manual_review,
+                    ),
+                    webhook,
+                )
+            except Exception as notify_exc:  # noqa: BLE001 — never fail the run on notify
+                print(f"[WARN] Slack notify failed (ignored): {notify_exc}")
         return 0
 
     adjust_account_id = (args.adjust_account_id or "").strip() or (config.inventory_adjustment_account_id or "")
@@ -977,16 +1022,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                 apply_error = str(exc)
             webhook = config.slack_webhook_url
             if webhook:
-                send_slack_success(
-                    (
-                        f"❌ *Inventory sync failed* — {config.display_name} ({config.company_key})\n"
-                        f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
-                        f"• Posted before failure: {posted}  |  Skipped: {skipped}\n"
-                        f"• Error: {apply_error}\n"
-                        f"• Report: `{out_path}`"
-                    ),
-                    webhook,
-                )
+                try:
+                    send_slack_success(
+                        format_inventory_audit_summary(
+                            company_display_name=config.display_name,
+                            company_key=config.company_key,
+                            mode="apply",
+                            scope=format_scope(category=list(args.categories or []), product=args.product_filter),
+                            counts={"posted": posted, "skipped": skipped},
+                            report_path=str(out_path),
+                            error=apply_error,
+                        ),
+                        webhook,
+                    )
+                except Exception as notify_exc:  # noqa: BLE001 — never fail the run on notify
+                    print(f"[WARN] Slack notify failed (ignored): {notify_exc}")
         _emit_metadata({
             "mode": "dry_run" if args.dry_run else ("apply" if args.apply else "audit_only"),
             "posted": posted,
@@ -1007,16 +1057,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("[INFO] Marked cached QBO snapshot stale after posting adjustments.")
         webhook = config.slack_webhook_url
         if webhook:
-            send_slack_success(
-                (
-                    f"✅ *Inventory sync completed* — {config.display_name} ({config.company_key})\n"
-                    f"• Time: {datetime.now().isoformat(timespec='seconds')}\n"
-                    f"• Adjustments posted: {posted}  |  Skipped: {skipped}\n"
-                    f"• TxnDate: {txn_date}\n"
-                    f"• Report: `{out_path}`"
-                ),
-                webhook,
-            )
+            try:
+                send_slack_success(
+                    format_inventory_audit_summary(
+                        company_display_name=config.display_name,
+                        company_key=config.company_key,
+                        mode="dry-run" if args.dry_run else "apply",
+                        scope=format_scope(category=list(args.categories or []), product=args.product_filter),
+                        counts={"posted": posted, "skipped": skipped, "txn_date": txn_date},
+                        report_path=str(out_path),
+                    ),
+                    webhook,
+                )
+            except Exception as notify_exc:  # noqa: BLE001 — never fail the run on notify
+                print(f"[WARN] Slack notify failed (ignored): {notify_exc}")
 
     _emit_metadata({
         "mode": "dry_run" if args.dry_run else "apply",

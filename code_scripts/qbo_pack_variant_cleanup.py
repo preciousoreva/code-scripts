@@ -582,15 +582,22 @@ def _maybe_notify_slack(
     if not webhook:
         return
     try:
+        from code_scripts.inventory_notifications import format_pack_variant_apply_summary
         from code_scripts.slack_notify import send_slack_success
 
-        emoji = "✅" if failed == 0 else "⚠️"
         send_slack_success(
-            (
-                f"{emoji} *QBO pack-variant cleanup* — {config.display_name} ({config.company_key})\n"
-                f"• Time: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
-                f"• Inactivated: {succeeded}  |  Failed: {failed}  |  Skipped (cap): {skipped}\n"
-                f"• Report: `{report_path}`"
+            format_pack_variant_apply_summary(
+                kind="pack_variant_cleanup",
+                company_display_name=config.display_name,
+                company_key=config.company_key,
+                mode="apply",
+                counts={
+                    "attempted": attempted,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "skipped_due_to_cap": skipped,
+                },
+                report_path=str(report_path),
             ),
             webhook,
         )

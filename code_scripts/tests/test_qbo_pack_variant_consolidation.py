@@ -12,6 +12,7 @@ from code_scripts.qbo_pack_variant_consolidation import (
     build_doc_number,
     build_lines_from_plan_row,
     build_private_note,
+    is_duplicate_doc_number_error,
     write_report,
     _classify_for_apply,
     _REPORT_FIELDS,
@@ -307,6 +308,20 @@ class TrophyPayloadTest(unittest.TestCase):
         self.assertIn("EPOS single-unit target: 336", note)
         self.assertIn("pack item ids: 9365, 9366", note)
         self.assertIn("scope: category=ALCOHOLS & SPIRITS", note)
+
+
+class DuplicateDocNumberDetectionTest(unittest.TestCase):
+    def test_detects_qbo_code_6240(self):
+        exc = RuntimeError("InventoryAdjustment failed: HTTP 400: ... code: '6240' ...")
+        self.assertTrue(is_duplicate_doc_number_error(exc))
+
+    def test_detects_english_phrase_case_insensitive(self):
+        exc = RuntimeError("Some QBO message including Duplicate Document Number Error")
+        self.assertTrue(is_duplicate_doc_number_error(exc))
+
+    def test_returns_false_for_unrelated_errors(self):
+        self.assertFalse(is_duplicate_doc_number_error(RuntimeError("HTTP 401: token expired")))
+        self.assertFalse(is_duplicate_doc_number_error(ValueError("missing item_id")))
 
 
 class DocNumberTest(unittest.TestCase):
@@ -722,6 +737,40 @@ class ApplyEndToEndTest(unittest.TestCase):
                 self.assertNotEqual(
                     line["ItemAdjustmentLineDetail"]["ItemRef"]["value"], "7000"
                 )
+
+    def test_duplicate_doc_number_emits_friendly_message_and_does_not_mark_stale(self):
+        # Simulate QBO's duplicate-DocNumber rejection. The CLI should:
+        #   - count the row as failed (not silently treat as success)
+        #   - print [DUPLICATE] line with the DocNumber and date hint
+        #   - NOT mark the snapshot stale (no successful posts)
+        from code_scripts.qbo_inventory_adjustment import (
+            post_inventory_adjustment as _real_post,  # noqa: F401 import for pattern parity
+        )
+
+        def fake_post(payload):
+            raise RuntimeError(
+                "InventoryAdjustment failed: HTTP 400: "
+                "{'Fault': {'Error': [{'Message': 'Duplicate Document Number "
+                "Error', 'code': '6240'}], 'type': 'ValidationFault'}}"
+            )
+
+        rc, out, err, posts, stale_mock = self._run_apply([
+            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
+            "--apply", "--max-products", "1", "--product", "TROPHY",
+            "--txn-date", "2026-04-27",
+        ], post_side_effect=fake_post)
+
+        # Failure rc, friendly message, no stale mark.
+        self.assertEqual(rc, 1)
+        self.assertIn("[DUPLICATE]", err)
+        self.assertIn("INVCON-20260427-9364", err)
+        self.assertIn("may have already been applied", err)
+        stale_mock.assert_not_called()
+        # Must NOT print the generic [FAIL] header for this specific case.
+        self.assertNotIn(
+            "[FAIL] base='TROPHY LAGER CAN 500ML' item_id=9364:",
+            err,
+        )
 
     def test_apply_does_not_inactivate_any_items(self):
         # The cleanup module exposes _post_inactivate / _fetch_item_with_sync_token.

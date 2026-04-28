@@ -366,6 +366,23 @@ def build_private_note(row: dict[str, Any], scope_description: str = "") -> str:
     return "\n".join(parts)
 
 
+def is_duplicate_doc_number_error(exc: BaseException) -> bool:
+    """Detect QBO's "Duplicate Document Number" rejection by error string.
+
+    QBO returns this as ``ValidationFault`` ``code=6240`` with message text
+    that contains the phrase ``Duplicate Document Number``. We compare on
+    the stringified exception so this works regardless of whether the
+    caller wrapped the original ``RuntimeError`` from
+    :func:`code_scripts.qbo_inventory_adjustment.post_inventory_adjustment`.
+
+    Returns ``True`` for both the explicit code (``"6240"``) and the
+    English phrase, so a future minor-version change in either field
+    still trips the check.
+    """
+    text = str(exc).lower()
+    return ("6240" in text) or ("duplicate document number" in text)
+
+
 def _classify_for_apply(
     plan: list[dict[str, Any]],
     *,
@@ -756,10 +773,28 @@ def main(argv: Optional[list[str]] = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 failures.append((str(row.get("base_qbo_item_id", "")), str(exc)))
-                print(
-                    f"[FAIL] base={row['base_name']!r} item_id={row['base_qbo_item_id']}: {exc}",
-                    file=sys.stderr,
-                )
+                if is_duplicate_doc_number_error(exc):
+                    # Friendly hint when QBO rejects on DocNumber collision.
+                    # Our DocNumbers are deterministic per (date, base item),
+                    # so a duplicate here usually means we already posted this
+                    # exact consolidation today.  We do NOT silently treat
+                    # the duplicate as success — the operator should verify
+                    # the resulting QBO state before retrying.
+                    print(
+                        f"[DUPLICATE] base={row['base_name']!r} "
+                        f"item_id={row['base_qbo_item_id']} "
+                        f"DocNumber={doc_number}: QBO rejected as a duplicate. "
+                        f"This consolidation may have already been applied for "
+                        f"this base item on {txn_date}. Verify base / pack "
+                        f"QtyOnHand in QBO before re-running with --txn-date "
+                        f"set to a different date.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"[FAIL] base={row['base_name']!r} item_id={row['base_qbo_item_id']}: {exc}",
+                        file=sys.stderr,
+                    )
     finally:
         if args.apply:
             if succeeded > 0:
@@ -779,6 +814,40 @@ def main(argv: Optional[list[str]] = None) -> int:
     if failures:
         for item_id, err in failures:
             print(f"  fail: id={item_id} -> {err}", file=sys.stderr)
+
+    # Optional, non-blocking Slack notify — only on real apply runs (the
+    # dry-run already prints the planned payloads to stdout).
+    if args.apply:
+        webhook = getattr(config, "slack_webhook_url", None)
+        if webhook:
+            try:
+                from code_scripts.inventory_notifications import (
+                    format_pack_variant_apply_summary,
+                )
+                from code_scripts.slack_notify import send_slack_success
+
+                send_slack_success(
+                    format_pack_variant_apply_summary(
+                        kind="pack_variant_consolidation",
+                        company_display_name=config.display_name,
+                        company_key=config.company_key,
+                        mode="apply",
+                        scope=scope_desc,
+                        counts={
+                            "attempted": attempted,
+                            "succeeded": succeeded,
+                            "failed": failed,
+                            "no_op": no_op,
+                            "blocked": len(blocked),
+                            "skipped_due_to_cap": len(skipped_due_to_cap),
+                        },
+                        report_path=str(report_path),
+                    ),
+                    webhook,
+                )
+            except Exception as notify_exc:  # noqa: BLE001 — never fail the run
+                print(f"[WARN] Slack notify failed (ignored): {notify_exc}", file=sys.stderr)
+
     return 0 if failed == 0 else 1
 
 
