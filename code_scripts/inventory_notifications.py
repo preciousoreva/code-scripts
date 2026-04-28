@@ -232,7 +232,14 @@ def format_inventory_audit_summary(
     if warnings_count:
         # Allow callers (e.g. apply mode) to include extra blockers beyond
         # ambiguous/missing (like safe skips). Keep wording operator-friendly.
-        lines.append(f"• Catalog cleanup needed before update: {int(warnings_count)}")
+        #
+        # Avoid duplicating the line when warnings_count matches what counts already implies.
+        if counts:
+            base_cleanup = _as_int(counts.get("ambiguous_in_qbo"), 0) + _as_int(counts.get("missing_in_qbo"), 0)
+        else:
+            base_cleanup = 0
+        if int(warnings_count) != int(base_cleanup):
+            lines.append(f"• Catalog cleanup needed before update: {int(warnings_count)}")
 
     normalized, truncated = _normalize_manual_review_examples(manual_review_examples)
     if normalized:

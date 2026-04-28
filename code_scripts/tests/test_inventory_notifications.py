@@ -83,6 +83,29 @@ class InventoryAuditSummaryTest(unittest.TestCase):
         self.assertNotIn("fallback_largest_qty", msg)
         self.assertNotIn("non_exact_pick_not_allowed", msg)
 
+    def test_catalog_cleanup_line_is_not_duplicated_when_warnings_match_counts(self):
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="apply",
+            counts={
+                "total_groups": 147,
+                "in_sync": 7,
+                "needs_adjustment": 31,
+                "ambiguous_in_qbo": 100,
+                "missing_in_qbo": 9,
+                "posted": 5,
+                "skipped": 2,
+                "txn_date": "2026-04-28",
+            },
+            warnings_count=109,  # equals ambiguous + missing
+            manual_review_examples=[
+                "BACARDI WHITE RUM 750ml — only pack variant exists in QuickBooks: BACARDI WHITE RUM 750ml*12",
+            ],
+            report_path="/r.csv",
+        )
+        self.assertEqual(msg.count("Catalog cleanup needed before update: 109"), 1)
+
     def test_manual_review_examples_are_capped_at_10(self):
         examples = [f"ITEM {i} — missing_in_qbo / example" for i in range(25)]
         msg = format_inventory_audit_summary(
