@@ -455,6 +455,41 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         cfg.slack_webhook_url = ""
         return cfg
 
+    def test_stale_marker_with_same_timestamp_invalidates_snapshot(self):
+        import json
+        import tempfile
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            snapshot_dir = Path(td)
+            snapshot_path = snapshot_dir / "company_a_products.csv"
+            snapshot_path.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,Widget 330ml,Inventory,true,5\n",
+                encoding="utf-8",
+            )
+            snapshot_mtime = snapshot_path.stat().st_mtime
+            invalidated_at = datetime.fromtimestamp(snapshot_mtime, tz=timezone.utc).isoformat()
+            marker_path = snapshot_dir / "company_a_products.invalidate.json"
+            marker_path.write_text(
+                json.dumps({
+                    "company_key": "company_a",
+                    "reason": "unit_test",
+                    "invalidated_at": invalidated_at,
+                }),
+                encoding="utf-8",
+            )
+            os.utime(marker_path, (snapshot_mtime, snapshot_mtime))
+
+            with mock.patch.object(qbo_snapshot_cache, "qbo_snapshots_dir", return_value=snapshot_dir):
+                reason = qbo_snapshot_cache.get_qbo_snapshot_stale_reason(
+                    "company_a",
+                    snapshot_path,
+                )
+
+        self.assertEqual(reason, "unit_test")
+
     def test_fetch_qbo_snapshot_reuses_fresh_cache_without_touching_tokens(self):
         import tempfile
         from pathlib import Path

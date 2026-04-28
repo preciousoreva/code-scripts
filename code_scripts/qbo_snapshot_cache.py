@@ -39,13 +39,23 @@ def get_qbo_snapshot_stale_reason(company_key: str, snapshot_path: Path) -> Opti
         return None
     if not snapshot_path.exists():
         return "snapshot_missing"
+    snapshot_mtime = snapshot_path.stat().st_mtime
+    marker_mtime = marker.stat().st_mtime
     try:
-        if marker.stat().st_mtime <= snapshot_path.stat().st_mtime:
-            return None
         payload = json.loads(marker.read_text(encoding="utf-8"))
+        invalidated_at = str(payload.get("invalidated_at", "")).strip()
+        if invalidated_at:
+            marker_time = datetime.fromisoformat(invalidated_at.replace("Z", "+00:00"))
+            if marker_time.tzinfo is None:
+                marker_time = marker_time.replace(tzinfo=timezone.utc)
+            snapshot_time = datetime.fromtimestamp(snapshot_mtime, tz=timezone.utc)
+            if marker_time < snapshot_time:
+                return None
+        elif marker_mtime < snapshot_mtime:
+            return None
         reason = str(payload.get("reason", "")).strip()
         return reason or "invalidated"
     except Exception:
-        if marker.stat().st_mtime > snapshot_path.stat().st_mtime:
+        if marker_mtime >= snapshot_mtime:
             return "invalidated"
         return None
