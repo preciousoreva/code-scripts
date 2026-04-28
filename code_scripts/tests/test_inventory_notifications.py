@@ -49,6 +49,7 @@ class InventoryAuditSummaryTest(unittest.TestCase):
                 "missing_in_qbo": 8,
                 "posted": 0,
                 "skipped": 0,
+                "txn_date": "2026-04-28",
             },
             report_path="/data/.../inventory_audit_company_a_120000.csv",
             warnings_count=68,
@@ -56,19 +57,30 @@ class InventoryAuditSummaryTest(unittest.TestCase):
                 "BACARDI WHITE RUM 750ml — fallback_largest_qty / non_exact_pick_not_allowed",
             ],
         )
-        self.assertIn("Inventory audit completed", msg)
+        self.assertIn("Inventory sync completed", msg)
         self.assertIn("AKPONORA VENTURES LTD. (company_a)", msg)
-        self.assertIn("Mode: audit", msg)
-        self.assertIn("Scope: category=ALCOHOLS & SPIRITS", msg)
-        self.assertIn("total_groups=134", msg)
-        self.assertIn("in_sync=41", msg)
-        self.assertIn("needs_adjustment=12", msg)
-        self.assertIn("Warnings / manual review: 68", msg)
-        self.assertIn("inventory_audit_company_a_120000.csv", msg)
-        self.assertIn("Manual-review examples", msg)
+        self.assertIn("Mode: Audit only", msg)
+        self.assertIn("Scope: ALCOHOLS & SPIRITS", msg)
+        self.assertIn("Products checked: 134", msg)
+        self.assertIn("Already correct: 41", msg)
+        self.assertIn("Need quantity update: 12", msg)
+        self.assertIn("Updated in QuickBooks: 0", msg)
+        self.assertIn("Skipped safely: 0", msg)
+        self.assertIn("Need review before update: 68", msg)
+        self.assertIn("Transaction date: 2026-04-28", msg)
+        self.assertIn("Needs review:", msg)
         self.assertIn("BACARDI WHITE RUM 750ml", msg)
-        self.assertIn("posted=0", msg)
-        self.assertIn("skipped=0", msg)
+        self.assertIn("no exact QuickBooks item match found", msg)
+        self.assertIn("Report:", msg)
+        self.assertIn("inventory_audit_company_a_120000.csv", msg)
+        # Ensure technical labels do not leak into Slack output.
+        self.assertNotIn("total_groups", msg)
+        self.assertNotIn("in_sync", msg)
+        self.assertNotIn("needs_adjustment", msg)
+        self.assertNotIn("ambiguous_in_qbo", msg)
+        self.assertNotIn("missing_in_qbo", msg)
+        self.assertNotIn("fallback_largest_qty", msg)
+        self.assertNotIn("non_exact_pick_not_allowed", msg)
 
     def test_manual_review_examples_are_capped_at_10(self):
         examples = [f"ITEM {i} — missing_in_qbo / example" for i in range(25)]
@@ -76,16 +88,16 @@ class InventoryAuditSummaryTest(unittest.TestCase):
             company_display_name="Co A",
             company_key="company_a",
             mode="apply",
-            counts={"posted": 1, "skipped": 2},
+            counts={"posted": 1, "skipped": 2, "total_groups": 1, "in_sync": 0, "needs_adjustment": 1},
             report_path="/r.csv",
             warnings_count=12,
             manual_review_examples=examples,
         )
-        self.assertIn("Manual-review examples (top 10)", msg)
+        self.assertIn("Needs review:", msg)
         self.assertIn("ITEM 0", msg)
         self.assertIn("ITEM 9", msg)
         self.assertNotIn("ITEM 10", msg)
-        self.assertIn("see report for full list", msg)
+        self.assertIn("... see report for full list", msg)
 
     def test_dry_run_label_renders_as_preview(self):
         msg = format_inventory_audit_summary(
@@ -93,8 +105,8 @@ class InventoryAuditSummaryTest(unittest.TestCase):
             mode="dry-run",
             counts={"posted": 5, "skipped": 0},
         )
-        self.assertIn("Inventory audit preview", msg)
-        self.assertIn("Mode: dry-run", msg)
+        self.assertIn("Inventory sync preview", msg)
+        self.assertIn("Mode: Preview only", msg)
 
     def test_failure_branch_includes_error_and_red_x(self):
         msg = format_inventory_audit_summary(
@@ -105,7 +117,7 @@ class InventoryAuditSummaryTest(unittest.TestCase):
             report_path="/r.csv",
         )
         self.assertTrue(msg.startswith("❌"))
-        self.assertIn("Inventory audit failed", msg)
+        self.assertIn("Inventory sync failed", msg)
         self.assertIn("Error: HTTP 400: validation", msg)
 
     def test_zero_counts_are_kept_but_none_is_skipped(self):
@@ -114,7 +126,8 @@ class InventoryAuditSummaryTest(unittest.TestCase):
             mode="audit",
             counts={"in_sync": 0, "needs_adjustment": None, "missing_in_qbo": ""},
         )
-        self.assertIn("in_sync=0", msg)
+        self.assertIn("Already correct: 0", msg)
+        # Should not render a broken raw key=value section.
         self.assertNotIn("needs_adjustment=", msg)
         self.assertNotIn("missing_in_qbo=", msg)
 

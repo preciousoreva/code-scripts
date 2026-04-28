@@ -36,7 +36,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 
 _TITLE_BY_KIND = {
-    "inventory_audit": "Inventory audit",
+    "inventory_audit": "Inventory sync",
     "pack_variant_consolidation": "Pack-variant consolidation",
     "pack_variant_cleanup": "Pack-variant cleanup",
 }
@@ -55,6 +55,101 @@ def _emoji_for(mode: str, *, failed: int = 0) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _friendly_mode_label(mode: str) -> str:
+    m = (mode or "").strip().lower()
+    if m in ("apply",):
+        return "Applied updates to QuickBooks"
+    if m in ("audit",):
+        return "Audit only"
+    if m in ("dry-run", "dry_run"):
+        return "Preview only — no QuickBooks changes made"
+    return str(mode or "").strip() or "Unknown"
+
+
+def _friendly_scope_label(scope: str) -> str:
+    s = str(scope or "").strip()
+    if not s:
+        return ""
+    # Common inventory scope formats: "category=A, B; product=X" or subset thereof.
+    parts: list[str] = []
+    for chunk in [c.strip() for c in s.split(";") if c.strip()]:
+        if chunk.startswith("category="):
+            parts.append(chunk.removeprefix("category=").strip())
+        elif chunk.startswith("product="):
+            parts.append(chunk.removeprefix("product=").strip())
+        else:
+            parts.append(chunk)
+    return " — ".join([p for p in parts if p])
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _friendly_count_lines(counts: Mapping[str, Any]) -> list[str]:
+    checked = _as_int(counts.get("total_groups"), 0)
+    already_correct = _as_int(counts.get("in_sync"), 0)
+    needs_update = _as_int(counts.get("needs_adjustment"), 0)
+    need_review = _as_int(counts.get("ambiguous_in_qbo"), 0)
+    missing = _as_int(counts.get("missing_in_qbo"), 0)
+    posted = _as_int(counts.get("posted"), 0)
+    skipped = _as_int(counts.get("skipped"), 0)
+
+    lines: list[str] = []
+    if checked:
+        lines.append(f"• Products checked: {checked}")
+    lines.append(f"• Already correct: {already_correct}")
+    lines.append(f"• Need quantity update: {needs_update}")
+    if posted or "posted" in counts:
+        lines.append(f"• Updated in QuickBooks: {posted}")
+    if skipped or "skipped" in counts:
+        lines.append(f"• Skipped safely: {skipped}")
+    # Manual review includes ambiguity + missing in QBO (and any other warnings passed separately).
+    lines.append(f"• Need review before update: {need_review + missing}")
+
+    txn_date = str(counts.get("txn_date") or "").strip()
+    if txn_date:
+        lines.append(f"• Transaction date: {txn_date}")
+    return lines
+
+
+def _friendly_review_reason(raw: str) -> str:
+    text = (raw or "").strip().lower()
+    if "non_exact_pick_not_allowed" in text or "fallback_largest_qty" in text:
+        return "no exact QuickBooks item match found"
+    if "multiple_active_exact_base_in_qbo" in text or "ambiguous_in_qbo" in text:
+        return "multiple possible QuickBooks items found"
+    if "no_active_exact_base_in_qbo" in text:
+        return "no active matching QuickBooks item found"
+    if "missing_in_qbo" in text:
+        return "product not found in QuickBooks"
+    return (raw or "").strip()
+
+
+def _normalize_manual_review_examples(examples: Sequence[str] | None) -> tuple[list[str], bool]:
+    """Return (normalized_examples, truncated_flag)."""
+    if not examples:
+        return [], False
+    cleaned = [str(x).strip() for x in examples if str(x).strip()]
+    if not cleaned:
+        return [], False
+    truncated = len(cleaned) > 10
+    cleaned = cleaned[:10]
+    out: list[str] = []
+    for line in cleaned:
+        if "—" in line:
+            left, right = [p.strip() for p in line.split("—", 1)]
+            out.append(f"{left} — {_friendly_review_reason(right)}")
+        else:
+            out.append(_friendly_review_reason(line))
+    return out, truncated
 
 
 def format_scope(category: Optional[Any] = None, product: Optional[str] = None) -> str:
@@ -126,26 +221,28 @@ def format_inventory_audit_summary(
     lines = [
         f"{emoji} *{title} {head}* — {company_display_name} ({company_key})",
         f"• Time: {_now_iso()}",
-        f"• Mode: {mode}",
+        f"• Mode: {_friendly_mode_label(mode)}",
     ]
     if scope:
-        lines.append(f"• Scope: {scope}")
+        lines.append(f"• Scope: {_friendly_scope_label(scope)}")
     if counts:
-        rendered = _format_counts(counts)
-        if rendered:
-            lines.append(f"• Counts: {rendered}")
+        lines.extend(_friendly_count_lines(counts))
     if warnings_count:
-        lines.append(f"• Warnings / manual review: {warnings_count}")
-    if manual_review_examples:
-        examples = [str(x).strip() for x in manual_review_examples if str(x).strip()]
-        if examples:
-            lines.append("• Manual-review examples (top 10):")
-            for ex in examples[:10]:
-                lines.append(f"  - {ex}")
-            if len(examples) > 10:
-                lines.append("  - … see report for full list.")
+        # Keep the explicit operator-facing count, but in plain language.
+        lines.append(f"• Need review before update: {int(warnings_count)}")
+
+    normalized, truncated = _normalize_manual_review_examples(manual_review_examples)
+    if normalized:
+        lines.append("")
+        lines.append("Needs review:")
+        for ex in normalized:
+            lines.append(f"• {ex}")
+        if truncated:
+            lines.append("• ... see report for full list.")
     if report_path:
-        lines.append(f"• Report: `{report_path}`")
+        lines.append("")
+        lines.append("Report:")
+        lines.append(f"`{report_path}`")
     if error:
         lines.append(f"• Error: {error}")
     return "\n".join(lines)
