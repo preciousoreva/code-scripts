@@ -20,11 +20,13 @@ def _resolve_code_scripts_path(value: str) -> Path:
 
 def _mapping_candidates(company_key: str, config_json: dict) -> list[Path]:
     configured = ((config_json.get("inventory") or {}).get("product_mapping_file") or "").strip()
+    default_path = REPO_CODE_SCRIPTS_DIR / "mappings" / f"{company_key}_product_mapping.csv"
+    out: list[Path] = []
     if configured:
-        return [_resolve_code_scripts_path(configured)]
-    return [
-        REPO_CODE_SCRIPTS_DIR / "mappings" / f"{company_key}_product_mapping.csv",
-    ]
+        out.append(_resolve_code_scripts_path(configured))
+    if default_path not in out:
+        out.append(default_path)
+    return out
 
 
 def _category_column(fieldnames: Iterable[str] | None) -> str | None:

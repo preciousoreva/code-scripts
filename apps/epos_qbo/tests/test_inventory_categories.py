@@ -57,6 +57,66 @@ class InventoryCategoryLoadingTests(TestCase):
 
         self.assertEqual(categories, ["Configured Category"])
 
+    def test_bad_configured_mapping_missing_category_column_falls_back_to_default_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mapping_dir = root / "mappings"
+            mapping_dir.mkdir()
+            (mapping_dir / "company_a_product_mapping.csv").write_text(
+                "Product,Categories\nTROPHY,Default Category\n",
+                encoding="utf-8",
+            )
+            custom = root / "custom.csv"
+            custom.write_text(
+                "Product,NotACategory\nTROPHY,Nope\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(inventory_categories, "REPO_CODE_SCRIPTS_DIR", root):
+                categories = inventory_categories.load_inventory_categories_for_company(
+                    "company_a",
+                    {"inventory": {"product_mapping_file": "custom.csv"}},
+                )
+
+        self.assertEqual(categories, ["Default Category"])
+
+    def test_bad_configured_mapping_with_no_categories_falls_back_to_default_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            mapping_dir = root / "mappings"
+            mapping_dir.mkdir()
+            (mapping_dir / "company_a_product_mapping.csv").write_text(
+                "Product,Categories\nTROPHY,Default Category\n",
+                encoding="utf-8",
+            )
+            custom = root / "custom.csv"
+            custom.write_text(
+                "Product,Category\nTROPHY,\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(inventory_categories, "REPO_CODE_SCRIPTS_DIR", root):
+                categories = inventory_categories.load_inventory_categories_for_company(
+                    "company_a",
+                    {"inventory": {"product_mapping_file": "custom.csv"}},
+                )
+
+        self.assertEqual(categories, ["Default Category"])
+
+    def test_mapping_candidates_does_not_duplicate_default_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            default_path = root / "mappings" / "company_a_product_mapping.csv"
+            default_path.parent.mkdir()
+
+            with mock.patch.object(inventory_categories, "REPO_CODE_SCRIPTS_DIR", root):
+                candidates = inventory_categories._mapping_candidates(
+                    "company_a",
+                    {"inventory": {"product_mapping_file": "mappings/company_a_product_mapping.csv"}},
+                )
+
+        self.assertEqual(candidates, [default_path])
+
     def test_falls_back_to_latest_company_stock_report(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
