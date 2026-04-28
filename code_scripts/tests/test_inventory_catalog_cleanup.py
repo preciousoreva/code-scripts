@@ -204,6 +204,40 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertEqual(len(captured["df"]), 1)
         self.assertIn("BAILEYS", captured["df"].iloc[0]["base_name"])
 
+    def test_product_filter_is_literal_text_not_regex(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "A+B ITEM", "epos_single_units": 1.0, "catalog_issue_type": "missing_from_qbo"},
+                {"base_name": "AB ITEM", "epos_single_units": 1.0, "catalog_issue_type": "missing_from_qbo"},
+            ]
+        )
+        captured = {}
+
+        def fake_write(_path, df):
+            captured["df"] = df
+
+        with mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=None), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv", side_effect=fake_write), \
+             redirect_stdout(io.StringIO()):
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--product", "a+b",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(captured["df"]), 1)
+        self.assertEqual(captured["df"].iloc[0]["base_name"], "A+B ITEM")
+
     def test_include_no_action_includes_exact_match_rows(self):
         fake_cfg = mock.Mock(
             company_key="company_a",

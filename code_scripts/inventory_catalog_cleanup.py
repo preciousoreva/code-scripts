@@ -494,7 +494,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         source_inventory_report = str(report_path)
         if args.product_filter:
             needle = str(args.product_filter).strip().lower()
-            audit_df = audit_df[audit_df["base_name"].astype(str).str.lower().str.contains(needle, na=False)].copy()
+            audit_df = audit_df[
+                audit_df["base_name"]
+                .astype(str)
+                .str.lower()
+                .str.contains(needle, na=False, regex=False)
+            ].copy()
         qbo_path = Path(args.qbo_csv).expanduser() if args.qbo_csv else _default_qbo_snapshot_path(cfg.company_key)
         if qbo_path and qbo_path.exists():
             print(f"[INFO] QBO snapshot: {qbo_path}")
