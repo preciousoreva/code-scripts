@@ -965,6 +965,89 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
             # The payload's PrivateNote includes the pick method.
             self.assertIn("pick=fallback_largest_qty", buf.getvalue())
 
+    def test_catalog_issue_classification_only_pack_variant_exists(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "BACARDI WHITE RUM 750ml,ALCOHOLS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "99,BACARDI WHITE RUM 750ml*12,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["catalog_issue_type"], "only_pack_variant_exists")
+        self.assertIn("only pack variant exists in QuickBooks", row["catalog_issue_detail"])
+        self.assertIn("*12", row["catalog_issue_detail"])
+        self.assertIn("create base item", row["suggested_next_action"])
+
+    def test_catalog_issue_classification_base_with_pack_variants(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "GOLDBERG CAN 50cl,DRINKS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,GOLDBERG CAN 50cl,Inventory,true,1\n"
+                "11,GOLDBERG CAN 50cl*6,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["catalog_issue_type"], "base_with_pack_variants")
+        self.assertIn("pack variant consolidation needed", row["catalog_issue_detail"])
+        self.assertIn("consolidation and cleanup", row["suggested_next_action"])
+
+    def test_catalog_issue_classification_missing_from_qbo(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "NEW EPOS ITEM,DRINKS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,SOME OTHER ITEM,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["catalog_issue_type"], "missing_from_qbo")
+        self.assertIn("product not found in QuickBooks", row["catalog_issue_detail"])
+        self.assertIn("create inventory item", row["suggested_next_action"])
+
 
 if __name__ == "__main__":
     unittest.main()

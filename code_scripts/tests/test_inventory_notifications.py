@@ -54,7 +54,7 @@ class InventoryAuditSummaryTest(unittest.TestCase):
             report_path="/data/.../inventory_audit_company_a_120000.csv",
             warnings_count=68,
             manual_review_examples=[
-                "BACARDI WHITE RUM 750ml — fallback_largest_qty / non_exact_pick_not_allowed",
+                "BACARDI WHITE RUM 750ml — only pack variant exists in QuickBooks: BACARDI WHITE RUM 750ml*12",
             ],
         )
         self.assertIn("Inventory sync completed", msg)
@@ -66,11 +66,12 @@ class InventoryAuditSummaryTest(unittest.TestCase):
         self.assertIn("Need quantity update: 12", msg)
         self.assertIn("Updated in QuickBooks: 0", msg)
         self.assertIn("Skipped safely: 0", msg)
-        self.assertIn("Need review before update: 68", msg)
+        self.assertIn("Missing in QuickBooks: 8", msg)
+        self.assertIn("Catalog cleanup needed before update: 68", msg)
         self.assertIn("Transaction date: 2026-04-28", msg)
         self.assertIn("Needs review:", msg)
         self.assertIn("BACARDI WHITE RUM 750ml", msg)
-        self.assertIn("no exact QuickBooks item match found", msg)
+        self.assertIn("only pack variant exists in QuickBooks", msg)
         self.assertIn("Report:", msg)
         self.assertIn("inventory_audit_company_a_120000.csv", msg)
         # Ensure technical labels do not leak into Slack output.

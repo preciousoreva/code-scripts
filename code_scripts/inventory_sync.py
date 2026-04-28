@@ -586,11 +586,24 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
     inv["qbo_name_raw"] = names
     inv["qbo_has_pack"] = had_pack
     inv["qbo_qty_on_hand"] = inv.get("QtyOnHand", 0).map(_safe_float)
+    inv["qbo_is_base_item"] = [not v for v in had_pack]
 
     # Group by base_name to detect ambiguity; keep ids list for base-names
     def _join_ids(series: Iterable[Any]) -> str:
         ids = [str(x).strip() for x in series if str(x).strip()]
         return ",".join(ids[:50])  # cap to avoid huge cells
+
+    def _join_names(series: Iterable[Any]) -> str:
+        names_out = [str(x).strip() for x in series if str(x).strip()]
+        return " | ".join(names_out[:10])
+
+    def _join_pack_names(df_group: pd.DataFrame) -> str:
+        items = df_group[df_group["qbo_has_pack"] == True]  # noqa: E712
+        return _join_names(items["qbo_name_raw"].tolist())
+
+    def _join_base_names(df_group: pd.DataFrame) -> str:
+        items = df_group[df_group["qbo_has_pack"] == False]  # noqa: E712
+        return _join_names(items["qbo_name_raw"].tolist())
 
     grouped = (
         inv.groupby("base_name", as_index=False)
@@ -598,11 +611,24 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
             qbo_qty_on_hand=("qbo_qty_on_hand", "sum"),
             qbo_item_count_for_base=("Id", "count"),
             qbo_has_pack_variants=("qbo_has_pack", "max"),
+            qbo_base_item_count=("qbo_is_base_item", "sum"),
+            qbo_base_item_names=("qbo_name_raw", _join_names),
+            qbo_pack_variant_names=("qbo_name_raw", _join_names),
             qbo_base_item_ids=("Id", _join_ids),
         )
         .sort_values("base_name")
         .reset_index(drop=True)
     )
+    # Replace the naive name joins with base/pack-specific joins.
+    if not grouped.empty:
+        by_base = {}
+        for _, g in inv.groupby("base_name"):
+            by_base[str(g.iloc[0]["base_name"])] = {
+                "base_names": _join_base_names(g),
+                "pack_names": _join_pack_names(g),
+            }
+        grouped["qbo_base_item_names"] = grouped["base_name"].map(lambda k: by_base.get(str(k), {}).get("base_names", ""))
+        grouped["qbo_pack_variant_names"] = grouped["base_name"].map(lambda k: by_base.get(str(k), {}).get("pack_names", ""))
     return grouped
 
 
@@ -687,7 +713,10 @@ def build_audit_report(
     merged["qbo_has_pack_variants"] = (
         merged["qbo_has_pack_variants"].astype("boolean").fillna(False).astype(bool)
     )
+    merged["qbo_base_item_count"] = merged.get("qbo_base_item_count", 0).fillna(0).astype(int)
     merged["qbo_base_item_ids"] = merged["qbo_base_item_ids"].fillna("")
+    merged["qbo_base_item_names"] = merged.get("qbo_base_item_names", "").fillna("")
+    merged["qbo_pack_variant_names"] = merged.get("qbo_pack_variant_names", "").fillna("")
 
     merged["delta"] = merged["epos_single_units"] - merged["qbo_qty_on_hand"]
 
@@ -703,18 +732,65 @@ def build_audit_report(
 
     merged["status"] = merged.apply(classify, axis=1)
 
+    def _catalog_type(row: pd.Series) -> str:
+        if row["qbo_item_count_for_base"] <= 0:
+            return "missing_from_qbo"
+        if int(row.get("qbo_base_item_count", 0) or 0) > 1:
+            return "multiple_active_base_items"
+        if bool(row.get("qbo_has_pack_variants")) and int(row.get("qbo_base_item_count", 0) or 0) == 0:
+            return "only_pack_variant_exists"
+        if bool(row.get("qbo_has_pack_variants")) and int(row.get("qbo_base_item_count", 0) or 0) == 1:
+            return "base_with_pack_variants"
+        return "exact_name_match"
+
+    merged["catalog_issue_type"] = merged.apply(_catalog_type, axis=1)
+
+    def _catalog_detail(row: pd.Series) -> str:
+        t = str(row.get("catalog_issue_type") or "")
+        if t == "only_pack_variant_exists":
+            pack = str(row.get("qbo_pack_variant_names") or "").strip()
+            return f"only pack variant exists in QuickBooks: {pack}" if pack else "only pack variants exist in QuickBooks"
+        if t == "base_with_pack_variants":
+            return "base item and pack variants both exist; pack variant consolidation needed"
+        if t == "multiple_active_base_items":
+            return "multiple active matching QuickBooks items found"
+        if t == "missing_from_qbo":
+            return "product not found in QuickBooks"
+        return ""
+
+    def _suggested_action(row: pd.Series) -> str:
+        t = str(row.get("catalog_issue_type") or "")
+        if t == "only_pack_variant_exists":
+            return "create base item, consolidate pack variant quantity, then inactivate pack variant"
+        if t == "base_with_pack_variants":
+            return "run pack variant consolidation and cleanup"
+        if t == "multiple_active_base_items":
+            return "manually merge/inactivate duplicate base items"
+        if t == "missing_from_qbo":
+            return "create inventory item in QuickBooks using standard item creation logic"
+        return ""
+
+    merged["catalog_issue_detail"] = merged.apply(_catalog_detail, axis=1)
+    merged["suggested_next_action"] = merged.apply(_suggested_action, axis=1)
+
     cols = [
         "base_name",
         "epos_single_units",
         "qbo_qty_on_hand",
         "delta",
         "status",
+        "catalog_issue_type",
+        "catalog_issue_detail",
+        "suggested_next_action",
         "epos_raw_rows",
         "epos_has_pack",
         "epos_categories",
         "epos_category_count",
         "qbo_item_count_for_base",
         "qbo_has_pack_variants",
+        "qbo_base_item_count",
+        "qbo_base_item_names",
+        "qbo_pack_variant_names",
         "qbo_base_item_ids",
     ]
     return merged[cols].sort_values(["status", "base_name"]).reset_index(drop=True)
@@ -855,17 +931,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     def _manual_review_examples_for_audit() -> list[str]:
         examples: list[str] = []
-        for status_key, reason in [
-            ("missing_in_qbo", "missing_in_qbo / no active exact base"),
-            ("ambiguous_in_qbo", "ambiguous_in_qbo / multiple active QBO items"),
-        ]:
-            subset = report[report["status"] == status_key]
-            for base in subset["base_name"].astype(str).tolist()[:20]:
-                if len(examples) >= 10:
-                    break
-                examples.append(f"{base} — {reason}")
+        if "catalog_issue_detail" not in report.columns:
+            return examples
+        subset = report[report["catalog_issue_detail"].astype(str).str.strip() != ""]
+        for _, r in subset.iterrows():
             if len(examples) >= 10:
                 break
+            base = str(r.get("base_name") or "").strip()
+            detail = str(r.get("catalog_issue_detail") or "").strip()
+            if base and detail:
+                examples.append(f"{base} — {detail}")
         return examples
 
     def _emit_metadata(apply_stats: Dict[str, Any]) -> None:
@@ -1038,9 +1113,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                         skipped += 1
                         skipped_non_exact_pick += 1
                         if len(manual_review_examples) < 10:
-                            manual_review_examples.append(
-                                f"{base} — {reason} / non_exact_pick_not_allowed"
-                            )
+                            chosen_name = str(chosen.get("Name", "") or "").strip()
+                            if reason == "fallback_largest_qty" and str(chosen.get("qbo_has_pack", False)):
+                                manual_review_examples.append(
+                                    f"{base} — only pack variant exists in QuickBooks: {chosen_name}"
+                                )
+                            else:
+                                manual_review_examples.append(
+                                    f"{base} — no exact QuickBooks item match found"
+                                )
                         continue
 
             memo = (

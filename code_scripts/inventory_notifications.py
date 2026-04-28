@@ -112,7 +112,9 @@ def _friendly_count_lines(counts: Mapping[str, Any]) -> list[str]:
     if skipped or "skipped" in counts:
         lines.append(f"• Skipped safely: {skipped}")
     # Manual review includes ambiguity + missing in QBO (and any other warnings passed separately).
-    lines.append(f"• Need review before update: {need_review + missing}")
+    if missing:
+        lines.append(f"• Missing in QuickBooks: {missing}")
+    lines.append(f"• Catalog cleanup needed before update: {need_review + missing}")
 
     txn_date = str(counts.get("txn_date") or "").strip()
     if txn_date:
@@ -228,8 +230,9 @@ def format_inventory_audit_summary(
     if counts:
         lines.extend(_friendly_count_lines(counts))
     if warnings_count:
-        # Keep the explicit operator-facing count, but in plain language.
-        lines.append(f"• Need review before update: {int(warnings_count)}")
+        # Allow callers (e.g. apply mode) to include extra blockers beyond
+        # ambiguous/missing (like safe skips). Keep wording operator-friendly.
+        lines.append(f"• Catalog cleanup needed before update: {int(warnings_count)}")
 
     normalized, truncated = _normalize_manual_review_examples(manual_review_examples)
     if normalized:
