@@ -47,9 +47,14 @@ class InventoryAuditSummaryTest(unittest.TestCase):
                 "needs_adjustment": 12,
                 "ambiguous_in_qbo": 60,
                 "missing_in_qbo": 8,
+                "posted": 0,
+                "skipped": 0,
             },
             report_path="/data/.../inventory_audit_company_a_120000.csv",
             warnings_count=68,
+            manual_review_examples=[
+                "BACARDI WHITE RUM 750ml — fallback_largest_qty / non_exact_pick_not_allowed",
+            ],
         )
         self.assertIn("Inventory audit completed", msg)
         self.assertIn("AKPONORA VENTURES LTD. (company_a)", msg)
@@ -60,6 +65,27 @@ class InventoryAuditSummaryTest(unittest.TestCase):
         self.assertIn("needs_adjustment=12", msg)
         self.assertIn("Warnings / manual review: 68", msg)
         self.assertIn("inventory_audit_company_a_120000.csv", msg)
+        self.assertIn("Manual-review examples", msg)
+        self.assertIn("BACARDI WHITE RUM 750ml", msg)
+        self.assertIn("posted=0", msg)
+        self.assertIn("skipped=0", msg)
+
+    def test_manual_review_examples_are_capped_at_10(self):
+        examples = [f"ITEM {i} — missing_in_qbo / example" for i in range(25)]
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="apply",
+            counts={"posted": 1, "skipped": 2},
+            report_path="/r.csv",
+            warnings_count=12,
+            manual_review_examples=examples,
+        )
+        self.assertIn("Manual-review examples (top 10)", msg)
+        self.assertIn("ITEM 0", msg)
+        self.assertIn("ITEM 9", msg)
+        self.assertNotIn("ITEM 10", msg)
+        self.assertIn("see report for full list", msg)
 
     def test_dry_run_label_renders_as_preview(self):
         msg = format_inventory_audit_summary(

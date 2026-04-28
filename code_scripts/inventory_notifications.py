@@ -32,7 +32,7 @@ Design notes
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 
 _TITLE_BY_KIND = {
@@ -103,6 +103,7 @@ def format_inventory_audit_summary(
     report_path: Optional[str] = None,
     error: Optional[str] = None,
     warnings_count: int = 0,
+    manual_review_examples: Sequence[str] | None = None,
 ) -> str:
     """Compose the Slack message for an :mod:`inventory_sync` run.
 
@@ -135,6 +136,14 @@ def format_inventory_audit_summary(
             lines.append(f"• Counts: {rendered}")
     if warnings_count:
         lines.append(f"• Warnings / manual review: {warnings_count}")
+    if manual_review_examples:
+        examples = [str(x).strip() for x in manual_review_examples if str(x).strip()]
+        if examples:
+            lines.append("• Manual-review examples (top 10):")
+            for ex in examples[:10]:
+                lines.append(f"  - {ex}")
+            if len(examples) > 10:
+                lines.append("  - … see report for full list.")
     if report_path:
         lines.append(f"• Report: `{report_path}`")
     if error:

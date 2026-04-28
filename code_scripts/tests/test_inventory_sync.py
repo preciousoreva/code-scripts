@@ -813,6 +813,158 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                 "INVADJ-20260428-9124",
             )
 
+    def test_apply_posts_only_exact_name_match_by_default_and_skips_fallback(self):
+        import tempfile
+        from pathlib import Path
+
+        fake_config = self._build_fake_config()
+        fake_config.inventory_adjustment_account_id = "88"
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            # Both need adjustment (EPOS=8, QBO=1) so they enter the apply loop.
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "WIDGET,ALCOHOLS,8\n"
+                "GADGET,ALCOHOLS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            # WIDGET has an exact base-name row -> exact_name_match.
+            # GADGET only has a pack variant -> fallback_largest_qty (no exact name match; no non-pack row).
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,WIDGET,Inventory,true,1\n"
+                "99,GADGET*12,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+
+            env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
+            calls: list[dict] = []
+
+            def fake_post(_token_mgr, _realm_id, payload):
+                calls.append(payload)
+                return {"InventoryAdjustment": {"Id": "99"}}
+
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(inventory_sync, "post_inventory_adjustment", side_effect=fake_post), \
+                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale"), \
+                 redirect_stdout(buf):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--apply",
+                    "--txn-date", "2026-04-28",
+                    "--max-adjustments", "10",
+                ])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["Line"][0]["ItemAdjustmentLineDetail"]["ItemRef"]["value"], "10")
+            self.assertIn("pick=fallback_largest_qty", buf.getvalue())
+            self.assertIn("reason=non_exact_pick_not_allowed", buf.getvalue())
+            self.assertIn("skipped: 1", buf.getvalue())
+
+    def test_allow_fallback_picks_flag_allows_fallback_row_to_post(self):
+        import tempfile
+        from pathlib import Path
+
+        fake_config = self._build_fake_config()
+        fake_config.inventory_adjustment_account_id = "88"
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "WIDGET,ALCOHOLS,8\n"
+                "GADGET,ALCOHOLS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,WIDGET,Inventory,true,1\n"
+                "99,GADGET*12,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+
+            env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
+            calls: list[dict] = []
+
+            def fake_post(_token_mgr, _realm_id, payload):
+                calls.append(payload)
+                return {"InventoryAdjustment": {"Id": "99"}}
+
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(inventory_sync, "post_inventory_adjustment", side_effect=fake_post), \
+                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale"), \
+                 redirect_stdout(io.StringIO()):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--apply",
+                    "--allow-fallback-picks",
+                    "--txn-date", "2026-04-28",
+                    "--max-adjustments", "10",
+                ])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(calls), 2)
+
+    def test_dry_run_previews_fallback_rows(self):
+        import tempfile
+        from pathlib import Path
+
+        fake_config = self._build_fake_config()
+        fake_config.inventory_adjustment_account_id = "88"
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "GADGET,ALCOHOLS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "99,GADGET*12,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+
+            env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 redirect_stdout(buf):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--dry-run",
+                    "--adjust-account-id", "88",
+                    "--txn-date", "2026-04-28",
+                    "--max-adjustments", "10",
+                ])
+            self.assertEqual(exit_code, 0)
+            # The payload's PrivateNote includes the pick method.
+            self.assertIn("pick=fallback_largest_qty", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

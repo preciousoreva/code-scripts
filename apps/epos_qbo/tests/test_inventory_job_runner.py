@@ -34,6 +34,7 @@ class InventoryBuildCommandTests(TestCase):
         self.assertNotIn("--apply", flat)
         self.assertNotIn("--dry-run", flat)
         self.assertNotIn("--allow-ambiguous", flat)
+        self.assertNotIn("--allow-fallback-picks", flat)
 
     def test_explicit_stock_csv_overrides_auto_download(self):
         """Advanced callers can pre-populate inventory_options['stock_csv']
@@ -72,6 +73,7 @@ class InventoryBuildCommandTests(TestCase):
         self.assertIn("0.5", cmd)
         self.assertIn("--apply", cmd)
         self.assertIn("--allow-ambiguous", cmd)
+        self.assertNotIn("--allow-fallback-picks", cmd)
         self.assertIn("--max-adjustments", cmd)
         self.assertIn("5", cmd)
         self.assertIn("--max-qty-delta", cmd)
@@ -121,6 +123,7 @@ class InventoryBuildCommandTests(TestCase):
         self.assertIn("--apply", cmd)
         self.assertIn("--max-qty-delta", cmd)
         self.assertIn("50", cmd)
+        self.assertNotIn("--allow-fallback-picks", cmd)
 
     def test_missing_company_key_raises(self):
         with self.assertRaises(ValueError):

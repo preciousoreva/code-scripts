@@ -287,6 +287,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--allow-fallback-picks",
+        action="store_true",
+        help=(
+            "In --apply mode, allow posting adjustments when the selected QBO item was chosen by a "
+            "non-exact pick method (e.g. fallback_largest_qty). This is for CLI power-users only; "
+            "the dashboard should remain exact-match-only."
+        ),
+    )
+    p.add_argument(
         "--max-adjustments",
         type=int,
         default=25,
@@ -838,6 +847,26 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Console summary
     counts = report["status"].value_counts().to_dict()
+    total_groups = int(len(report))
+    in_sync = int(counts.get("in_sync", 0) or 0)
+    needs_adjustment = int(counts.get("needs_adjustment", 0) or 0)
+    ambiguous_in_qbo = int(counts.get("ambiguous_in_qbo", 0) or 0)
+    missing_in_qbo = int(counts.get("missing_in_qbo", 0) or 0)
+
+    def _manual_review_examples_for_audit() -> list[str]:
+        examples: list[str] = []
+        for status_key, reason in [
+            ("missing_in_qbo", "missing_in_qbo / no active exact base"),
+            ("ambiguous_in_qbo", "ambiguous_in_qbo / multiple active QBO items"),
+        ]:
+            subset = report[report["status"] == status_key]
+            for base in subset["base_name"].astype(str).tolist()[:20]:
+                if len(examples) >= 10:
+                    break
+                examples.append(f"{base} — {reason}")
+            if len(examples) >= 10:
+                break
+        return examples
 
     def _emit_metadata(apply_stats: Dict[str, Any]) -> None:
         try:
@@ -875,7 +904,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         webhook = config.slack_webhook_url if _should_notify_audit_only(args) else None
         if webhook:
             try:
-                manual_review = int(counts.get("ambiguous_in_qbo", 0)) + int(counts.get("missing_in_qbo", 0))
+                manual_review = ambiguous_in_qbo + missing_in_qbo
                 send_slack_success(
                     format_inventory_audit_summary(
                         company_display_name=config.display_name,
@@ -883,14 +912,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                         mode="audit",
                         scope=format_scope(category=list(args.categories or []), product=args.product_filter),
                         counts={
-                            "total_groups": len(report),
-                            "in_sync": int(counts.get("in_sync", 0)),
-                            "needs_adjustment": int(counts.get("needs_adjustment", 0)),
-                            "ambiguous_in_qbo": int(counts.get("ambiguous_in_qbo", 0)),
-                            "missing_in_qbo": int(counts.get("missing_in_qbo", 0)),
+                            "total_groups": total_groups,
+                            "in_sync": in_sync,
+                            "needs_adjustment": needs_adjustment,
+                            "ambiguous_in_qbo": ambiguous_in_qbo,
+                            "missing_in_qbo": missing_in_qbo,
                         },
                         report_path=str(out_path),
                         warnings_count=manual_review,
+                        manual_review_examples=_manual_review_examples_for_audit(),
                     ),
                     webhook,
                 )
@@ -961,7 +991,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     posted = 0
     skipped = 0
+    skipped_non_exact_pick = 0
     apply_error: Optional[str] = None
+    manual_review_examples: list[str] = []
     try:
         for _, row in candidates.iterrows():
             if posted >= int(args.max_adjustments):
@@ -993,6 +1025,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
                 skipped += 1
                 continue
+
+            if args.apply and not args.dry_run:
+                if reason != "exact_name_match":
+                    if args.allow_fallback_picks and reason == "fallback_largest_qty":
+                        pass
+                    else:
+                        print(
+                            f"[SKIP] base={base!r} item_id={item_id} pick={reason} "
+                            "reason=non_exact_pick_not_allowed"
+                        )
+                        skipped += 1
+                        skipped_non_exact_pick += 1
+                        if len(manual_review_examples) < 10:
+                            manual_review_examples.append(
+                                f"{base} — {reason} / non_exact_pick_not_allowed"
+                            )
+                        continue
 
             memo = (
                 f"OIAT inventory sync | base={base!r} | pick={reason} | "
@@ -1039,9 +1088,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                             company_key=config.company_key,
                             mode="apply",
                             scope=format_scope(category=list(args.categories or []), product=args.product_filter),
-                            counts={"posted": posted, "skipped": skipped},
+                            counts={
+                                "total_groups": total_groups,
+                                "in_sync": in_sync,
+                                "needs_adjustment": needs_adjustment,
+                                "ambiguous_in_qbo": ambiguous_in_qbo,
+                                "missing_in_qbo": missing_in_qbo,
+                                "posted": posted,
+                                "skipped": skipped,
+                            },
                             report_path=str(out_path),
                             error=apply_error,
+                            warnings_count=(ambiguous_in_qbo + missing_in_qbo + skipped_non_exact_pick),
+                            manual_review_examples=manual_review_examples or _manual_review_examples_for_audit(),
                         ),
                         webhook,
                     )
@@ -1074,8 +1133,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                         company_key=config.company_key,
                         mode="apply",
                         scope=format_scope(category=list(args.categories or []), product=args.product_filter),
-                        counts={"posted": posted, "skipped": skipped, "txn_date": txn_date},
+                        counts={
+                            "total_groups": total_groups,
+                            "in_sync": in_sync,
+                            "needs_adjustment": needs_adjustment,
+                            "ambiguous_in_qbo": ambiguous_in_qbo,
+                            "missing_in_qbo": missing_in_qbo,
+                            "posted": posted,
+                            "skipped": skipped,
+                            "txn_date": txn_date,
+                        },
                         report_path=str(out_path),
+                        warnings_count=(ambiguous_in_qbo + missing_in_qbo + skipped_non_exact_pick),
+                        manual_review_examples=manual_review_examples or _manual_review_examples_for_audit(),
                     ),
                     webhook,
                 )
