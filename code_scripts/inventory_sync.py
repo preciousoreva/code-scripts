@@ -612,8 +612,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
             qbo_item_count_for_base=("Id", "count"),
             qbo_has_pack_variants=("qbo_has_pack", "max"),
             qbo_base_item_count=("qbo_is_base_item", "sum"),
-            qbo_base_item_names=("qbo_name_raw", _join_names),
-            qbo_pack_variant_names=("qbo_name_raw", _join_names),
+            qbo_item_names_for_base=("qbo_name_raw", _join_names),
             qbo_base_item_ids=("Id", _join_ids),
         )
         .sort_values("base_name")
@@ -629,6 +628,8 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
             }
         grouped["qbo_base_item_names"] = grouped["base_name"].map(lambda k: by_base.get(str(k), {}).get("base_names", ""))
         grouped["qbo_pack_variant_names"] = grouped["base_name"].map(lambda k: by_base.get(str(k), {}).get("pack_names", ""))
+        grouped["qbo_base_item_names_for_base"] = grouped["qbo_base_item_names"]
+        grouped["qbo_pack_variant_names_for_base"] = grouped["qbo_pack_variant_names"]
     return grouped
 
 
@@ -717,6 +718,9 @@ def build_audit_report(
     merged["qbo_base_item_ids"] = merged["qbo_base_item_ids"].fillna("")
     merged["qbo_base_item_names"] = merged.get("qbo_base_item_names", "").fillna("")
     merged["qbo_pack_variant_names"] = merged.get("qbo_pack_variant_names", "").fillna("")
+    merged["qbo_item_names_for_base"] = merged.get("qbo_item_names_for_base", "").fillna("")
+    merged["qbo_base_item_names_for_base"] = merged.get("qbo_base_item_names_for_base", "").fillna("")
+    merged["qbo_pack_variant_names_for_base"] = merged.get("qbo_pack_variant_names_for_base", "").fillna("")
 
     merged["delta"] = merged["epos_single_units"] - merged["qbo_qty_on_hand"]
 
@@ -748,9 +752,12 @@ def build_audit_report(
     def _catalog_detail(row: pd.Series) -> str:
         t = str(row.get("catalog_issue_type") or "")
         if t == "only_pack_variant_exists":
-            pack = str(row.get("qbo_pack_variant_names") or "").strip()
+            pack = str(row.get("qbo_pack_variant_names_for_base") or "").strip()
             return f"only pack variant exists in QuickBooks: {pack}" if pack else "only pack variants exist in QuickBooks"
         if t == "base_with_pack_variants":
+            pack = str(row.get("qbo_pack_variant_names_for_base") or "").strip()
+            if pack:
+                return f"base item and pack variants both exist; consolidate pack variants: {pack}"
             return "base item and pack variants both exist; pack variant consolidation needed"
         if t == "multiple_active_base_items":
             return "multiple active matching QuickBooks items found"
@@ -789,6 +796,9 @@ def build_audit_report(
         "qbo_item_count_for_base",
         "qbo_has_pack_variants",
         "qbo_base_item_count",
+        "qbo_item_names_for_base",
+        "qbo_base_item_names_for_base",
+        "qbo_pack_variant_names_for_base",
         "qbo_base_item_names",
         "qbo_pack_variant_names",
         "qbo_base_item_ids",

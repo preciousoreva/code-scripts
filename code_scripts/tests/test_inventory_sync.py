@@ -276,6 +276,46 @@ class InventorySyncSlackNotificationTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         slack_mock.assert_not_called()
 
+    def test_audit_slack_examples_include_pack_variant_names_when_only_pack_exists(self):
+        import tempfile
+        from pathlib import Path
+
+        fake_config = self._build_fake_config()
+        env = {**os.environ, "OIAT_RUNTIME_ENV": "production", "OIAT_RUN_JOB_ID": "job-123"}
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "BACARDI WHITE RUM 750ml,ALCOHOLS,8\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "99,BACARDI WHITE RUM 750ml*12,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            report_path = tdp / "report.csv"
+
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
+                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
+                 mock.patch.object(inventory_sync, "send_slack_success") as slack_mock, \
+                 redirect_stdout(io.StringIO()):
+                exit_code = inventory_sync.main([
+                    "--company", "company_a",
+                    "--stock-csv", str(stock_csv),
+                    "--qbo-csv", str(qbo_csv),
+                    "--output", str(report_path),
+                ])
+
+        self.assertEqual(exit_code, 0)
+        slack_mock.assert_called_once()
+        msg = slack_mock.call_args[0][0]
+        self.assertIn("BACARDI WHITE RUM 750ml*12", msg)
+
 
 class InventorySyncAutoDownloadWiringTest(unittest.TestCase):
     """--auto-download wires inventory_sync to the EPOS StockReport Playwright
@@ -992,6 +1032,9 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertIn("only pack variant exists in QuickBooks", row["catalog_issue_detail"])
         self.assertIn("*12", row["catalog_issue_detail"])
         self.assertIn("create base item", row["suggested_next_action"])
+        self.assertIn("qbo_item_names_for_base", report.columns)
+        self.assertIn("qbo_pack_variant_names_for_base", report.columns)
+        self.assertIn("BACARDI WHITE RUM 750ml*12", str(row.get("qbo_pack_variant_names_for_base")))
 
     def test_catalog_issue_classification_base_with_pack_variants(self):
         import tempfile
@@ -1018,7 +1061,8 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
 
         row = report.iloc[0].to_dict()
         self.assertEqual(row["catalog_issue_type"], "base_with_pack_variants")
-        self.assertIn("pack variant consolidation needed", row["catalog_issue_detail"])
+        self.assertIn("consolidate pack variants", row["catalog_issue_detail"])
+        self.assertIn("GOLDBERG CAN 50cl*6", row["catalog_issue_detail"])
         self.assertIn("consolidation and cleanup", row["suggested_next_action"])
 
     def test_catalog_issue_classification_missing_from_qbo(self):
