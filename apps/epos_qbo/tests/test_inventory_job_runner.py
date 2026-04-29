@@ -92,7 +92,7 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("4", cmd)
 
-    def test_inventory_schedule_builds_weekly_pipeline_command(self):
+    def test_default_inventory_schedule_builds_all_products_pipeline_command(self):
         schedule = RunSchedule.objects.create(
             name="Weekly Inventory Sync",
             enabled=False,
@@ -100,7 +100,7 @@ class InventoryPipelineBuildCommandTests(TestCase):
             company_key="company_a",
             cron_expr="0 20 * * 0",
             timezone_name="Africa/Lagos",
-            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            inventory_options_json={},
             target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
         )
 
@@ -119,10 +119,30 @@ class InventoryPipelineBuildCommandTests(TestCase):
                 "--auto-download",
                 "--auto-fetch-qbo",
                 "--qbo-force-refresh",
-                "--category",
-                "ALCOHOLS & SPIRITS",
             ],
         )
+        self.assertNotIn("--category", cmd)
+        self.assertNotIn("--product", cmd)
+
+    def test_inventory_schedule_with_category_includes_category_arg(self):
+        schedule = RunSchedule.objects.create(
+            name="Weekly Inventory Sync - Alcohols",
+            enabled=False,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            cron_expr="0 20 * * 0",
+            timezone_name="Africa/Lagos",
+            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+
+        job, result = enqueue_run_for_schedule(schedule)
+
+        self.assertEqual(result, "queued")
+        assert job is not None
+        cmd = build_command_for_job(job)
+        self.assertIn("--category", cmd)
+        self.assertIn("ALCOHOLS & SPIRITS", cmd)
 
 
 class InventoryBuildCommandTests(TestCase):

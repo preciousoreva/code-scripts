@@ -71,6 +71,9 @@ python -m code_scripts.inventory_pipeline \
 Inventory Sync can be scheduled weekly or bi-weekly from the portal Schedules page.
 Run Sales first, then Inventory after the Sales automation has had time to finish.
 Inventory is a live EPOS stock correction snapshot, not a trading-day sales posting.
+The default weekly schedule is disabled and targets all categories/products for
+`company_a`; operators can add category or product filters when a narrower
+schedule is needed.
 
 Suggested timing: if the Sunday Sales sync runs at 19:00 Africa/Lagos, schedule
 Inventory for 20:00 or 20:30 Africa/Lagos on Sunday.

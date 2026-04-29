@@ -119,6 +119,7 @@ The OIAT Portal is the main operator UI. Key pages:
   - **Runs → Inventory**: trigger the unified inventory pipeline with optional category/product filters
 - **Schedules**: DB-backed cron schedules that enqueue `RunJob` records
   - Sales should run before Inventory. Weekly/bi-weekly Inventory schedules should fire after the selected day's Sales sync because Inventory is a live EPOS stock correction snapshot.
+  - The default weekly Inventory schedule is disabled and targets all products for `company_a`; category/product filters can be used for narrowed schedules.
 - **Companies**: manage company configs (DB is source of truth; sync to/from JSON supported)
 - **Tools**: lower-level/debug tools (QBO query, verify mapping, etc.) — not the primary operator path
 

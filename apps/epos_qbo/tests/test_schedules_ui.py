@@ -74,6 +74,22 @@ class SchedulesUiTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertFalse(RunSchedule.objects.filter(id=schedule.id).exists())
 
+    def test_seeded_weekly_inventory_schedule_defaults_to_all_products(self):
+        schedule = RunSchedule.objects.get(name="Weekly Inventory Sync", is_system_managed=False)
+
+        self.assertFalse(schedule.enabled)
+        self.assertEqual(schedule.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
+        self.assertEqual(schedule.company_key, "company_a")
+        self.assertEqual(schedule.cron_expr, "0 20 * * 0")
+        self.assertEqual(schedule.timezone_name, "Africa/Lagos")
+        self.assertEqual(schedule.inventory_options_json, {})
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Weekly Inventory Sync")
+        self.assertContains(response, "All products")
+
     def test_create_inventory_schedule_persists_inventory_options(self):
         payload = self._create_payload()
         payload.update(

@@ -93,7 +93,7 @@ class ScheduleWorkerTests(TestCase):
         )
 
     @mock.patch("apps.epos_qbo.services.schedule_worker.dispatch_next_queued_job")
-    def test_due_inventory_schedule_queues_pipeline_job_with_options(self, _mock_dispatch):
+    def test_due_default_inventory_schedule_queues_pipeline_job_without_filters(self, _mock_dispatch):
         schedule = RunSchedule.objects.create(
             name="Weekly Inventory Sync",
             enabled=True,
@@ -101,7 +101,7 @@ class ScheduleWorkerTests(TestCase):
             company_key="company_a",
             cron_expr="0 20 * * 0",
             timezone_name="Africa/Lagos",
-            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            inventory_options_json={},
             target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
             parallel=2,
             stagger_seconds=2,
@@ -120,7 +120,7 @@ class ScheduleWorkerTests(TestCase):
         self.assertIsNone(job.target_date)
         self.assertEqual(job.parallel, 1)
         self.assertFalse(job.continue_on_failure)
-        self.assertEqual(job.inventory_options_json, {"categories": ["ALCOHOLS & SPIRITS"]})
+        self.assertEqual(job.inventory_options_json, {})
         event = RunScheduleEvent.objects.get(schedule=schedule, event_type=RunScheduleEvent.TYPE_QUEUED)
         self.assertEqual(event.message, "Run queued.")
         self.assertEqual(event.friendly_message, "Run queued")
@@ -140,7 +140,7 @@ class ScheduleWorkerTests(TestCase):
             company_key="company_a",
             cron_expr="0 20 * * 0",
             timezone_name="Africa/Lagos",
-            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            inventory_options_json={},
             target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
             next_fire_at=self.fixed_now - timedelta(minutes=1),
         )
@@ -230,7 +230,7 @@ class ScheduleWorkerTests(TestCase):
             company_key="company_a",
             cron_expr="0 20 * * 0",
             timezone_name="Africa/Lagos",
-            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            inventory_options_json={},
             target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
             next_fire_at=self.fixed_now + timedelta(days=1),
         )

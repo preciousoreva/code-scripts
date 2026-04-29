@@ -12,7 +12,7 @@ def create_weekly_inventory_schedule(apps, schema_editor):
             "company_key": "company_a",
             "cron_expr": "0 20 * * 0",
             "timezone_name": "Africa/Lagos",
-            "inventory_options_json": {"categories": ["ALCOHOLS & SPIRITS"]},
+            "inventory_options_json": {},
             "target_date_mode": "trading_date",
             "parallel": 1,
             "stagger_seconds": 2,

@@ -1567,6 +1567,8 @@ def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> st
             parts.append(f"Category: {category}")
         if product:
             parts.append(f"Product: {product}")
+        if not category and not product:
+            parts.append("All products")
         return " | ".join(parts) if parts else "Inventory"
     return schedule.get_scope_display()
 
