@@ -131,6 +131,33 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertFalse(row["action_eligible"])
         self.assertIn("manual_review", row["block_reason"])
 
+    def test_multiple_active_base_items_with_typo_selects_safe_canonical(self):
+        audit = self._audit_df(
+            [
+                {
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "epos_single_units": 8.0,
+                    "catalog_issue_type": "multiple_active_base_items",
+                }
+            ]
+        )
+        qbo_rows = pd.DataFrame(
+            [
+                {"Id": "9355", "Name": "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": False, "qbo_qty_on_hand": 10},
+                {"Id": "13875", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": False, "qbo_qty_on_hand": -229},
+                {"Id": "13956", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": True, "qbo_qty_on_hand": -1},
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "resolve_duplicate_base_items")
+        self.assertTrue(row["action_eligible"])
+
     def test_missing_from_qbo_becomes_create_inventory_item(self):
         audit = self._audit_df(
             [
@@ -763,6 +790,99 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("[OK] Posted InventoryAdjustment", out)
         self.assertIn("[OK] Inactivated pack_variant_id=", out)
+
+    def test_apply_duplicate_base_items_resolves_and_inactivates_duplicates_and_packs(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "epos_single_units": 8.0, "catalog_issue_type": "multiple_active_base_items"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "9355", "Name": "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": False, "qbo_qty_on_hand": 10},
+                {"Id": "13875", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": False, "qbo_qty_on_hand": -229},
+                {"Id": "13956", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": True, "qbo_qty_on_hand": -1},
+                {"Id": "13942", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": True, "qbo_qty_on_hand": -2},
+            ]
+        )
+
+        def fake_fetch(_tm, _realm, item_id):
+            return {"Id": item_id, "Name": f"n-{item_id}", "SyncToken": "0", "QtyOnHand": 0}
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}) as post_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch), \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale"), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--apply",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 0)
+        post_mock.assert_called_once()
+        self.assertGreaterEqual(inact_mock.call_count, 3)
+
+    def test_duplicate_base_items_without_unique_canonical_remain_manual_review(self):
+        audit = self._audit_df(
+            [{"base_name": "WIDGET", "epos_single_units": 1.0, "catalog_issue_type": "multiple_active_base_items"}]
+        )
+        qbo_rows = pd.DataFrame(
+            [
+                {"Id": "1", "Name": "WIDGET", "base_name": "WIDGET", "base_name_norm": "widget", "qbo_has_pack": False},
+                {"Id": "2", "Name": "widget", "base_name": "WIDGET", "base_name_norm": "widget", "qbo_has_pack": False},
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "manual_review_duplicate_base_items")
+        self.assertFalse(row["action_eligible"])
+
+    def test_non_inventory_duplicate_remains_manual_review(self):
+        audit = self._audit_df(
+            [{"base_name": "WIDGET", "epos_single_units": 1.0, "catalog_issue_type": "multiple_active_base_items"}]
+        )
+        qbo_rows = pd.DataFrame(
+            [
+                {"Id": "1", "Name": "WIDGET", "base_name": "WIDGET", "base_name_norm": "widget", "qbo_has_pack": False, "Type": "Inventory"},
+                {"Id": "2", "Name": "widget", "base_name": "WIDGET", "base_name_norm": "widget", "qbo_has_pack": False, "Type": "Service"},
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "manual_review_duplicate_base_items")
+        self.assertFalse(row["action_eligible"])
 
     def test_snapshot_path_is_printed_when_loading_from_report(self):
         fake_cfg = mock.Mock(

@@ -132,6 +132,21 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             ]
         )
 
+    def _duplicate_resolvable_plan(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "company_key": "company_a",
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "epos_single_units": 5.0,
+                    "catalog_issue_type": "multiple_active_base_items",
+                    "planned_action": "resolve_duplicate_base_items",
+                    "action_eligible": True,
+                    "block_reason": "",
+                }
+            ]
+        )
+
     def _unsupported_action_plan(self) -> pd.DataFrame:
         return pd.DataFrame(
             [
@@ -198,6 +213,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             "products_checked": 3,
             "already_correct": 1,
             "catalog_fixes_applied": 1,
+            "duplicate_base_items_resolved": 0,
             "quantity_updates_applied": 1,
             "skipped_unsupported": 2,
             "still_needs_review": 2,
@@ -234,6 +250,10 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
     def test_final_summary_includes_base_items_created(self):
         msg = inventory_pipeline._format_final_summary(self._summary_payload(base_items_created=3))
         self.assertIn("Base items created: 3", msg)
+
+    def test_final_summary_includes_duplicate_base_items_resolved(self):
+        msg = inventory_pipeline._format_final_summary(self._summary_payload(duplicate_base_items_resolved=1))
+        self.assertIn("Duplicate base items resolved: 1", msg)
 
     def test_final_summary_includes_blocked_examples_when_blocked_count_is_small(self):
         msg = inventory_pipeline._format_final_summary(
@@ -675,6 +695,42 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertEqual(summary["catalog_fixes_applied"], 0)
             self.assertEqual(summary["skipped_unsupported"], 1)
             self.assertEqual(summary["unsupported_catalog_issues"]["base_with_pack_variants"], 1)
+
+    def test_duplicate_base_resolution_reduces_blocked_count_when_applied(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            self._patch_common(td, plan=self._duplicate_resolvable_plan(), qbo_paths=[qbo_path, qbo_path])
+            with mock.patch.object(
+                inventory_pipeline,
+                "_run_apply_for_existing_base_pack_variants",
+                return_value={
+                    "exit_code": 0,
+                    "attempted": 1,
+                    "consolidated": 1,
+                    "cleaned_up": 1,
+                    "skipped": 0,
+                    "failed": 0,
+                    "base_items_created": 0,
+                    "duplicate_base_items_resolved": 1,
+                    "created_base_details": [],
+                },
+            ), mock.patch.object(
+                inventory_pipeline,
+                "_apply_exact_match_quantity_adjustments",
+                return_value={
+                    "posted": 0,
+                    "planned": 0,
+                    "skipped": 0,
+                    "skipped_due_to_cap": 0,
+                    "skipped_non_exact": 0,
+                    "changed_qbo": False,
+                },
+            ):
+                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+
+            self.assertEqual(summary["catalog_fixes_applied"], 1)
+            self.assertEqual(summary["duplicate_base_items_resolved"], 1)
+            self.assertEqual(summary["skipped_unsupported"], 0)
 
 
 if __name__ == "__main__":

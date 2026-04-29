@@ -66,7 +66,11 @@ from code_scripts.slack_notify import send_slack_success
 from code_scripts.token_manager import verify_realm_match
 
 
-SAFE_CATALOG_ISSUE_TYPES = {"base_with_pack_variants", "only_pack_variant_exists"}
+SAFE_CATALOG_ISSUE_TYPES = {
+    "base_with_pack_variants",
+    "only_pack_variant_exists",
+    "multiple_active_base_items",
+}
 UNSUPPORTED_CATALOG_ISSUE_TYPES = {
     "only_pack_variant_exists",
     "missing_from_qbo",
@@ -243,6 +247,7 @@ def _supported_catalog_rows(plan_df: pd.DataFrame) -> pd.DataFrame:
     supported_actions = {
         "consolidate_existing_base_pack_variants",
         "create_base_then_consolidate_pack_variant",
+        "resolve_duplicate_base_items",
     }
     return plan_df[
         (plan_df["catalog_issue_type"].astype(str).isin(SAFE_CATALOG_ISSUE_TYPES))
@@ -280,6 +285,7 @@ def _apply_catalog_cleanup(
         "skipped_due_to_cap": int(skipped_due_to_cap),
         "applied": 0,
         "base_items_created": 0,
+        "duplicate_base_items_resolved": 0,
         "created_base_details": [],
         "changed_qbo": False,
         "exit_code": 0,
@@ -308,6 +314,7 @@ def _apply_catalog_cleanup(
         consolidated = int(apply_result.get("consolidated", 0))
         cleaned_up = int(apply_result.get("cleaned_up", 0))
         result["base_items_created"] = int(apply_result.get("base_items_created", 0))
+        result["duplicate_base_items_resolved"] = int(apply_result.get("duplicate_base_items_resolved", 0))
         result["created_base_details"] = list(apply_result.get("created_base_details") or [])
     else:
         exit_code = int(apply_result)
@@ -469,6 +476,7 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
         "products_clean": payload.get("already_correct"),
         "catalog_fixes_applied": payload.get("catalog_fixes_applied"),
         "base_items_created": payload.get("base_items_created"),
+        "duplicate_base_items_resolved": payload.get("duplicate_base_items_resolved"),
         "quantity_updates_applied": payload.get("quantity_updates_applied"),
         "blocked_items": payload.get("skipped_unsupported"),
         "missing_base_item_in_qbo": int((payload.get("unsupported_catalog_issues") or {}).get("only_pack_variant_exists", 0) or 0),
@@ -500,6 +508,7 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
         f"In sync / Products clean: {summary['already_correct']}",
         f"Catalog fixes applied: {summary['catalog_fixes_applied']}",
         f"Base items created: {int(summary.get('base_items_created', 0) or 0)}",
+        f"Duplicate base items resolved: {int(summary.get('duplicate_base_items_resolved', 0) or 0)}",
         f"Quantity updates applied: {summary['quantity_updates_applied']}",
         f"Blocked items: {summary['skipped_unsupported']}",
         f"Missing base item in QBO: {int((summary.get('unsupported_catalog_issues') or {}).get('only_pack_variant_exists', 0) or 0)}",
@@ -698,6 +707,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "already_correct": int(counts.get("in_sync", 0)),
         "catalog_fixes_applied": int(catalog_result["applied"]),
         "base_items_created": int(catalog_result.get("base_items_created", 0) or 0),
+        "duplicate_base_items_resolved": int(catalog_result.get("duplicate_base_items_resolved", 0) or 0),
         "quantity_updates_applied": int(quantity_result["posted"]),
         "skipped_unsupported": int(unsupported_total),
         "skipped_safely": int(skipped_safely),

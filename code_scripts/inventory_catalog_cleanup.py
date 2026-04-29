@@ -195,7 +195,46 @@ class PlannedAction:
     block_reason: str
 
 
-def _map_planned_action(issue_type: str) -> PlannedAction:
+def _select_duplicate_base_canonical(
+    *,
+    base_name: str,
+    qbo_group: pd.DataFrame,
+) -> tuple[Optional[pd.Series], str]:
+    """Choose canonical active base row for duplicate-base resolution."""
+    if qbo_group.empty:
+        return None, "no_qbo_rows_for_base"
+    base_rows = qbo_group[qbo_group["qbo_has_pack"] == False].copy()  # noqa: E712
+    if len(base_rows) < 2:
+        return None, "not_duplicate_base_items"
+
+    base_trim = str(base_name or "").strip()
+    # Strict match first: trim + case-insensitive (no internal space collapse).
+    strict = base_rows[
+        base_rows["Name"].astype(str).map(lambda v: str(v).strip().lower()) == base_trim.lower()
+    ]
+    if len(strict) == 1:
+        return strict.iloc[0], ""
+    if len(strict) > 1:
+        return None, "multiple_strict_canonical_candidates"
+
+    # Fallback: collapsed-space case-insensitive match.
+    base_norm = _normalize_name_key(base_trim)
+    collapsed = base_rows[
+        base_rows["Name"].astype(str).map(_normalize_name_key) == base_norm
+    ]
+    if len(collapsed) == 1:
+        return collapsed.iloc[0], ""
+    if len(collapsed) > 1:
+        return None, "multiple_collapsed_canonical_candidates"
+    return None, "no_canonical_base_match"
+
+
+def _map_planned_action(
+    issue_type: str,
+    *,
+    base_name: str = "",
+    qbo_group: Optional[pd.DataFrame] = None,
+) -> PlannedAction:
     t = (issue_type or "").strip()
     if t == "base_with_pack_variants":
         return PlannedAction(
@@ -210,6 +249,22 @@ def _map_planned_action(issue_type: str) -> PlannedAction:
             block_reason="",
         )
     if t == "multiple_active_base_items":
+        if qbo_group is not None and not qbo_group.empty:
+            canonical, reason = _select_duplicate_base_canonical(
+                base_name=base_name,
+                qbo_group=qbo_group,
+            )
+            if canonical is not None:
+                return PlannedAction(
+                    planned_action="resolve_duplicate_base_items",
+                    action_eligible=True,
+                    block_reason="",
+                )
+            return PlannedAction(
+                planned_action="manual_review_duplicate_base_items",
+                action_eligible=False,
+                block_reason=f"duplicate_base_items_{reason}",
+            )
         return PlannedAction(
             planned_action="manual_review_duplicate_base_items",
             action_eligible=False,
@@ -259,7 +314,15 @@ def plan_catalog_cleanup(
         base_name = _collapse_spaces(str(row.get("base_name") or ""))
         base_name_norm = _normalize_name_key(base_name)
         issue = str(row.get("catalog_issue_type") or "").strip()
-        planned = _map_planned_action(issue)
+        qbo_group = None
+        if qbo_item_rows is not None and not qbo_item_rows.empty:
+            if "base_name_norm" in qbo_item_rows.columns:
+                qbo_group = qbo_item_rows[qbo_item_rows["base_name_norm"] == base_name_norm].copy()
+            else:
+                qbo_group = qbo_item_rows[
+                    qbo_item_rows["base_name"].astype(str).map(_normalize_name_key) == base_name_norm
+                ].copy()
+        planned = _map_planned_action(issue, base_name=base_name, qbo_group=qbo_group)
 
         details = by_base.get(base_name_norm, {})
         out_rows.append(
@@ -314,9 +377,11 @@ def _run_apply_for_existing_base_pack_variants(
     Apply-mode runner for:
     - consolidate_existing_base_pack_variants
     - create_base_then_consolidate_pack_variant
+    - resolve_duplicate_base_items
     """
     attempted = consolidated = cleaned_up = skipped = failed = 0
     base_items_created = 0
+    duplicate_base_items_resolved = 0
     partial_failures: list[str] = []
     created_base_details: list[dict[str, Any]] = []
 
@@ -330,6 +395,7 @@ def _run_apply_for_existing_base_pack_variants(
                 "skipped": int(skipped),
                 "failed": int(failed),
                 "base_items_created": int(base_items_created),
+                "duplicate_base_items_resolved": int(duplicate_base_items_resolved),
                 "created_base_details": list(created_base_details),
             }
         return int(exit_code)
@@ -337,6 +403,7 @@ def _run_apply_for_existing_base_pack_variants(
     supported_actions = {
         "consolidate_existing_base_pack_variants",
         "create_base_then_consolidate_pack_variant",
+        "resolve_duplicate_base_items",
     }
     supported = plan_df[plan_df["planned_action"].isin(supported_actions)].copy()
     unsupported = plan_df[~plan_df["planned_action"].isin(supported_actions)].copy()
@@ -402,6 +469,9 @@ def _run_apply_for_existing_base_pack_variants(
             group = qbo_rows_df[qbo_rows_df["base_name_norm"] == base_norm].copy()
             base_rows = group[group["qbo_has_pack"] == False]  # noqa: E712
             pack_rows = group[group["qbo_has_pack"] == True]  # noqa: E712
+            canonical_row: Optional[pd.Series] = None
+            canonical_name = ""
+            dup_rows = pd.DataFrame()
 
             if action == "create_base_then_consolidate_pack_variant":
                 if len(base_rows) > 0:
@@ -515,23 +585,75 @@ def _run_apply_for_existing_base_pack_variants(
                 group = qbo_rows_df[qbo_rows_df["base_name_norm"] == base_norm].copy()
                 base_rows = group[group["qbo_has_pack"] == False]  # noqa: E712
                 pack_rows = group[group["qbo_has_pack"] == True]  # noqa: E712
+            elif action == "resolve_duplicate_base_items":
+                if len(base_rows) < 2:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=not_duplicate_base_items")
+                    continue
+                if "Type" in base_rows.columns:
+                    non_inventory = base_rows[
+                        base_rows["Type"].astype(str).str.strip().str.lower() != "inventory"
+                    ]
+                    if not non_inventory.empty:
+                        skipped += 1
+                        print(f"[SKIP] base={base_name!r} reason=non_inventory_duplicate_item")
+                        continue
+                canonical_row, reason = _select_duplicate_base_canonical(
+                    base_name=base_name,
+                    qbo_group=group,
+                )
+                if canonical_row is None:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason={reason}")
+                    continue
+                canonical_id = str(canonical_row.get("Id") or "").strip()
+                canonical_name = str(canonical_row.get("Name") or "").strip()
+                dup_rows = base_rows[base_rows["Id"].astype(str).str.strip() != canonical_id].copy()
+                if dup_rows.empty:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=no_duplicate_base_rows")
+                    continue
+                print(
+                    f"[PLAN] resolve_duplicate_base base={base_name!r} canonical={canonical_id}:{canonical_name!r} "
+                    f"duplicates={[str(x).strip() for x in dup_rows['Id'].tolist()]}"
+                )
 
             if base_rows.empty:
                 skipped += 1
                 print(f"[SKIP] base={base_name!r} reason=no_base_item_for_consolidation")
                 continue
-            if len(base_rows) > 1:
+            if len(base_rows) > 1 and action != "resolve_duplicate_base_items":
                 skipped += 1
                 print(f"[SKIP] base={base_name!r} reason=multiple_active_base_items")
                 continue
 
-            base_item_id = str(base_rows.iloc[0].get("Id") or "").strip()
-            base_qty = float(base_rows.iloc[0].get("qbo_qty_on_hand", 0) or 0)
+            if action == "resolve_duplicate_base_items":
+                assert canonical_row is not None
+                base_item_id = str(canonical_row.get("Id") or "").strip()
+                base_qty = float(canonical_row.get("qbo_qty_on_hand", 0) or 0)
+            else:
+                base_item_id = str(base_rows.iloc[0].get("Id") or "").strip()
+                base_qty = float(base_rows.iloc[0].get("qbo_qty_on_hand", 0) or 0)
             epos_target = float(planned_row.get("epos_single_units") or 0.0)
             lines = []
-            base_diff = epos_target - base_qty
-            if base_diff != 0:
-                lines.append({"item_id": base_item_id, "qty_diff": base_diff})
+            if action == "resolve_duplicate_base_items":
+                transfer_total = 0.0
+                duplicate_base_ids_for_cleanup: list[str] = []
+                for _, dr in dup_rows.iterrows():
+                    did = str(dr.get("Id") or "").strip()
+                    if not did:
+                        continue
+                    duplicate_base_ids_for_cleanup.append(did)
+                    dqty = float(dr.get("qbo_qty_on_hand", 0) or 0)
+                    if dqty != 0:
+                        lines.append({"item_id": did, "qty_diff": -dqty})
+                        transfer_total += dqty
+            else:
+                transfer_total = 0.0
+                duplicate_base_ids_for_cleanup = []
+                base_diff = epos_target - base_qty
+                if base_diff != 0:
+                    lines.append({"item_id": base_item_id, "qty_diff": base_diff})
             pack_ids_for_cleanup: list[str] = []
             for _, pr in pack_rows.iterrows():
                 pid = str(pr.get("Id") or "").strip()
@@ -541,6 +663,11 @@ def _run_apply_for_existing_base_pack_variants(
                 pack_qty = float(pr.get("qbo_qty_on_hand", 0) or 0)
                 if pack_qty != 0:
                     lines.append({"item_id": pid, "qty_diff": -pack_qty})
+                    if action == "resolve_duplicate_base_items":
+                        transfer_total += pack_qty
+
+            if action == "resolve_duplicate_base_items" and transfer_total != 0:
+                lines.insert(0, {"item_id": base_item_id, "qty_diff": transfer_total})
 
             if not lines:
                 skipped += 1
@@ -557,9 +684,17 @@ def _run_apply_for_existing_base_pack_variants(
             )
 
             if dry_run:
+                if action == "resolve_duplicate_base_items":
+                    dup_names = [str(x).strip() for x in dup_rows["Name"].tolist()]
+                    pack_names = [str(x).strip() for x in pack_rows["Name"].tolist()]
+                    print(f"[DRY-RUN] canonical_base={base_item_id}:{canonical_name!r}")
+                    print(f"[DRY-RUN] duplicate_bases={dup_names}")
+                    print(f"[DRY-RUN] pack_variants={pack_names}")
                 print("[DRY-RUN] would post InventoryAdjustment payload=" + str(payload))
                 consolidated += 1
-                cleaned_up += 1 if pack_ids_for_cleanup else 0
+                cleaned_up += 1 if (pack_ids_for_cleanup or duplicate_base_ids_for_cleanup) else 0
+                if action == "resolve_duplicate_base_items":
+                    duplicate_base_items_resolved += 1
                 continue
 
             assert token_mgr is not None
@@ -582,6 +717,28 @@ def _run_apply_for_existing_base_pack_variants(
                 continue
 
             cleanup_failed = False
+            for did in duplicate_base_ids_for_cleanup:
+                try:
+                    live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, did)
+                    qty = float(live.get("QtyOnHand", 0) or 0)
+                    if qty != 0:
+                        print(f"[SKIP] duplicate_base_id={did} qty_on_hand={qty} reason=nonzero_qty_on_hand")
+                        continue
+                    sync_token = str(live.get("SyncToken", "")).strip()
+                    payload_inactivate = build_inactivate_payload(
+                        item_id=did,
+                        sync_token=sync_token,
+                        original_name=str(live.get("Name", "") or "").strip(),
+                    )
+                    _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
+                    nm = str(live.get("Name", "") or "").strip()
+                    print(f"[OK] Inactivated duplicate_base_id={did} {nm!r}")
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_failed = True
+                    failed += 1
+                    partial_failures.append(f"base={base_name} cleanup_failed duplicate_base_id={did}: {exc}")
+                    print(f"[FAIL] base={base_name!r} cleanup failed for duplicate_base_id={did}: {exc}")
+                    break
             for pid in pack_ids_for_cleanup:
                 try:
                     live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, pid)
@@ -605,7 +762,9 @@ def _run_apply_for_existing_base_pack_variants(
                     print(f"[FAIL] base={base_name!r} cleanup failed for pack_id={pid}: {exc}")
                     break
             if not cleanup_failed:
-                cleaned_up += 1 if pack_ids_for_cleanup else 0
+                cleaned_up += 1 if (pack_ids_for_cleanup or duplicate_base_ids_for_cleanup) else 0
+                if action == "resolve_duplicate_base_items":
+                    duplicate_base_items_resolved += 1
 
             if cleanup_failed:
                 print(f"[WARN] base={base_name!r} consolidation succeeded but cleanup failed (partial).")
@@ -621,7 +780,8 @@ def _run_apply_for_existing_base_pack_variants(
     print(
         "Apply summary: "
         f"attempted={attempted} consolidated={consolidated} cleaned_up={cleaned_up} "
-        f"base_items_created={base_items_created} skipped={skipped} failed={failed}"
+        f"base_items_created={base_items_created} duplicate_base_items_resolved={duplicate_base_items_resolved} "
+        f"skipped={skipped} failed={failed}"
     )
     if partial_failures:
         for line in partial_failures[:10]:
@@ -719,6 +879,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     for key in [
         "consolidate_existing_base_pack_variants",
         "create_base_then_consolidate_pack_variant",
+        "resolve_duplicate_base_items",
         "manual_review_duplicate_base_items",
         "create_inventory_item",
     ]:
