@@ -174,6 +174,8 @@
             <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                 <tr>
                     <th class="text-left px-4 py-3 whitespace-nowrap">Created</th>
+                    <th class="text-left px-4 py-3 whitespace-nowrap">Run</th>
+                    <th class="text-left px-4 py-3 hidden md:table-cell">Workflow</th>
                     <th class="text-left px-4 py-3 hidden md:table-cell">Scope</th>
                     <th class="text-left px-4 py-3">Company</th>
                     <th class="text-left px-4 py-3">Status</th>
@@ -186,7 +188,18 @@
                 {% for row in run_rows %}
                 <tr>
                     <td class="px-4 py-3 whitespace-nowrap">{{ row.job.created_at|date:"Y-m-d H:i:s" }}</td>
-                    <td class="px-4 py-3 hidden md:table-cell">{{ row.job.scope }}</td>
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        <a href="{% url 'epos_qbo:run-detail' job_id=row.job.id %}" class="font-mono text-blue-600 dark:text-blue-400 hover:underline">{{ row.job.friendly_id }}</a>
+                    </td>
+                    <td class="px-4 py-3 hidden md:table-cell">
+                        <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium
+                            {% if row.job.workflow_label == 'Sales' %}bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300
+                            {% elif row.job.workflow_label == 'Inventory' %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300
+                            {% else %}bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200{% endif %}">
+                            {{ row.job.workflow_label }}
+                        </span>
+                    </td>
+                    <td class="px-4 py-3 hidden md:table-cell">{{ row.job.scope_label }}</td>
                     <td class="px-4 py-3">{{ row.job.company_key|default:"all" }}</td>
                     <td class="px-4 py-3">
                         {% if row.job.status == 'succeeded' %}
@@ -218,7 +231,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="7" class="px-4 py-6 text-slate-500 dark:text-slate-400">No runs yet.</td>
+                    <td colspan="9" class="px-4 py-6 text-slate-500 dark:text-slate-400">No runs yet.</td>
                 </tr>
                 {% endfor %}
             </tbody>

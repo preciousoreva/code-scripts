@@ -257,9 +257,10 @@ def ingest_history(days: int = 60) -> int:
 
 def attach_recent_artifacts_to_job(run_job: RunJob) -> int:
     if run_job.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
-        return _attach_inventory_artifacts_to_job(run_job) + _attach_inventory_pipeline_artifacts_to_job(
-            run_job
-        )
+        # Unified inventory pipeline: only attach the top-level pipeline summary.
+        # Child audit JSON sidecars are referenced inside that summary and should
+        # not appear as separate top-level artifacts for the run.
+        return _attach_inventory_pipeline_artifacts_to_job(run_job)
     if run_job.scope == RunJob.SCOPE_INVENTORY_SYNC:
         return _attach_inventory_artifacts_to_job(run_job)
 
@@ -524,7 +525,9 @@ def _attach_inventory_pipeline_artifacts_to_job(run_job: RunJob) -> int:
             anchor = run_job.dispatched_at or run_job.started_at or run_job.created_at
             if processed_at is None or anchor is None:
                 continue
-            if abs((processed_at - anchor).total_seconds()) > 12 * 3600:
+            # Keep this tighter than legacy audit attachment to avoid cross-linking
+            # nearby test runs when metadata lacks run_job_id.
+            if abs((processed_at - anchor).total_seconds()) > 3 * 3600:
                 continue
         artifact, _ = ingest_inventory_pipeline_file(path, run_job=run_job)
         if artifact is None:

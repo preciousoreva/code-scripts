@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Run {{ job.display_label }} • EPOS → QBO{% endblock %}
+{% block title %}{{ job.friendly_title }} • EPOS → QBO{% endblock %}
 
 {% block topbar %}
 {% include "components/topbar.html" %}
@@ -9,14 +9,15 @@
 {% block content %}
 <div class="space-y-6" data-run-id="{{ job.id }}" data-run-status="{{ job.status }}">
     <div>
-        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Run {{ job.display_label }}</h1>
-        <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">ID:{{ job.id }}</p>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ job.friendly_title }}</h1>
+        <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">Internal ID: {{ job.id }}</p>
     </div>
 
     <section
         class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
         <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>
-        <div><span class="text-slate-500 dark:text-slate-400 block">Scope</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.scope }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Workflow</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.workflow_label }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Scope</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.scope_label }}</span></div>
         <div><span class="text-slate-500 dark:text-slate-400 block">Company</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.company_key|default:"all" }}</span></div>
         <div>
             <span class="text-slate-500 dark:text-slate-400 block">Exit Code</span>
@@ -108,11 +109,11 @@
                         </td>
                         <td class="px-3 py-2">
                             {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
-                            <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">Inventory pipeline report</span>
+                            <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">Inventory report</span>
                             {% elif artifact.reliability_status == 'warning' %}
-                            <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Rolling (last_*)</span>
+                            <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Sales metadata</span>
                             {% else %}
-                            <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">Snapshot (dated)</span>
+                            <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">Sales metadata</span>
                             {% endif %}
                         </td>
                     </tr>

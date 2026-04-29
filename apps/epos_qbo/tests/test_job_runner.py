@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from django.test import SimpleTestCase, TestCase
+from django.test.utils import override_settings
 from django.utils import timezone
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,7 @@ from apps.epos_qbo.services.job_runner import (
     build_command,
     dispatch_next_queued_job,
     resolve_python_executable,
+    start_run_job,
 )
 
 
@@ -192,6 +194,28 @@ class MonitorProcessTests(TestCase):
         self.assertTrue(release_kwargs["force"])
         self.assertEqual(release_kwargs["run_job"].id, job.id)
         dispatch_next_queued_job_mock.assert_called_once_with()
+
+
+class StartRunJobEnvTests(TestCase):
+    @override_settings(OIAT_PORTAL_BASE_URL="https://portal.example.com")
+    @patch("apps.epos_qbo.services.job_runner.threading.Thread")
+    @patch("apps.epos_qbo.services.job_runner.subprocess.Popen")
+    def test_start_run_job_sets_portal_base_url_and_run_metadata_env(self, popen_mock, thread_mock):
+        popen_mock.return_value.pid = 12345
+        thread_mock.return_value.start.return_value = None
+        job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a")
+
+        with patch("builtins.open", create=True) as open_mock:
+            open_mock.return_value = Mock()
+            started = start_run_job(job, ["python", "-c", "print('hi')"])
+
+        self.assertEqual(started.id, job.id)
+        _, kwargs = popen_mock.call_args
+        env = kwargs["env"]
+        self.assertEqual(env["OIAT_RUN_JOB_ID"], str(job.id))
+        self.assertEqual(env["OIAT_RUN_SCOPE"], RunJob.SCOPE_INVENTORY_PIPELINE)
+        self.assertIn("OIAT_RUN_STARTED_AT", env)
+        self.assertEqual(env["OIAT_PORTAL_BASE_URL"], "https://portal.example.com")
 
     @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
     @patch("apps.epos_qbo.services.job_runner.release_run_lock")

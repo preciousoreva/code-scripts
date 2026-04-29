@@ -857,7 +857,7 @@ class OverviewUITemplateTests(TestCase):
             response = self.client.get(reverse("epos_qbo:overview"))
 
         html = response.content.decode("utf-8")
-        self.assertIn(f"Company A: Run {run.display_label} succeeded", html)
+        self.assertIn(f"Company A: Run {run.friendly_id} succeeded", html)
         self.assertNotIn(str(run.id), html)
 
     def test_overview_panels_endpoint_renders_fragment(self):

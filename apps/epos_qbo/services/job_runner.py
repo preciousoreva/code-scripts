@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from shlex import join as shlex_join
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -329,6 +330,13 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
     env = dict(os.environ)
     env["OIAT_RUN_SOURCE"] = "dashboard"
     env["OIAT_RUN_JOB_ID"] = str(job.id)
+    env["OIAT_RUN_SCOPE"] = str(job.scope)
+    env["OIAT_RUN_STARTED_AT"] = timezone.now().isoformat()
+    # Prefer explicit env override; otherwise fall back to Django settings.
+    if not env.get("OIAT_PORTAL_BASE_URL"):
+        base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or "").strip().rstrip("/")
+        if base:
+            env["OIAT_PORTAL_BASE_URL"] = base
     # Ensure code_scripts package is importable when running run_pipeline.py
     pythonpath = str(BASE_DIR)
     env["PYTHONPATH"] = pythonpath + os.pathsep + env.get("PYTHONPATH", "")

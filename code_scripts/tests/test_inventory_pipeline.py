@@ -402,7 +402,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertIn("Updated in QBO: Yes", msg)
         self.assertIn("Catalog fixes: 0", msg)
         self.assertIn("Blocked: 0", msg)
-        self.assertIn("Run: https://portal.example/epos-qbo/runs/job-1/", msg)
+        self.assertIn("Run: <https://portal.example/epos-qbo/runs/job-1/|Inventory Run", msg)
         self.assertNotIn("negative EPOS", msg)
         self.assertNotIn("Report path:", msg)
         self.assertNotIn("epos_expected_qty", msg)
@@ -526,7 +526,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("Run: https://portal.example/epos-qbo/runs/job-4/", msg)
+        self.assertIn("Run: <https://portal.example/epos-qbo/runs/job-4/|Inventory Run", msg)
         self.assertNotIn("Report:", msg)
         self.assertNotIn("inventory_pipeline_company_a_120000.json", msg)
 
@@ -1088,6 +1088,38 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"OIAT_RUN_JOB_ID": "job-123"}, clear=True):
             self.assertEqual(inventory_pipeline._build_run_detail_url(), "")
+
+    def test_slack_summary_prefers_run_link_with_operator_label(self):
+        summary = {
+            "run_type": "inventory_pipeline",
+            "company_key": "company_a",
+            "display_name": "Co A",
+            "scope": "product=TROPHY",
+            "started_at": "2026-04-29T14:52:00+00:00",
+            "finished_at": "2026-04-29T14:53:00+00:00",
+            "run_job_id": "e8333646-3066-4953-9627-b0b4b1526f86",
+            "run_url": "https://portal.oiatsolutions.com/epos-qbo/runs/e8333646-3066-4953-9627-b0b4b1526f86/",
+            "summary_json": "/tmp/inventory_pipeline_company_a_145421.json",
+            "products_checked": 0,
+            "in_sync": 0,
+            "catalog_fixes_applied": 0,
+            "base_items_created": 0,
+            "duplicate_base_items_resolved": 0,
+            "quantity_updates_applied": 0,
+            "blocked_items": 0,
+            "still_needs_review": 0,
+            "final_status_counts": {"in_sync": 0, "needs_adjustment": 0, "ambiguous_in_qbo": 0, "missing_in_qbo": 0},
+            "final_catalog_issue_counts": {},
+            "unsupported_catalog_issues": {},
+            "blocked_catalog_examples": [],
+            "product_details": [{"base_name": "TROPHY", "epos_expected_qty": 0, "qbo_final_qty": 0, "delta": 0, "final_status": "in_sync"}],
+        }
+        msg = inventory_pipeline._format_slack_summary(summary)
+        self.assertIn(
+            "Run: <https://portal.oiatsolutions.com/epos-qbo/runs/e8333646-3066-4953-9627-b0b4b1526f86/|Inventory Run INV-0429-1452-E833>",
+            msg,
+        )
+        self.assertNotIn("Report: inventory_pipeline_company_a_145421.json", msg)
 
     def test_no_quantity_adjustment_path_still_sets_final_audit_child_report(self):
         with tempfile.TemporaryDirectory() as td:

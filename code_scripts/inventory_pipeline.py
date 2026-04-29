@@ -969,11 +969,44 @@ def _first_blocked_item(summary: dict[str, Any]) -> tuple[str, str]:
 def _append_run_or_report(lines: list[str], summary: dict[str, Any]) -> None:
     run_url = str(summary.get("run_url") or "").strip()
     if run_url:
-        lines.append(f"Run: {run_url}")
+        run_id = _operator_run_id(
+            scope="inventory_pipeline",
+            run_job_id=str(summary.get("run_job_id") or "").strip(),
+            started_at=str(summary.get("started_at") or os.environ.get("OIAT_RUN_STARTED_AT", "")).strip(),
+        )
+        label = f"Inventory Run {run_id}" if run_id else "Inventory Run"
+        lines.append(f"Run: <{run_url}|{label}>")
         return
     report = Path(str(summary.get("summary_json") or "")).name
     if report:
         lines.append(f"Report: {report}")
+
+
+def _operator_run_id(*, scope: str, run_job_id: str, started_at: str) -> str:
+    prefix = "INV" if scope == "inventory_pipeline" else "RUN"
+    if scope in {"single_company", "all_companies"}:
+        prefix = "SAL"
+    if scope == "inventory_sync":
+        prefix = "AUD"
+
+    suffix = (run_job_id.split("-", 1)[0][:4] if run_job_id else "").upper()
+    if not suffix:
+        return ""
+
+    # started_at is expected to be ISO 8601; be forgiving.
+    mmdd = hhmm = ""
+    raw = (started_at or "").strip()
+    if raw:
+        try:
+            # datetime.fromisoformat handles both "Z" missing and offset-aware strings in py3.11+
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            mmdd = dt.strftime("%m%d")
+            hhmm = dt.strftime("%H%M")
+        except Exception:
+            mmdd = hhmm = ""
+    if not (mmdd and hhmm):
+        return f"{prefix}-????-????-{suffix}"
+    return f"{prefix}-{mmdd}-{hhmm}-{suffix}"
 
 
 def _format_slack_summary(summary: dict[str, Any]) -> str:

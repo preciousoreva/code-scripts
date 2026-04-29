@@ -276,3 +276,60 @@ class InventoryAuditIngestTests(TestCase):
         artifact = RunArtifact.objects.get(kind=RunArtifact.KIND_INVENTORY_AUDIT)
         self.assertEqual(artifact.run_job_id, job.id)
         self.assertEqual(artifact.upload_stats_json["report_type"], "inventory_pipeline")
+
+    def test_inventory_pipeline_run_does_not_attach_audit_sidecars(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_RUNNING,
+            dispatched_at=timezone.now(),
+        )
+        pipeline_payload = _pipeline_payload(run_job_id=str(job.id))
+        audit_payload = _payload(run_job_id=str(job.id))
+        with TemporaryDirectory() as td:
+            reports_dir = Path(td)
+            (reports_dir / "inventory_pipeline_company_a_120000.json").write_text(json.dumps(pipeline_payload))
+            (reports_dir / "inventory_audit_company_a_final_120000.json").write_text(json.dumps(audit_payload))
+            with mock.patch(
+                "apps.epos_qbo.services.artifact_ingestion.OPS_REPORTS_DIR", reports_dir
+            ), mock.patch(
+                "apps.epos_qbo.services.artifact_ingestion.OPS_LOGS_DIR", reports_dir
+            ):
+                attached = attach_recent_artifacts_to_job(job)
+
+        self.assertEqual(attached, 1)
+        self.assertEqual(
+            RunArtifact.objects.filter(run_job_id=job.id, source_path__contains="inventory_pipeline_").count(),
+            1,
+        )
+        self.assertEqual(
+            RunArtifact.objects.filter(run_job_id=job.id, source_path__contains="inventory_audit_").count(),
+            0,
+        )
+
+    def test_inventory_pipeline_run_does_not_cross_link_nearby_audit_files(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_RUNNING,
+            dispatched_at=timezone.now(),
+        )
+        pipeline_payload = _pipeline_payload(run_job_id=str(job.id))
+        # Nearby audit file without run_job_id metadata should never attach to pipeline runs.
+        audit_payload = _payload(processed_at=(timezone.now() - timedelta(minutes=5)).isoformat())
+        with TemporaryDirectory() as td:
+            reports_dir = Path(td)
+            (reports_dir / "inventory_pipeline_company_a_120000.json").write_text(json.dumps(pipeline_payload))
+            (reports_dir / "inventory_audit_company_a_debug_120000.json").write_text(json.dumps(audit_payload))
+            with mock.patch(
+                "apps.epos_qbo.services.artifact_ingestion.OPS_REPORTS_DIR", reports_dir
+            ), mock.patch(
+                "apps.epos_qbo.services.artifact_ingestion.OPS_LOGS_DIR", reports_dir
+            ):
+                attached = attach_recent_artifacts_to_job(job)
+
+        self.assertEqual(attached, 1)
+        self.assertEqual(
+            RunArtifact.objects.filter(run_job_id=job.id, source_path__contains="inventory_audit_").count(),
+            0,
+        )

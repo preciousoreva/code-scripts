@@ -325,9 +325,65 @@ class RunJob(models.Model):
 
     @property
     def display_label(self) -> str:
-        """Human-readable run label: YYYY-MM-DD HH:MM from started_at or created_at."""
+        """Legacy human-readable run label: YYYY-MM-DD HH:MM from started_at or created_at.
+
+        Prefer `friendly_id` for operator-facing identification.
+        """
         dt = self.started_at or self.created_at
         return dt.strftime("%Y-%m-%d %H:%M") if dt else str(self.id)
+
+    @property
+    def workflow_label(self) -> str:
+        if self.scope in {self.SCOPE_SINGLE, self.SCOPE_ALL}:
+            return "Sales"
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            return "Inventory"
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            return "Inventory Audit/Debug"
+        return "Run"
+
+    @property
+    def scope_label(self) -> str:
+        if self.scope == self.SCOPE_ALL:
+            return "All companies"
+        if self.scope == self.SCOPE_SINGLE:
+            return "Single company"
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            return "Inventory"
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            return "Inventory audit"
+        return str(self.scope).replace("_", " ").strip() or "Run"
+
+    @property
+    def run_prefix(self) -> str:
+        if self.scope in {self.SCOPE_SINGLE, self.SCOPE_ALL}:
+            return "SAL"
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            return "INV"
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            return "AUD"
+        return "RUN"
+
+    @property
+    def friendly_id(self) -> str:
+        """Operator-facing run ID: INV/SAL-MMDD-HHMM-XXXX."""
+        dt = self.started_at or self.created_at
+        if dt is None:
+            return f"{self.run_prefix}-????-????-{self._uuid_suffix}"
+        local = timezone.localtime(dt)
+        mmdd = local.strftime("%m%d")
+        hhmm = local.strftime("%H%M")
+        return f"{self.run_prefix}-{mmdd}-{hhmm}-{self._uuid_suffix}"
+
+    @property
+    def friendly_title(self) -> str:
+        return f"{self.workflow_label} Run {self.friendly_id}"
+
+    @property
+    def _uuid_suffix(self) -> str:
+        # UUIDField string begins with the hex prefix (e.g. e8333646-...)
+        raw = str(self.id).split("-", 1)[0]
+        return (raw[:4] or "????").upper()
 
     def __str__(self) -> str:
         return f"RunJob {self.id} [{self.status}]"

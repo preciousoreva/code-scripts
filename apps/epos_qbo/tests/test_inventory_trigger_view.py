@@ -181,7 +181,7 @@ class InventoryTriggerViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
-        self.assertIn("Inventory pipeline report", html)
+        self.assertIn("Inventory report", html)
         self.assertIn("Products checked:", html)
         self.assertIn("147", html)
         self.assertIn("Catalog fixes:", html)

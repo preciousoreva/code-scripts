@@ -165,6 +165,8 @@ class InventoryAuditSummaryTest(unittest.TestCase):
             {
                 "OIAT_RUN_JOB_ID": "job-123",
                 "OIAT_PORTAL_BASE_URL": "https://portal.oiatsolutions.com",
+                "OIAT_RUN_SCOPE": "all_companies",
+                "OIAT_RUN_STARTED_AT": "2026-04-28T18:00:00+00:00",
             },
             clear=True,
         ):
@@ -175,7 +177,10 @@ class InventoryAuditSummaryTest(unittest.TestCase):
                 status="success",
             )
 
-        self.assertIn("Run: https://portal.oiatsolutions.com/epos-qbo/runs/job-123/", msg)
+        self.assertIn(
+            "Run: <https://portal.oiatsolutions.com/epos-qbo/runs/job-123/|Sales Run SAL-0428-1800-JOB>",
+            msg,
+        )
 
     def test_sales_run_summary_omits_run_link_without_config(self):
         with mock.patch.dict("os.environ", {}, clear=True):

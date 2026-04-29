@@ -28,6 +28,36 @@ def build_run_detail_url(run_job_id: Optional[str] = None) -> str:
     return f"{base}/epos-qbo/runs/{job_id}/"
 
 
+def _operator_run_id(*, scope: str, run_job_id: str, started_at: str) -> str:
+    prefix = "RUN"
+    if scope in {"single_company", "all_companies"}:
+        prefix = "SAL"
+    elif scope == "inventory_pipeline":
+        prefix = "INV"
+    elif scope == "inventory_sync":
+        prefix = "AUD"
+
+    suffix = (run_job_id.split("-", 1)[0][:4] if run_job_id else "").upper()
+    if not suffix:
+        return ""
+    raw = (started_at or "").strip()
+    if not raw:
+        return f"{prefix}-????-????-{suffix}"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return f"{prefix}-????-????-{suffix}"
+    return f"{prefix}-{dt.strftime('%m%d')}-{dt.strftime('%H%M')}-{suffix}"
+
+
+def _slack_run_link(*, url: str, scope: str, run_job_id: str) -> str:
+    started_at = os.getenv("OIAT_RUN_STARTED_AT", "").strip()
+    run_id = _operator_run_id(scope=scope, run_job_id=run_job_id, started_at=started_at)
+    workflow = "Sales" if scope in {"single_company", "all_companies"} else "Inventory"
+    label = f"{workflow} Run {run_id}" if run_id else f"{workflow} Run"
+    return f"<{url}|{label}>"
+
+
 def send_slack_success(message: str, webhook_url: str = None) -> None:
     """
     Send a Slack notification.
@@ -571,9 +601,11 @@ def format_run_summary(
         for warning in warnings[:6]:  # Limit to 6 warnings
             message += f"  – {warning}\n"
 
-    run_url = str(summary.get("run_url") or build_run_detail_url(str(summary.get("run_job_id") or ""))).strip()
-    if run_url:
-        message += f"• Run: {run_url}\n"
+    run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
+    run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
+    if run_url and run_job_id:
+        scope = str(summary.get("scope") or os.getenv("OIAT_RUN_SCOPE", "")).strip() or "all_companies"
+        message += f"• Run: {_slack_run_link(url=run_url, scope=scope, run_job_id=run_job_id)}\n"
     
     return message
 

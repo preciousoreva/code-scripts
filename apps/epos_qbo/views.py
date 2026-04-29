@@ -428,7 +428,7 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
 
 
 def _overview_live_log_message(job: RunJob, company_display: str) -> str:
-    run_label = job.display_label
+    run_label = job.friendly_id
     if job.status == RunJob.STATUS_SUCCEEDED:
         return f"{company_display}: Run {run_label} succeeded"
     if job.status == RunJob.STATUS_FAILED:
@@ -1679,10 +1679,10 @@ def schedule_run_now(request, schedule_id):
     dispatch_next_queued_job()
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Scheduled run started: {job.display_label}")
+        messages.success(request, f"Scheduled run started: {job.friendly_id}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.success(request, f"Scheduled run queued: {job.display_label}")
+    messages.success(request, f"Scheduled run queued: {job.friendly_id}")
     return redirect("epos_qbo:schedules")
 
 
@@ -1964,7 +1964,7 @@ def run_detail(request, job_id):
             [
                 {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
                 {"label": "Runs", "url": reverse("epos_qbo:runs")},
-                {"label": f"Run {job.display_label}", "url": None},
+                {"label": f"Run {job.friendly_id}", "url": None},
             ],
             back_url=reverse("epos_qbo:runs"),
             back_label="Runs",
@@ -2060,10 +2060,10 @@ def trigger_run(request):
 
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Run started: {job.display_label}")
+        messages.success(request, f"Run started: {job.friendly_id}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.info(request, f"Run queued: {job.display_label}. It will start automatically.")
+    messages.info(request, f"Run queued: {job.friendly_id}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 
@@ -2102,10 +2102,10 @@ def trigger_inventory_run(request):
 
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Inventory sync started: {job.display_label}")
+        messages.success(request, f"Inventory sync started: {job.friendly_id}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.info(request, f"Inventory sync queued: {job.display_label}. It will start automatically.")
+    messages.info(request, f"Inventory sync queued: {job.friendly_id}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 
