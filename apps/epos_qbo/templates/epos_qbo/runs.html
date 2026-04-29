@@ -18,20 +18,20 @@
     without exposing low-level inventory remediation tools as separate actions.
     {% endcomment %}
     <div x-data="{ tab: 'sales' }">
-        <div role="tablist" aria-label="Run trigger" class="flex border-b border-slate-200 dark:border-slate-700 mb-4">
-            <button type="button" role="tab" :aria-selected="tab === 'sales'" @click="tab = 'sales'"
-                :class="tab === 'sales' ? 'border-blue-600 text-blue-600 dark:text-blue-400 dark:border-blue-400' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'"
-                class="px-4 py-2 -mb-px border-b-2 text-sm font-medium transition-colors">
+        <div role="tablist" aria-label="Run trigger" class="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-900 p-1 mb-4">
+            <button type="button" role="tab" aria-controls="sales-run-panel" :aria-selected="tab === 'sales'" :aria-current="tab === 'sales' ? 'page' : null" @click="tab = 'sales'"
+                :class="tab === 'sales' ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-slate-100 shadow-sm border border-slate-200 dark:border-slate-700' : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100 border border-transparent'"
+                class="min-w-24 rounded-md px-4 py-2 text-sm font-medium transition-colors">
                 Sales
             </button>
-            <button type="button" role="tab" :aria-selected="tab === 'inventory'" @click="tab = 'inventory'"
-                :class="tab === 'inventory' ? 'border-blue-600 text-blue-600 dark:text-blue-400 dark:border-blue-400' : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'"
-                class="px-4 py-2 -mb-px border-b-2 text-sm font-medium transition-colors">
+            <button type="button" role="tab" aria-controls="inventory-run-panel" :aria-selected="tab === 'inventory'" :aria-current="tab === 'inventory' ? 'page' : null" @click="tab = 'inventory'"
+                :class="tab === 'inventory' ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-slate-100 shadow-sm border border-slate-200 dark:border-slate-700' : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100 border border-transparent'"
+                class="min-w-24 rounded-md px-4 py-2 text-sm font-medium transition-colors">
                 Inventory
             </button>
         </div>
 
-    <section x-show="tab === 'sales'" class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm" x-data="runTriggerForm()">
+    <section id="sales-run-panel" role="tabpanel" x-show="tab === 'sales'" class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm" x-data="runTriggerForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Sales Receipt Pipeline</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">Download EPOS sales, transform, upload to QBO, and reconcile totals.</p>
         <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="space-y-4">
@@ -117,11 +117,11 @@
         </form>
     </section>
 
-    <section x-show="tab === 'inventory'" x-cloak class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm"
+    <section id="inventory-run-panel" role="tabpanel" x-show="tab === 'inventory'" x-cloak class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm"
              x-data="inventoryForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Downloads EPOS stock, checks QuickBooks inventory, fixes supported pack-variant catalog issues, and syncs quantities.
+            Downloads EPOS stock, fixes supported QBO catalog issues, and syncs quantities.
         </p>
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
             {% csrf_token %}

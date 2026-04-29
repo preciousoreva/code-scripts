@@ -60,6 +60,22 @@ _DEFAULT_STOCK_NAME_COL = "Name"
 _DEFAULT_STOCK_QTY_COL = "MeasuredCurrentStock"
 _DEFAULT_STOCK_CATEGORY_COL = "CategoryName"
 _QBO_MINOR_VERSION = "70"
+_QBO_SNAPSHOT_COLUMNS = [
+    "Id",
+    "Name",
+    "Type",
+    "TrackQtyOnHand",
+    "QtyOnHand",
+    "Active",
+    "InvStartDate",
+    "ParentRef",
+    "SubItem",
+    "UnitPrice",
+    "PurchaseCost",
+    "qbo_name_original",
+    "qbo_name_raw",
+    "qbo_name_display",
+]
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -94,6 +110,14 @@ def _safe_bool_str(value: Any) -> bool:
     return s in {"true", "1", "yes", "y", "on"}
 
 
+def _safe_active_bool(value: Any) -> bool:
+    if value is None or value == "":
+        return True
+    if isinstance(value, float) and pd.isna(value):
+        return True
+    return _safe_bool_str(value)
+
+
 def _stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
@@ -109,6 +133,12 @@ def _collapse_spaces(s: str) -> str:
 def _original_qbo_names(series: pd.Series) -> pd.Series:
     """Preserve QBO item names exactly enough for catalog decisions."""
     return series.where(series.notna(), "").astype(str)
+
+
+def _qbo_parent_ref_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("value") or value.get("name") or "").strip()
+    return str(value or "").strip()
 
 
 def _normalize_name_key(value: Any) -> str:
@@ -484,7 +514,8 @@ def _qbo_query_items_page(
     from urllib.parse import quote
 
     query = (
-        "select Id, Name, Type, TrackQtyOnHand, QtyOnHand "
+        "select Id, Name, Type, TrackQtyOnHand, QtyOnHand, Active, "
+        "InvStartDate, ParentRef, SubItem, UnitPrice, PurchaseCost "
         "from Item "
         "where Active = true and Type = 'Inventory' "
         f"startposition {int(start_position)} maxresults {int(max_results)}"
@@ -566,17 +597,28 @@ def fetch_qbo_inventory_items_snapshot(
     with open(output_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["Id", "Name", "Type", "TrackQtyOnHand", "QtyOnHand"],
+            fieldnames=_QBO_SNAPSHOT_COLUMNS,
         )
         writer.writeheader()
         for it in rows:
+            name_original = str(it.get("Name", ""))
+            name_display = _collapse_spaces(name_original)
             writer.writerow(
                 {
                     "Id": str(it.get("Id", "")).strip(),
-                    "Name": str(it.get("Name", "")).strip(),
+                    "Name": name_original,
                     "Type": str(it.get("Type", "")).strip(),
                     "TrackQtyOnHand": str(it.get("TrackQtyOnHand", "")).strip(),
                     "QtyOnHand": str(it.get("QtyOnHand", "")).strip(),
+                    "Active": str(it.get("Active", True)).strip(),
+                    "InvStartDate": str(it.get("InvStartDate", "")).strip(),
+                    "ParentRef": _qbo_parent_ref_value(it.get("ParentRef")),
+                    "SubItem": str(it.get("SubItem", "")).strip(),
+                    "UnitPrice": str(it.get("UnitPrice", "")).strip(),
+                    "PurchaseCost": str(it.get("PurchaseCost", "")).strip(),
+                    "qbo_name_original": name_original,
+                    "qbo_name_raw": name_original,
+                    "qbo_name_display": name_display,
                 }
             )
 
@@ -669,6 +711,11 @@ def load_epos_stock_snapshot(
             raw = total_stock.loc[mask_total_available] * out.loc[mask_total_available, "multiplier"]
             out.loc[mask_total_available, "epos_single_units"] = raw.map(lambda v: float(int(round(v))))
 
+    # EPOS can report negative stock/volume for one pack row while a sibling
+    # pack row is positive. Treat each negative row as zero before grouping so
+    # one bad location/pack balance does not subtract from the base product.
+    out["epos_single_units"] = out["epos_single_units"].map(lambda v: max(0.0, float(v or 0.0)))
+
     if categories:
         requested = {_normalize_category_value(v).lower() for v in categories if _normalize_category_value(v)}
         out = out[out["category_name"].str.lower().isin(requested)].copy()
@@ -711,8 +758,17 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
 
     inv = df[is_inventory & tracks].copy()
     inv = _dedupe_qbo_rows_by_id(inv)
+    if "Active" in inv.columns:
+        inv["qbo_is_active"] = inv["Active"].map(_safe_active_bool)
+    else:
+        inv["qbo_is_active"] = True
 
-    names_original = _original_qbo_names(inv["Name"])
+    if "qbo_name_original" in inv.columns:
+        names_original = _original_qbo_names(inv["qbo_name_original"])
+    elif "qbo_name_raw" in inv.columns:
+        names_original = _original_qbo_names(inv["qbo_name_raw"])
+    else:
+        names_original = _original_qbo_names(inv["Name"])
     names_display = names_original.map(_collapse_spaces)
     base_names = []
     had_pack = []
@@ -754,38 +810,42 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
         items = df_group[df_group["qbo_has_pack"] == False]  # noqa: E712
         return _join_names(items["qbo_name_display"].tolist())
 
-    grouped = (
-        inv.groupby("base_name_norm", as_index=False)
-        .agg(
-            base_name=("base_name", "first"),
-            qbo_qty_on_hand=("qbo_qty_on_hand", "sum"),
-            qbo_item_count_for_base=("Id", "count"),
-            qbo_has_pack_variants=("qbo_has_pack", "max"),
-            qbo_base_item_count=("qbo_is_base_item", "sum"),
-            qbo_item_names_for_base=("qbo_name_display", _join_names),
-        )
-        .sort_values("base_name")
-        .reset_index(drop=True)
-    )
-    # Replace the naive name joins with base/pack-specific joins.
-    if not grouped.empty:
-        by_base = {}
-        for _, g in inv.groupby("base_name_norm"):
-            key = str(g.iloc[0]["base_name_norm"])
-            base_ids = _join_ids(
-                g[g["qbo_has_pack"] == False]["Id"].tolist()  # noqa: E712
-            )
-            by_base[key] = {
-                "base_names": _join_base_names(g),
-                "pack_names": _join_pack_names(g),
-                "base_ids": base_ids,
+    grouped_rows: list[dict[str, Any]] = []
+    for base_norm, g in inv.groupby("base_name_norm"):
+        active = g[g["qbo_is_active"] == True]  # noqa: E712
+        active_base = active[active["qbo_has_pack"] == False]  # noqa: E712
+        active_pack = active[active["qbo_has_pack"] == True]  # noqa: E712
+        inactive_base = g[
+            (g["qbo_is_active"] != True) & (g["qbo_has_pack"] == False)  # noqa: E712
+        ]
+        grouped_rows.append(
+            {
+                "base_name_norm": str(base_norm),
+                "base_name": str(g.iloc[0]["base_name"]),
+                "qbo_qty_on_hand": float(active["qbo_qty_on_hand"].sum()) if not active.empty else 0.0,
+                "qbo_item_row_count_for_base": int(len(active)),
+                "qbo_unique_item_count_for_base": int(active["qbo_name_display"].astype(str).str.strip().nunique()) if not active.empty else 0,
+                "qbo_item_count_for_base": int(len(active)),
+                "qbo_has_pack_variants": bool(not active_pack.empty),
+                "qbo_active_base_item_count": int(len(active_base)),
+                "qbo_base_item_count": int(len(active_base)),
+                "qbo_active_pack_variant_count": int(len(active_pack)),
+                "qbo_item_names_for_base": _join_names(active["qbo_name_display"].tolist()),
+                "qbo_base_item_names": _join_base_names(active),
+                "qbo_pack_variant_names": _join_pack_names(active),
+                "qbo_active_base_item_ids": _join_ids(active_base["Id"].tolist()),
+                "qbo_base_item_ids": _join_ids(active_base["Id"].tolist()),
+                "qbo_inactive_base_item_ids": _join_ids(inactive_base["Id"].tolist()),
+                "qbo_active_pack_variant_item_ids": _join_ids(active_pack["Id"].tolist()),
             }
-        grouped["qbo_base_item_names"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("base_names", ""))
-        grouped["qbo_pack_variant_names"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("pack_names", ""))
-        grouped["qbo_base_item_ids"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("base_ids", ""))
-        grouped["qbo_base_item_names_for_base"] = grouped["qbo_base_item_names"]
-        grouped["qbo_pack_variant_names_for_base"] = grouped["qbo_pack_variant_names"]
-    return grouped
+        )
+
+    grouped = pd.DataFrame(grouped_rows)
+    if grouped.empty:
+        return grouped
+    grouped["qbo_base_item_names_for_base"] = grouped["qbo_base_item_names"]
+    grouped["qbo_pack_variant_names_for_base"] = grouped["qbo_pack_variant_names"]
+    return grouped.sort_values("base_name").reset_index(drop=True)
 
 
 def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
@@ -809,7 +869,17 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
 
     inv = df[is_inventory & tracks].copy()
     inv = _dedupe_qbo_rows_by_id(inv)
-    names_original = _original_qbo_names(inv["Name"])
+    if "Active" in inv.columns:
+        active = inv["Active"].map(_safe_active_bool)
+    else:
+        active = pd.Series([True] * len(inv), index=inv.index)
+    inv = inv[active == True].copy().reset_index(drop=True)  # noqa: E712
+    if "qbo_name_original" in inv.columns:
+        names_original = _original_qbo_names(inv["qbo_name_original"])
+    elif "qbo_name_raw" in inv.columns:
+        names_original = _original_qbo_names(inv["qbo_name_raw"])
+    else:
+        names_original = _original_qbo_names(inv["Name"])
     names_display = names_original.map(_collapse_spaces)
     base_names = []
     had_pack = []
@@ -829,6 +899,14 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
             "qbo_name_display": names_display,
             "qbo_has_pack": had_pack,
             "qbo_qty_on_hand": inv.get("QtyOnHand", 0).map(_safe_float),
+            "Type": inv.get("Type", pd.Series([""] * len(inv))).astype(str),
+            "TrackQtyOnHand": inv.get("TrackQtyOnHand", pd.Series([True] * len(inv))),
+            "Active": True,
+            "InvStartDate": inv.get("InvStartDate", pd.Series([""] * len(inv))).astype(str),
+            "ParentRef": inv.get("ParentRef", pd.Series([""] * len(inv))).map(_qbo_parent_ref_value),
+            "SubItem": inv.get("SubItem", pd.Series([""] * len(inv))).astype(str),
+            "UnitPrice": inv.get("UnitPrice", pd.Series([""] * len(inv))),
+            "PurchaseCost": inv.get("PurchaseCost", pd.Series([""] * len(inv))),
         }
     )
     out["Id"] = out["Id"].map(lambda x: str(x).strip())
@@ -895,6 +973,23 @@ def build_audit_report(
     merged["qbo_item_names_for_base"] = merged.get("qbo_item_names_for_base", "").fillna("")
     merged["qbo_base_item_names_for_base"] = merged.get("qbo_base_item_names_for_base", "").fillna("")
     merged["qbo_pack_variant_names_for_base"] = merged.get("qbo_pack_variant_names_for_base", "").fillna("")
+    for col in [
+        "qbo_item_row_count_for_base",
+        "qbo_unique_item_count_for_base",
+        "qbo_active_base_item_count",
+        "qbo_active_pack_variant_count",
+    ]:
+        if col not in merged.columns:
+            merged[col] = 0
+        merged[col] = merged[col].fillna(0).astype(int)
+    for col in [
+        "qbo_active_base_item_ids",
+        "qbo_inactive_base_item_ids",
+        "qbo_active_pack_variant_item_ids",
+    ]:
+        if col not in merged.columns:
+            merged[col] = ""
+        merged[col] = merged[col].fillna("")
 
     merged["delta"] = merged["epos_single_units"] - merged["qbo_qty_on_hand"]
 
@@ -967,15 +1062,22 @@ def build_audit_report(
         "epos_has_pack",
         "epos_categories",
         "epos_category_count",
+        "qbo_item_row_count_for_base",
+        "qbo_unique_item_count_for_base",
         "qbo_item_count_for_base",
         "qbo_has_pack_variants",
+        "qbo_active_base_item_count",
         "qbo_base_item_count",
+        "qbo_active_pack_variant_count",
         "qbo_item_names_for_base",
         "qbo_base_item_names_for_base",
         "qbo_pack_variant_names_for_base",
         "qbo_base_item_names",
         "qbo_pack_variant_names",
+        "qbo_active_base_item_ids",
         "qbo_base_item_ids",
+        "qbo_inactive_base_item_ids",
+        "qbo_active_pack_variant_item_ids",
     ]
     return merged[cols].sort_values(["status", "base_name"]).reset_index(drop=True)
 

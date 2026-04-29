@@ -1,10 +1,13 @@
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from code_scripts.inventory_notifications import (
     format_inventory_audit_summary,
     format_pack_variant_apply_summary,
     format_scope,
 )
+from code_scripts.slack_notify import format_run_summary
 
 
 class FormatScopeTest(unittest.TestCase):
@@ -131,6 +134,35 @@ class InventoryAuditSummaryTest(unittest.TestCase):
         )
         self.assertIn("Inventory sync preview", msg)
         self.assertIn("Mode: Preview only", msg)
+
+    def test_sales_run_summary_includes_portal_run_link_when_configured(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "OIAT_RUN_JOB_ID": "job-123",
+                "OIAT_PORTAL_BASE_URL": "https://portal.oiatsolutions.com",
+            },
+            clear=True,
+        ):
+            msg = format_run_summary(
+                "Sales Receipt Pipeline",
+                Path("/tmp/pipeline.log"),
+                {"rows_total": 1, "rows_kept": 1},
+                status="success",
+            )
+
+        self.assertIn("Run: https://portal.oiatsolutions.com/epos-qbo/runs/job-123/", msg)
+
+    def test_sales_run_summary_omits_run_link_without_config(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            msg = format_run_summary(
+                "Sales Receipt Pipeline",
+                Path("/tmp/pipeline.log"),
+                {"rows_total": 1, "rows_kept": 1},
+                status="success",
+            )
+
+        self.assertNotIn("Run: http", msg)
 
     def test_failure_branch_includes_error_and_red_x(self):
         msg = format_inventory_audit_summary(

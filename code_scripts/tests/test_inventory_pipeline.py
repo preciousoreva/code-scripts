@@ -220,9 +220,14 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             "scope": "",
             "products_checked": 3,
             "already_correct": 1,
+            "in_sync": 1,
             "catalog_fixes_applied": 1,
+            "base_items_created": 0,
             "duplicate_base_items_resolved": 0,
             "quantity_updates_applied": 1,
+            "blocked_items": 2,
+            "missing_base_item_in_qbo": 1,
+            "duplicate_base_items_in_qbo": 0,
             "skipped_unsupported": 2,
             "still_needs_review": 2,
             "unsupported_catalog_issues": {
@@ -231,6 +236,10 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                 "multiple_active_base_items": 0,
             },
             "blocked_catalog_examples": [],
+            "final_status_counts": {"in_sync": 1, "needs_adjustment": 2},
+            "final_catalog_issue_counts": {"exact_name_match": 1, "missing_from_qbo": 1},
+            "child_reports": {"final_audit": "/tmp/final.csv"},
+            "completion_status": "completed_with_blocked_items",
             "max_catalog_fixes": None,
             "max_quantity_adjustments": None,
             "summary_json": "/tmp/report.json",
@@ -240,6 +249,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
 
     def test_final_summary_omits_limits_when_unlimited(self):
         msg = inventory_pipeline._format_final_summary(self._summary_payload())
+        self.assertIn("Inventory sync completed with blocked items", msg)
         self.assertIn("Blocked items: 2", msg)
         self.assertIn("Missing base item in QBO: 1", msg)
         self.assertIn("Duplicate base items in QBO: 0", msg)
@@ -263,6 +273,31 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         msg = inventory_pipeline._format_final_summary(self._summary_payload(duplicate_base_items_resolved=1))
         self.assertIn("Duplicate base items resolved: 1", msg)
 
+    def test_final_summary_uses_success_wording_for_clean_run(self):
+        msg = inventory_pipeline._format_final_summary(
+            self._summary_payload(
+                products_checked=147,
+                already_correct=147,
+                in_sync=147,
+                blocked_items=0,
+                missing_base_item_in_qbo=0,
+                duplicate_base_items_in_qbo=0,
+                still_needs_review=0,
+                final_status_counts={"in_sync": 147},
+                final_catalog_issue_counts={"exact_name_match": 147},
+                completion_status="clean",
+                skipped_unsupported=0,
+            )
+        )
+        self.assertIn("Inventory sync completed successfully", msg)
+        self.assertIn("In sync / Products clean: 147", msg)
+
+    def test_final_summary_uses_failed_wording_when_requested(self):
+        msg = inventory_pipeline._format_final_summary(
+            self._summary_payload(completion_status="failed")
+        )
+        self.assertIn("Inventory sync failed", msg)
+
     def test_final_summary_includes_blocked_examples_when_blocked_count_is_small(self):
         msg = inventory_pipeline._format_final_summary(
             self._summary_payload(
@@ -277,6 +312,45 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertIn("BACARDI WHITE RUM 750ml", msg)
         self.assertIn("SMIRNOFF ICE DOUBLE BLACK CAN 330ml", msg)
         self.assertNotIn("only_pack_variant_exists", msg)
+
+    def test_product_filtered_summary_includes_reconciliation_details(self):
+        msg = inventory_pipeline._format_final_summary(
+            self._summary_payload(
+                product_details=[
+                    {
+                        "base_name": "ACTION BITTERS50ml",
+                        "epos_expected_qty": 15.0,
+                        "qbo_final_qty": 15.0,
+                        "delta": 0.0,
+                        "catalog_fix_applied": False,
+                        "base_item_created": False,
+                        "duplicate_base_resolved": False,
+                        "quantity_adjustment_applied": True,
+                        "final_status": "in_sync",
+                    }
+                ]
+            )
+        )
+        self.assertIn("Product details:", msg)
+        self.assertIn("ACTION BITTERS50ml: EPOS=15.0 QBO=15.0 delta=0.0 status=in_sync", msg)
+
+    def test_product_filtered_blocked_summary_includes_reason(self):
+        msg = inventory_pipeline._format_final_summary(
+            self._summary_payload(
+                product_details=[
+                    {
+                        "base_name": "Blocked Widget",
+                        "epos_expected_qty": 5.0,
+                        "qbo_final_qty": 0.0,
+                        "delta": 5.0,
+                        "final_status": "missing_in_qbo",
+                        "blocked_reason": "product not found in QuickBooks",
+                    }
+                ]
+            )
+        )
+        self.assertIn("Blocked Widget", msg)
+        self.assertIn("reason=product not found in QuickBooks", msg)
 
     def test_write_summary_reports_includes_blocked_fields_in_csv_and_json(self):
         with tempfile.TemporaryDirectory() as td:
@@ -302,8 +376,60 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             row = csv_rows[0]
             self.assertEqual(int(row["blocked_items"]), 2)
             self.assertEqual(int(row["missing_base_item_in_qbo"]), 1)
-            self.assertEqual(int(row["duplicate_base_items_in_qbo"]), 1)
-            self.assertIn("BACARDI WHITE RUM 750ml", str(row["blocked_examples"]))
+            self.assertEqual(int(row["duplicate_base_items_in_qbo"]), 0)
+            self.assertEqual(row["final_audit"], "/tmp/final.csv")
+            self.assertEqual(row["run_type"], "inventory_pipeline")
+
+    def test_summary_schema_always_includes_stable_fields_and_zero_values(self):
+        with tempfile.TemporaryDirectory() as td:
+            json_path, _csv_path = inventory_pipeline._write_summary_reports(
+                {
+                    "run_type": "inventory_pipeline",
+                    "company_key": "company_a",
+                    "display_name": "Company A",
+                    "child_reports": {"final_audit": "/tmp/final.csv"},
+                },
+                output_dir=td,
+            )
+            payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+
+        for key in [
+            "run_type",
+            "company_key",
+            "display_name",
+            "scope",
+            "started_at",
+            "finished_at",
+            "run_job_id",
+            "stock_csv",
+            "qbo_csv",
+            "child_reports",
+            "summary_json",
+            "summary_csv",
+            "dry_run",
+            "products_checked",
+            "already_correct",
+            "in_sync",
+            "catalog_fixes_applied",
+            "base_items_created",
+            "duplicate_base_items_resolved",
+            "quantity_updates_applied",
+            "blocked_items",
+            "missing_base_item_in_qbo",
+            "duplicate_base_items_in_qbo",
+            "still_needs_review",
+            "skipped_unsupported",
+            "unsupported_catalog_issues",
+            "blocked_catalog_examples",
+            "created_base_details",
+            "duplicate_resolution_details",
+            "quantity_adjustment_stats",
+            "final_status_counts",
+            "final_catalog_issue_counts",
+        ]:
+            self.assertIn(key, payload)
+        self.assertEqual(payload["blocked_items"], 0)
+        self.assertEqual(payload["catalog_fixes_applied"], 0)
 
     def test_product_filter_with_pack_multiplier_runs_real_audit_path(self):
         with tempfile.TemporaryDirectory() as td:
@@ -578,11 +704,12 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                  mock.patch.object(inventory_pipeline, "TokenManager"), \
                  mock.patch.object(inventory_pipeline, "GlobalRunLock", return_value=lock), \
                  mock.patch.object(inventory_pipeline, "post_inventory_adjustment", return_value={}) as post_mock, \
-                 mock.patch.object(inventory_pipeline, "mark_qbo_snapshot_stale"):
+                 mock.patch.object(inventory_pipeline, "mark_qbo_snapshot_stale") as stale_mock:
                 summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
 
             self.assertIsNone(summary["max_quantity_adjustments"])
             self.assertEqual(post_mock.call_count, 3)
+            stale_mock.assert_called_once_with("company_a", reason="inventory_pipeline_quantity_adjustments_posted")
             self.assertEqual(summary["quantity_updates_applied"], 3)
             self.assertEqual(summary["quantity_adjustment_stats"]["skipped_due_to_cap"], 0)
 
@@ -640,6 +767,84 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertEqual(summary["run_job_id"], "job-123")
             payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
             self.assertEqual(payload["run_job_id"], "job-123")
+
+    def test_run_link_uses_portal_base_url_when_available(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OIAT_RUN_JOB_ID": "job-123",
+                "OIAT_PORTAL_BASE_URL": "https://portal.oiatsolutions.com",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                inventory_pipeline._build_run_detail_url(),
+                "https://portal.oiatsolutions.com/epos-qbo/runs/job-123/",
+            )
+
+        with mock.patch.dict(os.environ, {"OIAT_RUN_JOB_ID": "job-123"}, clear=True):
+            self.assertEqual(inventory_pipeline._build_run_detail_url(), "")
+
+    def test_no_quantity_adjustment_path_still_sets_final_audit_child_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            clean_report = pd.DataFrame(
+                [
+                    {
+                        "base_name": "Widget",
+                        "epos_single_units": 5.0,
+                        "qbo_qty_on_hand": 5.0,
+                        "delta": 0.0,
+                        "status": "in_sync",
+                        "catalog_issue_type": "exact_name_match",
+                    }
+                ]
+            )
+            self._patch_common(td, plan=pd.DataFrame(), qbo_paths=[qbo_path], audit_report=clean_report)
+            with mock.patch.object(
+                inventory_pipeline,
+                "_apply_exact_match_quantity_adjustments",
+                return_value={
+                    "posted": 0,
+                    "planned": 0,
+                    "skipped": 0,
+                    "skipped_due_to_cap": 0,
+                    "skipped_non_exact": 0,
+                    "changed_qbo": False,
+                    "details": [],
+                },
+            ):
+                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+
+            self.assertIn("final_audit", summary["child_reports"])
+            self.assertTrue(Path(summary["child_reports"]["final_audit"]).name.startswith("inventory_audit_company_a_final_"))
+            payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["child_reports"]["final_audit"], summary["child_reports"]["final_audit"])
+            self.assertEqual(summary["completion_status"], "clean")
+
+    def test_already_clean_run_has_stable_zero_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            clean_report = pd.DataFrame(
+                [
+                    {
+                        "base_name": "Widget",
+                        "epos_single_units": 5.0,
+                        "qbo_qty_on_hand": 5.0,
+                        "delta": 0.0,
+                        "status": "in_sync",
+                        "catalog_issue_type": "exact_name_match",
+                    }
+                ]
+            )
+            self._patch_common(td, plan=pd.DataFrame(), qbo_paths=[qbo_path], audit_report=clean_report)
+            summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+
+            self.assertEqual(summary["blocked_items"], 0)
+            self.assertEqual(summary["in_sync"], 1)
+            self.assertEqual(summary["catalog_fixes_applied"], 0)
+            self.assertEqual(summary["quantity_updates_applied"], 0)
+            self.assertIn("final_audit", summary["child_reports"])
 
     def test_unsupported_catalog_issue_types_are_reported_not_applied(self):
         with tempfile.TemporaryDirectory() as td:

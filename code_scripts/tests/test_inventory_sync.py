@@ -609,6 +609,54 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
             self.assertIn("Fresh Widget", contents)
             self.assertNotIn("Old Widget", contents)
 
+    def test_fetch_qbo_snapshot_writes_diagnostic_columns_and_preserves_raw_name(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            output_path = Path(td) / "exports" / "company_a_products.csv"
+            with mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(
+                     inventory_sync,
+                     "_qbo_query_items_page",
+                     side_effect=[
+                         [
+                             {
+                                 "Id": "9355",
+                                 "Name": "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml",
+                                 "Type": "Inventory",
+                                 "TrackQtyOnHand": True,
+                                 "QtyOnHand": 10,
+                                 "Active": True,
+                                 "InvStartDate": "2026-01-01",
+                                 "ParentRef": {"value": "12"},
+                                 "SubItem": False,
+                                 "UnitPrice": 1200,
+                                 "PurchaseCost": 800,
+                             }
+                         ],
+                         [],
+                     ],
+                 ):
+                    inventory_sync.fetch_qbo_inventory_items_snapshot(
+                        company_key="company_a",
+                        realm_id="REALM123",
+                        output_path=output_path,
+                        force_refresh=True,
+                    )
+
+            rows = pd.read_csv(output_path)
+
+        self.assertIn("Active", rows.columns)
+        self.assertIn("InvStartDate", rows.columns)
+        self.assertIn("ParentRef", rows.columns)
+        self.assertIn("qbo_name_original", rows.columns)
+        row = rows.iloc[0].to_dict()
+        self.assertEqual(row["Name"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(row["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(row["qbo_name_display"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+
     def test_auto_fetch_qbo_writes_default_path_and_uses_it(self):
         import tempfile
         from pathlib import Path
@@ -1142,6 +1190,26 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(len(epos), 1)
         self.assertEqual(epos.iloc[0]["epos_single_units"], 623.0)
 
+    def test_negative_epos_pack_row_is_clamped_before_grouping(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Current Volume,Total Stock\n"
+                "ACTION BITTERS50ml*20,ALCOHOLS & SPIRITS,0,15 of 20 Each,0.75\n"
+                "ACTION BITTERS50ml*120,ALCOHOLS & SPIRITS,0,-30 of 120 Each,-0.25\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+
+        self.assertEqual(len(epos), 1)
+        row = epos.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "ACTION BITTERS50ml")
+        self.assertEqual(row["epos_single_units"], 15.0)
+
     def test_product_filter_with_pack_multiplier_still_literal_text_with_volume_columns(self):
         import tempfile
         from pathlib import Path
@@ -1324,6 +1392,46 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(len(grouped), 1)
         self.assertEqual(grouped.iloc[0]["qbo_base_item_names_for_base"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
         self.assertEqual(grouped.iloc[0]["qbo_base_item_ids"], "9355,13875")
+
+    def test_qbo_report_columns_show_rows_unique_names_and_active_base_ids(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "SMIRNOFF ICE DOUBLE BLACK CAN 330ml,ALCOHOLS,0\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand,Active\n"
+                "9355,SMIRNOFF ICE DOUBLE BLACK  CAN 330ml,Inventory,true,10,true\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229,true\n"
+                "13956,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12,Inventory,true,-1,true\n"
+                "13942,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,Inventory,true,-2,true\n"
+                "1,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,0,false\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        row = report.iloc[0].to_dict()
+        self.assertIn("qbo_item_row_count_for_base", report.columns)
+        self.assertIn("qbo_unique_item_count_for_base", report.columns)
+        self.assertIn("qbo_active_base_item_count", report.columns)
+        self.assertEqual(row["qbo_item_row_count_for_base"], 4)
+        self.assertEqual(row["qbo_unique_item_count_for_base"], 3)
+        self.assertEqual(row["qbo_active_base_item_count"], 2)
+        self.assertEqual(row["qbo_active_pack_variant_count"], 2)
+        self.assertEqual(row["qbo_base_item_ids"], "9355,13875")
+        self.assertEqual(row["qbo_active_base_item_ids"], "9355,13875")
+        self.assertEqual(row["qbo_inactive_base_item_ids"], "1")
+        self.assertEqual(row["qbo_active_pack_variant_item_ids"], "13956,13942")
+        self.assertNotIn("13956", row["qbo_base_item_ids"])
 
     def test_qbo_grouped_quantity_uses_raw_qtyonhand_without_pack_multiplier_scaling(self):
         import tempfile

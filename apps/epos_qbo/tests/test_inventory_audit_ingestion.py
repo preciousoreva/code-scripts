@@ -54,14 +54,21 @@ def _pipeline_payload(**overrides) -> dict:
         "qbo_csv": "/tmp/qbo.csv",
         "products_checked": 1,
         "already_correct": 1,
+        "in_sync": 1,
         "catalog_fixes_applied": 1,
+        "base_items_created": 0,
+        "duplicate_base_items_resolved": 0,
         "quantity_updates_applied": 0,
+        "blocked_items": 0,
+        "missing_base_item_in_qbo": 0,
+        "duplicate_base_items_in_qbo": 0,
         "skipped_unsupported": 0,
         "skipped_safely": 0,
         "still_needs_review": 0,
         "max_catalog_fixes": 1,
         "max_quantity_adjustments": 1,
         "final_status_counts": {"in_sync": 1},
+        "final_catalog_issue_counts": {"exact_name_match": 1},
         "unsupported_catalog_issues": {"missing_from_qbo": 0},
         "child_reports": {
             "catalog_cleanup": "/tmp/reports/catalog_cleanup_company_a_120000.csv",
@@ -148,6 +155,10 @@ class InventoryAuditIngestTests(TestCase):
         self.assertEqual(artifact.rows_kept, 1)
         self.assertEqual(artifact.upload_stats_json["report_type"], "inventory_pipeline")
         self.assertEqual(artifact.upload_stats_json["catalog_fixes_applied"], 1)
+        self.assertEqual(artifact.upload_stats_json["in_sync"], 1)
+        self.assertEqual(artifact.upload_stats_json["blocked_items"], 0)
+        self.assertEqual(artifact.upload_stats_json["base_items_created"], 0)
+        self.assertEqual(artifact.upload_stats_json["duplicate_base_items_resolved"], 0)
         self.assertEqual(artifact.upload_stats_json["quantity_updates_applied"], 0)
         self.assertIn(
             "/tmp/reports/inventory_pipeline_company_a_120000.csv",

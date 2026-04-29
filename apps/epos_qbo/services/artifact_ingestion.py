@@ -397,8 +397,14 @@ def ingest_inventory_pipeline_file(path: Path, run_job: RunJob | None = None) ->
         "summary_csv": summary_csv,
         "products_checked": _safe_int(data.get("products_checked")),
         "already_correct": _safe_int(data.get("already_correct")),
+        "in_sync": _safe_int(data.get("in_sync", data.get("already_correct"))),
         "catalog_fixes_applied": _safe_int(data.get("catalog_fixes_applied")),
+        "base_items_created": _safe_int(data.get("base_items_created")),
+        "duplicate_base_items_resolved": _safe_int(data.get("duplicate_base_items_resolved")),
         "quantity_updates_applied": _safe_int(data.get("quantity_updates_applied")),
+        "blocked_items": _safe_int(data.get("blocked_items")),
+        "missing_base_item_in_qbo": _safe_int(data.get("missing_base_item_in_qbo")),
+        "duplicate_base_items_in_qbo": _safe_int(data.get("duplicate_base_items_in_qbo")),
         "skipped_unsupported": _safe_int(data.get("skipped_unsupported")),
         "skipped_safely": _safe_int(data.get("skipped_safely")),
         "still_needs_review": _safe_int(data.get("still_needs_review")),
@@ -408,6 +414,11 @@ def ingest_inventory_pipeline_file(path: Path, run_job: RunJob | None = None) ->
         "stock_csv": str(data.get("stock_csv") or ""),
         "qbo_csv": str(data.get("qbo_csv") or ""),
         "final_status_counts": _safe_int_dict(final_status_counts),
+        "final_catalog_issue_counts": _safe_int_dict(
+            data.get("final_catalog_issue_counts")
+            if isinstance(data.get("final_catalog_issue_counts"), dict)
+            else {}
+        ),
         "unsupported_catalog_issues": _safe_int_dict(unsupported),
         "child_reports": {str(k): str(v) for k, v in child_reports.items()},
     }
@@ -428,8 +439,8 @@ def ingest_inventory_pipeline_file(path: Path, run_job: RunJob | None = None) ->
             "source_path": str(path),
             "reliability_status": RunArtifact.RELIABILITY_HIGH,
             "rows_total": _safe_int(data.get("products_checked")),
-            "rows_kept": _safe_int(data.get("already_correct")),
-            "rows_non_target": _safe_int(data.get("still_needs_review")),
+            "rows_kept": _safe_int(data.get("in_sync", data.get("already_correct"))),
+            "rows_non_target": _safe_int(data.get("blocked_items", data.get("still_needs_review"))),
             "upload_stats_json": upload_stats_json,
             "raw_file": str(data.get("stock_csv") or ""),
             "processed_files_json": processed_files,
@@ -448,8 +459,8 @@ def ingest_inventory_pipeline_file(path: Path, run_job: RunJob | None = None) ->
         artifact.source_path = str(path)
         updated_fields.append("source_path")
     artifact.rows_total = _safe_int(data.get("products_checked"))
-    artifact.rows_kept = _safe_int(data.get("already_correct"))
-    artifact.rows_non_target = _safe_int(data.get("still_needs_review"))
+    artifact.rows_kept = _safe_int(data.get("in_sync", data.get("already_correct")))
+    artifact.rows_non_target = _safe_int(data.get("blocked_items", data.get("still_needs_review")))
     artifact.upload_stats_json = upload_stats_json
     artifact.processed_files_json = processed_files
     updated_fields.extend(

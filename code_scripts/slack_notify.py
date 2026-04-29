@@ -17,6 +17,17 @@ except ImportError:  # pragma: no cover - best effort
 SLACK_TIMEOUT_SECS = 10
 
 
+def build_run_detail_url(run_job_id: Optional[str] = None) -> str:
+    explicit = os.getenv("OIAT_RUN_URL", "").strip()
+    if explicit:
+        return explicit
+    job_id = (run_job_id or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
+    base = os.getenv("OIAT_PORTAL_BASE_URL", "").strip().rstrip("/")
+    if not job_id or not base:
+        return ""
+    return f"{base}/epos-qbo/runs/{job_id}/"
+
+
 def send_slack_success(message: str, webhook_url: str = None) -> None:
     """
     Send a Slack notification.
@@ -559,6 +570,10 @@ def format_run_summary(
         message += f"• Notes:\n"
         for warning in warnings[:6]:  # Limit to 6 warnings
             message += f"  – {warning}\n"
+
+    run_url = str(summary.get("run_url") or build_run_detail_url(str(summary.get("run_job_id") or ""))).strip()
+    if run_url:
+        message += f"• Run: {run_url}\n"
     
     return message
 

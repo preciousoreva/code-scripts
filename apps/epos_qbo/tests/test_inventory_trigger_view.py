@@ -130,9 +130,11 @@ class InventoryTriggerViewTests(TestCase):
         self.assertIn(f'action="{reverse("epos_qbo:run-trigger-inventory")}"', html)
         self.assertIn("Sync Inventory", html)
         self.assertIn(
-            "Downloads EPOS stock, checks QuickBooks inventory, fixes supported pack-variant catalog issues, and syncs quantities.",
+            "Downloads EPOS stock, fixes supported QBO catalog issues, and syncs quantities.",
             html,
         )
+        self.assertIn("aria-controls=\"sales-run-panel\"", html)
+        self.assertIn("aria-controls=\"inventory-run-panel\"", html)
         self.assertNotIn("Catalog fixes limit", html)
         self.assertNotIn("Quantity updates limit", html)
         self.assertNotIn("max_catalog_fixes", html)
@@ -161,7 +163,16 @@ class InventoryTriggerViewTests(TestCase):
             reliability_status=RunArtifact.RELIABILITY_HIGH,
             rows_total=1,
             rows_kept=1,
-            upload_stats_json={"report_type": "inventory_pipeline"},
+            upload_stats_json={
+                "report_type": "inventory_pipeline",
+                "products_checked": 147,
+                "in_sync": 147,
+                "catalog_fixes_applied": 0,
+                "base_items_created": 0,
+                "duplicate_base_items_resolved": 0,
+                "quantity_updates_applied": 0,
+                "blocked_items": 0,
+            },
         )
 
         response = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
@@ -169,5 +180,36 @@ class InventoryTriggerViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Inventory pipeline report", html)
+        self.assertIn("Products checked:", html)
+        self.assertIn("147", html)
+        self.assertIn("Catalog fixes:", html)
+        self.assertIn("Blocked items:", html)
         self.assertNotIn("Run succeeded but no artifacts were linked", html)
         self.assertNotIn("Reconciliation did not run or failed", html)
+
+    def test_run_detail_sales_artifact_still_shows_sales_metrics(self):
+        self.client.login(username="op", password="pw")
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            exit_code=0,
+        )
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            processed_at=timezone.now(),
+            source_path="/tmp/sales.json",
+            source_hash="b" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            rows_kept=12,
+            upload_stats_json={"attempted": 12, "uploaded": 10, "skipped": 2, "failed": 0},
+        )
+
+        response = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Rows kept:", html)
+        self.assertIn("QBO uploaded:", html)
+        self.assertIn("10", html)

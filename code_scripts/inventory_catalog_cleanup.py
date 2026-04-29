@@ -525,6 +525,19 @@ def _run_apply_for_existing_base_pack_variants(
                     base_item_id = f"DRYRUN:{base_name}"
                     base_qty_live = float(getattr(cfg, "default_qty_on_hand", 0) or 0)
                     base_items_created += 1
+                    created_base_details.append(
+                        {
+                            "base_name": base_name,
+                            "base_item_id": str(base_item_id),
+                            "created": False,
+                            "dry_run": True,
+                            "source_pack_item_id": source_pack_id,
+                            "source_pack_name": source_pack_name,
+                            "source_pack_variant": source_pack_name,
+                            "copied_unit_price": unit_sales_price,
+                            "copied_purchase_cost": unit_purchase_cost,
+                        }
+                    )
                 else:
                     assert token_mgr is not None
                     try:
@@ -564,7 +577,12 @@ def _run_apply_for_existing_base_pack_variants(
                             "base_name": base_name,
                             "base_item_id": str(base_item_id),
                             "created": True,
+                            "dry_run": False,
+                            "source_pack_item_id": source_pack_id,
+                            "source_pack_name": source_pack_name,
                             "source_pack_variant": source_pack_name,
+                            "copied_unit_price": unit_sales_price,
+                            "copied_purchase_cost": unit_purchase_cost,
                         }
                     )
                     try:

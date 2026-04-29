@@ -1421,6 +1421,10 @@ Optional explicit CSV/date:
 python -m code_scripts.sync_inventory_catalog --company company_a --csv outputs/Akponora_Ventures_Ltd/file.csv --target-date 2026-02-17
 ```
 
+### Unified Inventory Sync
+
+The operator-facing Inventory workflow is documented in [`docs/INVENTORY_SYNC.md`](docs/INVENTORY_SYNC.md). Use the Django Runs page -> Inventory tab for normal operation, or run `python -m code_scripts.inventory_pipeline` for focused CLI checks.
+
 **When `enable_inventory_items` is `false` (default):**
 - Missing products are created as **Service items** (existing behavior)
 - No account mapping required

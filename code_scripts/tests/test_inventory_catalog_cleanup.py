@@ -707,7 +707,7 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
              mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch), \
              mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}) as post_mock, \
              mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
-             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale"), \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale") as stale_mock, \
              mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
              mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
              mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
@@ -725,6 +725,7 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         create_mock.assert_called_once()
         post_mock.assert_called_once()
         inact_mock.assert_called_once()
+        stale_mock.assert_called_once_with("company_a", reason="inventory_catalog_cleanup_applied")
 
     def test_apply_only_pack_variant_skips_when_mapping_missing(self):
         fake_cfg = mock.Mock(
@@ -930,7 +931,7 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
              mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}) as post_mock, \
              mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch), \
              mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
-             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale"), \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale") as stale_mock, \
              mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
              redirect_stdout(io.StringIO()):
             (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
@@ -944,6 +945,7 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         post_mock.assert_called_once()
         self.assertGreaterEqual(inact_mock.call_count, 3)
+        stale_mock.assert_called_once_with("company_a", reason="inventory_catalog_cleanup_applied")
 
     def test_dry_run_duplicate_base_items_prints_canonical_and_duplicate_ids(self):
         fake_cfg = mock.Mock(

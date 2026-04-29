@@ -74,11 +74,7 @@
                         <th class="text-left px-3 py-2">Company</th>
                         <th class="text-left px-3 py-2">Target Date</th>
                         <th class="text-left px-3 py-2">Processed</th>
-                        <th class="text-left px-3 py-2">Rows Kept</th>
-                        <th class="text-left px-3 py-2" title="Sales Receipts considered for upload">QBO Attempted</th>
-                        <th class="text-left px-3 py-2" title="New Sales Receipts created in QuickBooks">QBO Uploaded</th>
-                        <th class="text-left px-3 py-2" title="Sales Receipts skipped (already existed in QuickBooks)">QBO Skipped</th>
-                        <th class="text-left px-3 py-2" title="Sales Receipts that failed to upload">QBO Failed</th>
+                        <th class="text-left px-3 py-2">Metrics</th>
                         <th class="text-left px-3 py-2">Metadata Source</th>
                     </tr>
                 </thead>
@@ -88,11 +84,28 @@
                         <td class="px-3 py-2">{{ artifact.company_key }}</td>
                         <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
                         <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
-                        <td class="px-3 py-2">{{ artifact.rows_kept|default:"-" }}</td>
-                        <td class="px-3 py-2">{{ artifact.upload_stats_json.attempted|default:"-" }}</td>
-                        <td class="px-3 py-2">{{ artifact.upload_stats_json.uploaded|default:"-" }}</td>
-                        <td class="px-3 py-2">{{ artifact.upload_stats_json.skipped|default:"-" }}</td>
-                        <td class="px-3 py-2">{{ artifact.upload_stats_json.failed|default:"-" }}</td>
+                        <td class="px-3 py-2">
+                            {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
+                            <div class="grid grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-1 text-xs">
+                                <div><span class="text-slate-500 dark:text-slate-400">Products checked:</span> <span class="font-medium">{{ artifact.upload_stats_json.products_checked|default:"0" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">In sync:</span> <span class="font-medium">{% if artifact.upload_stats_json.in_sync != None %}{{ artifact.upload_stats_json.in_sync }}{% elif artifact.upload_stats_json.already_correct != None %}{{ artifact.upload_stats_json.already_correct }}{% else %}0{% endif %}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">Catalog fixes:</span> <span class="font-medium">{{ artifact.upload_stats_json.catalog_fixes_applied|default:"0" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">Base items created:</span> <span class="font-medium">{{ artifact.upload_stats_json.base_items_created|default:"0" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">Duplicate bases resolved:</span> <span class="font-medium">{{ artifact.upload_stats_json.duplicate_base_items_resolved|default:"0" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">Quantity updates:</span> <span class="font-medium">{{ artifact.upload_stats_json.quantity_updates_applied|default:"0" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">Blocked items:</span> <span class="font-medium">{{ artifact.upload_stats_json.blocked_items|default:"0" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">Report type:</span> <span class="font-medium">Inventory</span></div>
+                            </div>
+                            {% else %}
+                            <div class="grid grid-cols-2 lg:grid-cols-5 gap-x-4 gap-y-1 text-xs">
+                                <div><span class="text-slate-500 dark:text-slate-400">Rows kept:</span> <span class="font-medium">{{ artifact.rows_kept|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO attempted:</span> <span class="font-medium">{{ artifact.upload_stats_json.attempted|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO uploaded:</span> <span class="font-medium">{{ artifact.upload_stats_json.uploaded|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO skipped:</span> <span class="font-medium">{{ artifact.upload_stats_json.skipped|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO failed:</span> <span class="font-medium">{{ artifact.upload_stats_json.failed|default:"-" }}</span></div>
+                            </div>
+                            {% endif %}
+                        </td>
                         <td class="px-3 py-2">
                             {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
                             <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">Inventory pipeline report</span>
@@ -105,7 +118,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="9" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
+                        <td colspan="5" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
                     </tr>
                     {% endfor %}
                 </tbody>
