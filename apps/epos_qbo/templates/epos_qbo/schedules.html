@@ -202,8 +202,8 @@
                     <tr>
                         <td class="px-4 py-3 align-top">
                             <div class="font-medium text-slate-900 dark:text-slate-100 break-words">{{ row.display_name }}</div>
-                            <div class="text-xs text-slate-500 dark:text-slate-400 mt-1 break-words">
-                                {{ row.subtitle }}
+                            <div class="text-xs font-normal leading-snug text-slate-500 dark:text-slate-400 mt-1 break-words">
+                                {{ row.subtitle|escape }}
                             </div>
                             {% if row.last_run_at %}
                             <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">Last run: {{ row.last_run_at|date:"Y-m-d H:i" }} · {{ row.last_result_label }}</div>
