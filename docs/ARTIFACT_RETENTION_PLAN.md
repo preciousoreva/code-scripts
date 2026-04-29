@@ -12,8 +12,8 @@ EPOS stock remains the source of truth for inventory counts; our retention polic
   artifacts/
     <company_key>/
       sales_sync/
-      inventory_sync/
-      pack_variant/
+      inventory_sync/       # inventory pipeline audit CSVs + summaries
+      pack_variant/         # lower-level debug tools (if/when used)
   archive/
     <company_key>/
   backups/
@@ -44,6 +44,10 @@ EPOS stock remains the source of truth for inventory counts; our retention polic
 
 - This document proposes a structure and policy only.
 - Do **not** move files or change existing artifact paths yet (backward compatibility).
+- Current artifact locations remain under the configured state root (locally `runtime/`, in Docker `/data`), for example:
+  - `code_scripts/Uploaded/`
+  - `code_scripts/reports/inventory_sync/` (audit CSVs)
+  - `code_scripts/reports/inventory_pipeline/` (pipeline summaries; includes `child_reports.final_audit`)
 - In a future iteration, add a janitor/rotation job that enforces the policy safely (dry-run first, then delete).
 
 ### Future option (not implemented now)

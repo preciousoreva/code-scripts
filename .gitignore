@@ -9,6 +9,8 @@ staticfiles/
 qbo_tokens.sqlite
 qbo_tokens.sqlite-wal
 qbo_tokens.sqlite-shm
+*.sqlite
+*.db
 *.sqlite-wal
 *.sqlite-shm
 

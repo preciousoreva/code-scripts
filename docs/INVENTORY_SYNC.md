@@ -15,7 +15,23 @@ The unified pipeline:
 
 ## Django Run
 
-Use `./oiat dev portal <profile>` for local portal work, then open Runs -> Inventory.
+For local portal work, run the Django portal (optionally using a sandbox/dev profile), then open **Runs → Inventory**.
+
+Local (no profile):
+
+```bash
+python manage.py migrate
+python manage.py createsuperuser
+python manage.py sync_companies_from_json
+python manage.py runserver
+```
+
+Sandbox/dev profile (isolated state):
+
+```bash
+./build/init-dev-profile.sh <profile>
+./build/run-sandbox.sh
+```
 
 The main Inventory card intentionally exposes only the operator workflow:
 

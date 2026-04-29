@@ -2100,7 +2100,7 @@ Examples:
         choices=["inline", "upload_fast"],
         help=(
             "Optional qbo_upload override for inventory sync mode. "
-            "Use for single-company canary runs; default is company config/env."
+            "Default is company config/env; use only when intentionally overriding."
         ),
     )
     args = parser.parse_args()
