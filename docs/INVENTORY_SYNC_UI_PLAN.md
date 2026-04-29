@@ -1,5 +1,7 @@
 # Inventory Sync — Django UI plan
 
+> **Historical planning document:** The portal now ships a simplified Runs → Inventory workflow. This doc captures an earlier plan for exposing low-level inventory tools in the UI; it is intentionally not implemented in the current portal.
+
 ## Why this is a plan, not code
 
 The portal already has a working **Inventory Audit** trigger UI that was
@@ -12,7 +14,7 @@ follows the same pattern but is **not** a small change — it's a
 multi-file, schema-touching addition. We're documenting the plan now so
 the next slice can land cleanly without surprises.
 
-The polish branch (`inventory-sync-polish`) intentionally does **not**
+The polish branch (`inventory-pipeline-polish`) intentionally does **not**
 ship UI changes for the new tools. The CLI is already battle-tested in
 production (`docs/INVENTORY_SYNC_WORKFLOW.md`), and shipping a half-built
 UI would be more risky than waiting.

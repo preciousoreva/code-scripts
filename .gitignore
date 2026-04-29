@@ -42,6 +42,14 @@ __pycache__/
 
 # Temporary processing files (these get archived, but exclude from git)
 *.csv
+# Spreadsheets (keep out of source control by default)
+*.xlsx
+*.xls
+# Allow explicitly-curated references/fixtures if needed
+!docs/reference/*.xlsx
+!docs/reference/*.xls
+!apps/**/tests/fixtures/*.xlsx
+!apps/**/tests/fixtures/*.xls
 # Allow category mapping (no secrets; required for inventory account resolution)
 !mappings/Product.Mapping.csv
 # Allow invoice CSV template

@@ -1,5 +1,7 @@
 # Inventory Sync Workflow
 
+> **Historical/background document:** For the current operator-facing workflow and CLI entrypoint, start with [`docs/INVENTORY_SYNC.md`](docs/INVENTORY_SYNC.md).
+
 This document covers how inventory data flows from EPOS Now into QuickBooks
 Online (QBO), why the design is shaped the way it is, and the exact steps an
 operator runs to bring a category of products into a clean, syncable state.
