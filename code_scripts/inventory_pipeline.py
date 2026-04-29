@@ -45,6 +45,7 @@ from code_scripts.inventory_notifications import format_scope
 from code_scripts.inventory_sync import (
     TokenManager,
     _auto_download_stock_csv,
+    _normalize_name_key,
     _time_stamp,
     _write_audit_metadata,
     _write_csv as _write_audit_csv,
@@ -381,7 +382,11 @@ def _apply_exact_match_quantity_adjustments(
     try:
         for _, row in candidates.iterrows():
             base = str(row.get("base_name") or "").strip()
-            group = qbo_item_rows[qbo_item_rows["base_name"] == base]
+            base_norm = _normalize_name_key(base)
+            if "base_name_norm" in qbo_item_rows.columns:
+                group = qbo_item_rows[qbo_item_rows["base_name_norm"] == base_norm]
+            else:
+                group = qbo_item_rows[qbo_item_rows["base_name"].map(_normalize_name_key) == base_norm]
             chosen, reason = choose_canonical_qbo_item_row(group, base_name=base)
             if chosen is None or reason != "exact_name_match":
                 print(f"[SKIP] {base!r}: quantity sync requires exact QBO name match.")

@@ -1164,6 +1164,84 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["base_name"], "GOLDBERG CAN 50cl")
         self.assertEqual(row["epos_single_units"], 623.0)
 
+    def test_case_insensitive_base_matching_classifies_existing_base_with_pack_variants(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "LEGEND EXTRA STOUT CAN 440ml*24,ALCOHOLS,1\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,LEGEND EXTRA STOUT CAN 440ML,Inventory,true,-299\n"
+                "11,LEGEND EXTRA STOUT CAN 440ml*12,Inventory,true,10\n"
+                "12,LEGEND EXTRA STOUT CAN 440ml*24,Inventory,true,20\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="LEGEND EXTRA STOUT CAN 440ml*24",
+            )
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        self.assertEqual(len(report), 1)
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "LEGEND EXTRA STOUT CAN 440ml")
+        self.assertEqual(row["catalog_issue_type"], "base_with_pack_variants")
+        self.assertIn("LEGEND EXTRA STOUT CAN 440ML", row["qbo_base_item_names_for_base"])
+        self.assertIn("LEGEND EXTRA STOUT CAN 440ml*24", row["qbo_pack_variant_names_for_base"])
+        self.assertNotEqual(row["catalog_issue_type"], "only_pack_variant_exists")
+
+    def test_ml_casing_variants_normalize_to_single_qbo_base_group(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,LEGEND EXTRA STOUT CAN 440ML,Inventory,true,1\n"
+                "11,LEGEND EXTRA STOUT CAN 440ml,Inventory,true,2\n"
+                "12,LEGEND EXTRA STOUT CAN 440Ml*24,Inventory,true,3\n",
+                encoding="utf-8",
+            )
+            grouped = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+
+        self.assertEqual(len(grouped), 1)
+        row = grouped.iloc[0].to_dict()
+        self.assertEqual(row["qbo_item_count_for_base"], 3)
+        self.assertTrue(row["qbo_has_pack_variants"])
+
+    def test_product_filter_with_pack_multiplier_is_case_insensitive_and_literal(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "LEGEND EXTRA STOUT CAN 440ml*24,ALCOHOLS,1\n"
+                "OTHER STOUT,ALCOHOLS,1\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="legend extra stout can 440ML*24",
+            )
+
+        self.assertEqual(len(epos), 1)
+        self.assertEqual(epos.iloc[0]["base_name"], "LEGEND EXTRA STOUT CAN 440ml")
+        self.assertEqual(epos.iloc[0]["epos_single_units"], 24.0)
+
     def test_post_catalog_audit_needs_exact_quantity_adjustment_for_loose_pack_remainder(self):
         import tempfile
         from pathlib import Path

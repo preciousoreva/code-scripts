@@ -106,6 +106,11 @@ def _collapse_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def _normalize_name_key(value: Any) -> str:
+    """Canonical key for case-insensitive product-name matching/grouping."""
+    return _collapse_spaces(str(value or "")).lower()
+
+
 _CURRENT_VOLUME_LOOSE_EACH_RE = re.compile(
     r"^\s*(?P<loose>\d+(?:\.\d+)?)\s+of\s+\d+(?:\.\d+)?\s+Each\s*$",
     re.IGNORECASE,
@@ -596,6 +601,7 @@ def load_epos_stock_snapshot(
         {
             "raw_name": names,
             "base_name": base_names,
+            "base_name_norm": [_normalize_name_key(v) for v in base_names],
             "multiplier": multipliers,
             "epos_qty_raw": qty_raw,
             "category_name": category_values,
@@ -654,10 +660,12 @@ def load_epos_stock_snapshot(
     if product_filter:
         out = out[literal_product_filter_mask(out, product_filter, raw_col="raw_name")].copy()
 
-    # Group to base_name (base-only, single units)
+    # Group to normalized base_name (case-insensitive matching), while
+    # preserving original display casing for reports.
     grouped = (
-        out.groupby("base_name", as_index=False)
+        out.groupby("base_name_norm", as_index=False)
         .agg(
+            base_name=("base_name", "first"),
             epos_single_units=("epos_single_units", "sum"),
             epos_raw_rows=("raw_name", "count"),
             epos_has_pack=("epos_has_pack", "max"),
@@ -695,6 +703,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
         base_names.append(_collapse_spaces(base))
         had_pack.append(mult > 1)
     inv["base_name"] = base_names
+    inv["base_name_norm"] = inv["base_name"].map(_normalize_name_key)
     inv["qbo_name_raw"] = names
     inv["qbo_has_pack"] = had_pack
     inv["qbo_qty_on_hand"] = inv.get("QtyOnHand", 0).map(_safe_float)
@@ -718,8 +727,9 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
         return _join_names(items["qbo_name_raw"].tolist())
 
     grouped = (
-        inv.groupby("base_name", as_index=False)
+        inv.groupby("base_name_norm", as_index=False)
         .agg(
+            base_name=("base_name", "first"),
             qbo_qty_on_hand=("qbo_qty_on_hand", "sum"),
             qbo_item_count_for_base=("Id", "count"),
             qbo_has_pack_variants=("qbo_has_pack", "max"),
@@ -733,13 +743,14 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
     # Replace the naive name joins with base/pack-specific joins.
     if not grouped.empty:
         by_base = {}
-        for _, g in inv.groupby("base_name"):
-            by_base[str(g.iloc[0]["base_name"])] = {
+        for _, g in inv.groupby("base_name_norm"):
+            key = str(g.iloc[0]["base_name_norm"])
+            by_base[key] = {
                 "base_names": _join_base_names(g),
                 "pack_names": _join_pack_names(g),
             }
-        grouped["qbo_base_item_names"] = grouped["base_name"].map(lambda k: by_base.get(str(k), {}).get("base_names", ""))
-        grouped["qbo_pack_variant_names"] = grouped["base_name"].map(lambda k: by_base.get(str(k), {}).get("pack_names", ""))
+        grouped["qbo_base_item_names"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("base_names", ""))
+        grouped["qbo_pack_variant_names"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("pack_names", ""))
         grouped["qbo_base_item_names_for_base"] = grouped["qbo_base_item_names"]
         grouped["qbo_pack_variant_names_for_base"] = grouped["qbo_pack_variant_names"]
     return grouped
@@ -778,6 +789,7 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
             "Id": inv.get("Id", pd.Series([""] * len(inv))),
             "Name": names,
             "base_name": base_names,
+            "base_name_norm": [_normalize_name_key(v) for v in base_names],
             "qbo_name_raw": names,
             "qbo_has_pack": had_pack,
             "qbo_qty_on_hand": inv.get("QtyOnHand", 0).map(_safe_float),
@@ -820,7 +832,21 @@ def build_audit_report(
     qbo_by_base: pd.DataFrame,
     tolerance: float = 0.0,
 ) -> pd.DataFrame:
-    merged = epos_by_base.merge(qbo_by_base, on="base_name", how="left")
+    if "base_name_norm" not in epos_by_base.columns:
+        epos_by_base = epos_by_base.copy()
+        epos_by_base["base_name_norm"] = epos_by_base["base_name"].map(_normalize_name_key)
+    if "base_name_norm" not in qbo_by_base.columns:
+        qbo_by_base = qbo_by_base.copy()
+        qbo_by_base["base_name_norm"] = qbo_by_base["base_name"].map(_normalize_name_key)
+
+    merged = epos_by_base.merge(
+        qbo_by_base,
+        on="base_name_norm",
+        how="left",
+        suffixes=("", "_qbo"),
+    )
+    if "base_name_qbo" in merged.columns:
+        merged = merged.drop(columns=["base_name_qbo"])
     merged["qbo_qty_on_hand"] = merged["qbo_qty_on_hand"].fillna(0.0)
     merged["qbo_item_count_for_base"] = merged["qbo_item_count_for_base"].fillna(0).astype(int)
     merged["qbo_has_pack_variants"] = (
@@ -1198,7 +1224,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             base = str(row["base_name"])
             epos_target = float(row["epos_single_units"])
-            group = qbo_rows[qbo_rows["base_name"] == base]
+            base_norm = _normalize_name_key(base)
+            if "base_name_norm" in qbo_rows.columns:
+                group = qbo_rows[qbo_rows["base_name_norm"] == base_norm]
+            else:
+                group = qbo_rows[qbo_rows["base_name"].map(_normalize_name_key) == base_norm]
 
             chosen, reason = choose_canonical_qbo_item_row(group, base_name=base)
             if chosen is None or not str(chosen.get("Id", "")).strip():

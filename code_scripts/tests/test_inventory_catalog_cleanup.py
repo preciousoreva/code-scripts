@@ -47,6 +47,39 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         self.assertEqual(row["qbo_base_item_ids"], "10")
         self.assertIn("GOLDBERG CAN 50cl*6", row["qbo_pack_variant_names"])
 
+    def test_case_insensitive_base_matching_still_plans_consolidation(self):
+        audit = self._audit_df(
+            [
+                {
+                    "base_name": "LEGEND EXTRA STOUT CAN 440ml",
+                    "epos_single_units": 24.0,
+                    "catalog_issue_type": "base_with_pack_variants",
+                    "qbo_base_item_ids": "10",
+                    "qbo_item_names_for_base": "LEGEND EXTRA STOUT CAN 440ML | LEGEND EXTRA STOUT CAN 440ml*24",
+                    "qbo_base_item_names_for_base": "LEGEND EXTRA STOUT CAN 440ML",
+                    "qbo_pack_variant_names_for_base": "LEGEND EXTRA STOUT CAN 440ml*24",
+                    "suggested_next_action": "run pack variant consolidation and cleanup",
+                }
+            ]
+        )
+        qbo_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "LEGEND EXTRA STOUT CAN 440ML", "base_name": "LEGEND EXTRA STOUT CAN 440ML", "base_name_norm": "legend extra stout can 440ml", "qbo_has_pack": False},
+                {"Id": "11", "Name": "LEGEND EXTRA STOUT CAN 440ml*24", "base_name": "LEGEND EXTRA STOUT CAN 440ml", "base_name_norm": "legend extra stout can 440ml", "qbo_has_pack": True},
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "consolidate_existing_base_pack_variants")
+        self.assertTrue(row["action_eligible"])
+        self.assertIn("LEGEND EXTRA STOUT CAN 440ML", row["qbo_base_item_names"])
+        self.assertIn("LEGEND EXTRA STOUT CAN 440ml*24", row["qbo_pack_variant_names"])
+
     def test_only_pack_variant_exists_becomes_create_base_then_consolidate(self):
         audit = self._audit_df(
             [

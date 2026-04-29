@@ -264,6 +264,44 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertEqual(summary["quantity_updates_applied"], 0)
         self.assertEqual(summary["unsupported_catalog_issues"]["only_pack_variant_exists"], 1)
 
+    def test_case_insensitive_base_detection_enables_pack_consolidation_flow(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stock_path = root / "legend_stock.csv"
+            stock_path.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "LEGEND EXTRA STOUT CAN 440ml*24,ALCOHOLS & SPIRITS,1\n",
+                encoding="utf-8",
+            )
+            qbo_path = root / "qbo.csv"
+            qbo_path.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,LEGEND EXTRA STOUT CAN 440ML,Inventory,true,-299\n"
+                "11,LEGEND EXTRA STOUT CAN 440ml*12,Inventory,true,10\n"
+                "12,LEGEND EXTRA STOUT CAN 440ml*24,Inventory,true,20\n",
+                encoding="utf-8",
+            )
+            cfg = self._cfg()
+            with mock.patch.object(inventory_pipeline, "load_company_config", return_value=cfg), \
+                 mock.patch.object(inventory_pipeline, "ensure_company_runtime_compatible"), \
+                 mock.patch.object(inventory_pipeline, "_resolve_qbo_snapshot", return_value=qbo_path), \
+                 mock.patch.object(inventory_pipeline, "_catalog_output_path", return_value=root / "catalog.csv"), \
+                 mock.patch.object(inventory_pipeline, "_run_apply_for_existing_base_pack_variants", return_value=0) as cleanup_mock:
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(
+                        td,
+                        stock_csv=str(stock_path),
+                        product_filter="LEGEND EXTRA STOUT CAN 440ml*24",
+                        categories=["ALCOHOLS & SPIRITS"],
+                    )
+                )
+
+        cleanup_mock.assert_called_once()
+        self.assertEqual(summary["products_checked"], 1)
+        self.assertEqual(summary["catalog_fixes_applied"], 1)
+        self.assertEqual(summary["skipped_unsupported"], 0)
+        self.assertEqual(summary["quantity_updates_applied"], 0)
+
     def test_dry_run_passes_dry_flags_and_reports_no_writes(self):
         with tempfile.TemporaryDirectory() as td:
             qbo_path = Path(td) / "qbo.csv"

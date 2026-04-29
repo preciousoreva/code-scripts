@@ -18,6 +18,7 @@ from code_scripts.company_config import (
 from code_scripts.inventory_sync import (
     _auto_download_stock_csv,
     _collapse_spaces,
+    _normalize_name_key,
     _time_stamp,
     fetch_qbo_inventory_items_snapshot,
     literal_product_filter_mask,
@@ -235,8 +236,9 @@ def plan_catalog_cleanup(
 
     by_base = {}
     if qbo_item_rows is not None and not qbo_item_rows.empty:
-        for base, g in qbo_item_rows.groupby("base_name"):
-            base = _collapse_spaces(str(base))
+        group_col = "base_name_norm" if "base_name_norm" in qbo_item_rows.columns else "base_name"
+        for base, g in qbo_item_rows.groupby(group_col):
+            base = _normalize_name_key(base)
             ids_all = [str(x).strip() for x in g["Id"].tolist() if str(x).strip()]
             names_all = [str(x).strip() for x in g["Name"].tolist() if str(x).strip()]
             pack = g[g["qbo_has_pack"] == True]  # noqa: E712
@@ -252,10 +254,11 @@ def plan_catalog_cleanup(
 
     for _, row in audit_df.iterrows():
         base_name = _collapse_spaces(str(row.get("base_name") or ""))
+        base_name_norm = _normalize_name_key(base_name)
         issue = str(row.get("catalog_issue_type") or "").strip()
         planned = _map_planned_action(issue)
 
-        details = by_base.get(base_name, {})
+        details = by_base.get(base_name_norm, {})
         out_rows.append(
             {
                 "company_key": company_key,
