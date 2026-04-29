@@ -1088,6 +1088,112 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["base_name"], "GOLDBERG CAN 50cl")
         self.assertEqual(row["epos_single_units"], 48)
 
+    def test_pack_multiplier_normalization_includes_loose_units_from_current_volume(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Current Volume,Total Stock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,25,23 of 24 Each,25.958\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+
+        self.assertEqual(len(epos), 1)
+        row = epos.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "GOLDBERG CAN 50cl")
+        self.assertEqual(row["epos_single_units"], 623.0)
+
+    def test_pack_multiplier_normalization_current_volume_zero(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Current Volume,Total Stock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,25,0 of 24 Each,25.958\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+
+        self.assertEqual(len(epos), 1)
+        self.assertEqual(epos.iloc[0]["epos_single_units"], 600.0)
+
+    def test_pack_multiplier_normalization_falls_back_to_total_stock_when_current_volume_missing(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Total Stock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,25,25.958\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+
+        self.assertEqual(len(epos), 1)
+        self.assertEqual(epos.iloc[0]["epos_single_units"], 623.0)
+
+    def test_product_filter_with_pack_multiplier_still_literal_text_with_volume_columns(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Current Volume,Total Stock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,25,23 of 24 Each,25.958\n"
+                "OTHER ITEM,ALCOHOLS,7,,7\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="GOLDBERG CAN 50cl*24",
+            )
+
+        self.assertEqual(len(epos), 1)
+        row = epos.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "GOLDBERG CAN 50cl")
+        self.assertEqual(row["epos_single_units"], 623.0)
+
+    def test_post_catalog_audit_needs_exact_quantity_adjustment_for_loose_pack_remainder(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Current Volume,Total Stock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,25,23 of 24 Each,25.958\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,GOLDBERG CAN 50cl,Inventory,true,600\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        self.assertEqual(len(report), 1)
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["catalog_issue_type"], "exact_name_match")
+        self.assertEqual(row["epos_single_units"], 623.0)
+        self.assertEqual(row["qbo_qty_on_hand"], 600.0)
+        self.assertEqual(row["delta"], 23.0)
+        self.assertEqual(row["status"], "needs_adjustment")
+
     def test_product_filter_with_regex_chars_is_literal_text(self):
         import tempfile
         from pathlib import Path

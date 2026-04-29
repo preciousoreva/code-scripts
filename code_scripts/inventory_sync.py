@@ -75,6 +75,20 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_float_optional(value: Any) -> float | None:
+    """Parse a float or return None when the value is missing/unparseable."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+        if value == "" or (isinstance(value, float) and pd.isna(value)):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 def _safe_bool_str(value: Any) -> bool:
     s = str(value or "").strip().lower()
     return s in {"true", "1", "yes", "y", "on"}
@@ -90,6 +104,31 @@ def _time_stamp(now: datetime | None = None) -> str:
 
 def _collapse_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
+
+
+_CURRENT_VOLUME_LOOSE_EACH_RE = re.compile(
+    r"^\s*(?P<loose>\d+(?:\.\d+)?)\s+of\s+\d+(?:\.\d+)?\s+Each\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_current_volume_loose_units(value: Any) -> float | None:
+    """Parse EPOS "Current Volume" like "23 of 24 Each" -> loose units (23).
+
+    Returns None for missing/unparseable values.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    m = _CURRENT_VOLUME_LOOSE_EACH_RE.match(s)
+    if not m:
+        return None
+    try:
+        return float(m.group("loose"))
+    except Exception:
+        return None
 
 
 def build_inventory_adjustment_doc_number(txn_date: str, item_id: str | int) -> str:
@@ -564,6 +603,49 @@ def load_epos_stock_snapshot(
     )
     out["epos_single_units"] = out["epos_qty_raw"] * out["multiplier"]
     out["epos_has_pack"] = out["multiplier"] > 1
+
+    # Optional pack-row columns — older exports/tests may omit them.
+    # EPOS values often look like "23 of 24 Each" for Current Volume and a
+    # fractional pack count for Total Stock (e.g. 25.958 packs of *24).
+    cols_lc = {str(c).strip().lower(): c for c in df.columns}
+    current_volume_col = (
+        cols_lc.get("current volume")
+        or cols_lc.get("measuredcurrentvolume")
+        or cols_lc.get("currentvolume")
+        or cols_lc.get("measured current volume")
+    )
+    total_stock_col = (
+        cols_lc.get("total stock")
+        or cols_lc.get("measuredtotalstock")
+        or cols_lc.get("totalstock")
+        or cols_lc.get("measured total stock")
+    )
+
+    mask_pack = out["epos_has_pack"]
+    mask_loose_parsed = pd.Series([False] * len(out), index=out.index)
+
+    # Preferred: Current Volume provides the loose-unit remainder for the
+    # active pack size (e.g. +23 loose each for "23 of 24 Each").
+    if current_volume_col and mask_pack.any():
+        loose_units = df[current_volume_col].map(_parse_current_volume_loose_units)
+        loose_units = pd.Series(loose_units, index=out.index, dtype="float64")
+        mask_loose_parsed = mask_pack & loose_units.notna()
+        if mask_loose_parsed.any():
+            out.loc[mask_loose_parsed, "epos_single_units"] = (
+                out.loc[mask_loose_parsed, "epos_qty_raw"] * out.loc[mask_loose_parsed, "multiplier"]
+                + loose_units.loc[mask_loose_parsed]
+            )
+
+    # Fallback: when Current Volume is missing/unparseable, Total Stock is
+    # treated as a fractional pack count; normalize via:
+    #   round(Total Stock * pack_multiplier)
+    if total_stock_col and mask_pack.any():
+        total_stock = df[total_stock_col].map(_safe_float_optional)
+        total_stock = pd.Series(total_stock, index=out.index, dtype="float64")
+        mask_total_available = mask_pack & (~mask_loose_parsed) & total_stock.notna()
+        if mask_total_available.any():
+            raw = total_stock.loc[mask_total_available] * out.loc[mask_total_available, "multiplier"]
+            out.loc[mask_total_available, "epos_single_units"] = raw.map(lambda v: float(int(round(v))))
 
     if categories:
         requested = {_normalize_category_value(v).lower() for v in categories if _normalize_category_value(v)}
