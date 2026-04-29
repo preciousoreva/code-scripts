@@ -62,6 +62,9 @@ def _pipeline_payload(**overrides) -> dict:
         "blocked_items": 0,
         "missing_base_item_in_qbo": 0,
         "duplicate_base_items_in_qbo": 0,
+        "epos_negative_rows_clamped": 0,
+        "epos_negative_units_clamped": 0.0,
+        "epos_negative_stock_policy": "clamp_to_zero",
         "skipped_unsupported": 0,
         "skipped_safely": 0,
         "still_needs_review": 0,
@@ -160,6 +163,9 @@ class InventoryAuditIngestTests(TestCase):
         self.assertEqual(artifact.upload_stats_json["base_items_created"], 0)
         self.assertEqual(artifact.upload_stats_json["duplicate_base_items_resolved"], 0)
         self.assertEqual(artifact.upload_stats_json["quantity_updates_applied"], 0)
+        self.assertEqual(artifact.upload_stats_json["epos_negative_rows_clamped"], 0)
+        self.assertEqual(artifact.upload_stats_json["epos_negative_units_clamped"], 0.0)
+        self.assertEqual(artifact.upload_stats_json["epos_negative_stock_policy"], "clamp_to_zero")
         self.assertIn(
             "/tmp/reports/inventory_pipeline_company_a_120000.csv",
             artifact.processed_files_json,

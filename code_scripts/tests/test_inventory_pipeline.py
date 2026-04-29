@@ -228,6 +228,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             "blocked_items": 2,
             "missing_base_item_in_qbo": 1,
             "duplicate_base_items_in_qbo": 0,
+            "epos_negative_rows_clamped": 0,
+            "epos_negative_units_clamped": 0.0,
+            "epos_negative_stock_policy": "clamp_to_zero",
             "skipped_unsupported": 2,
             "still_needs_review": 2,
             "unsupported_catalog_issues": {
@@ -272,6 +275,17 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
     def test_final_summary_includes_duplicate_base_items_resolved(self):
         msg = inventory_pipeline._format_final_summary(self._summary_payload(duplicate_base_items_resolved=1))
         self.assertIn("Duplicate base items resolved: 1", msg)
+
+    def test_final_summary_omits_epos_negative_clamp_line_when_zero(self):
+        msg = inventory_pipeline._format_final_summary(self._summary_payload(epos_negative_rows_clamped=0))
+        self.assertNotIn("EPOS negative rows clamped to zero:", msg)
+
+    def test_final_summary_includes_epos_negative_clamp_line_when_nonzero(self):
+        msg = inventory_pipeline._format_final_summary(
+            self._summary_payload(epos_negative_rows_clamped=1, epos_negative_units_clamped=30.0)
+        )
+        self.assertIn("EPOS negative rows clamped to zero: 1", msg)
+        self.assertIn("(30.0 units)", msg)
 
     def test_final_summary_uses_success_wording_for_clean_run(self):
         msg = inventory_pipeline._format_final_summary(
@@ -327,12 +341,16 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                         "duplicate_base_resolved": False,
                         "quantity_adjustment_applied": True,
                         "final_status": "in_sync",
+                        "epos_negative_rows_clamped": 1,
+                        "epos_negative_units_clamped": 30.0,
                     }
                 ]
             )
         )
         self.assertIn("Product details:", msg)
         self.assertIn("ACTION BITTERS50ml: EPOS=15.0 QBO=15.0 delta=0.0 status=in_sync", msg)
+        self.assertIn("negative_rows_clamped=1", msg)
+        self.assertIn("negative_units_clamped=30.0", msg)
 
     def test_product_filtered_blocked_summary_includes_reason(self):
         msg = inventory_pipeline._format_final_summary(
@@ -377,6 +395,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertEqual(int(row["blocked_items"]), 2)
             self.assertEqual(int(row["missing_base_item_in_qbo"]), 1)
             self.assertEqual(int(row["duplicate_base_items_in_qbo"]), 0)
+            self.assertEqual(int(row["epos_negative_rows_clamped"]), 0)
+            self.assertEqual(float(row["epos_negative_units_clamped"]), 0.0)
+            self.assertEqual(row["epos_negative_stock_policy"], "clamp_to_zero")
             self.assertEqual(row["final_audit"], "/tmp/final.csv")
             self.assertEqual(row["run_type"], "inventory_pipeline")
 
@@ -417,6 +438,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             "blocked_items",
             "missing_base_item_in_qbo",
             "duplicate_base_items_in_qbo",
+            "epos_negative_rows_clamped",
+            "epos_negative_units_clamped",
+            "epos_negative_stock_policy",
             "still_needs_review",
             "skipped_unsupported",
             "unsupported_catalog_issues",
@@ -430,6 +454,46 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["blocked_items"], 0)
         self.assertEqual(payload["catalog_fixes_applied"], 0)
+        self.assertEqual(payload["epos_negative_rows_clamped"], 0)
+        self.assertEqual(payload["epos_negative_units_clamped"], 0.0)
+        self.assertEqual(payload["epos_negative_stock_policy"], "clamp_to_zero")
+
+    def test_pipeline_summary_derives_epos_negative_clamp_totals_and_product_detail(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_initial = Path(td) / "qbo-initial.csv"
+            audit_report = pd.DataFrame(
+                [
+                    {
+                        "base_name": "ACTION BITTERS50ml",
+                        "epos_single_units": 15.0,
+                        "qbo_qty_on_hand": 15.0,
+                        "delta": 0.0,
+                        "status": "in_sync",
+                        "catalog_issue_type": "exact_name_match",
+                        "epos_negative_rows_clamped": 1,
+                        "epos_negative_units_clamped": 30.0,
+                        "epos_negative_stock_policy": "clamp_to_zero",
+                        "epos_negative_clamped_row_names": "ACTION BITTERS50ml*120",
+                    }
+                ]
+            )
+            self._patch_common(
+                td,
+                plan=pd.DataFrame(),
+                qbo_paths=[qbo_initial],
+                audit_report=audit_report,
+            )
+            summary = inventory_pipeline.run_inventory_pipeline(
+                self._args(td, product_filter="ACTION BITTERS50ml")
+            )
+
+        self.assertEqual(summary["epos_negative_stock_policy"], "clamp_to_zero")
+        self.assertEqual(summary["epos_negative_rows_clamped"], 1)
+        self.assertEqual(summary["epos_negative_units_clamped"], 30.0)
+        self.assertEqual(summary["product_details"][0]["base_name"], "ACTION BITTERS50ml")
+        self.assertEqual(summary["product_details"][0]["epos_expected_qty"], 15.0)
+        self.assertEqual(summary["product_details"][0]["epos_negative_rows_clamped"], 1)
+        self.assertEqual(summary["product_details"][0]["epos_negative_units_clamped"], 30.0)
 
     def test_product_filter_with_pack_multiplier_runs_real_audit_path(self):
         with tempfile.TemporaryDirectory() as td:

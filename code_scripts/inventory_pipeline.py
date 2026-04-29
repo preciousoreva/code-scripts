@@ -43,6 +43,7 @@ from code_scripts.inventory_catalog_cleanup import (
 )
 from code_scripts.inventory_notifications import format_scope
 from code_scripts.inventory_sync import (
+    EPOS_NEGATIVE_STOCK_POLICY,
     TokenManager,
     _auto_download_stock_csv,
     _normalize_name_key,
@@ -520,6 +521,9 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
         "blocked_items": payload.get("blocked_items"),
         "missing_base_item_in_qbo": payload.get("missing_base_item_in_qbo"),
         "duplicate_base_items_in_qbo": payload.get("duplicate_base_items_in_qbo"),
+        "epos_negative_rows_clamped": payload.get("epos_negative_rows_clamped"),
+        "epos_negative_units_clamped": payload.get("epos_negative_units_clamped"),
+        "epos_negative_stock_policy": payload.get("epos_negative_stock_policy"),
         "still_needs_review": payload.get("still_needs_review"),
         "final_audit": final_audit,
         "stock_csv": payload.get("stock_csv"),
@@ -545,6 +549,36 @@ def _catalog_issue_counts(report: pd.DataFrame) -> dict[str, int]:
     if report.empty or "catalog_issue_type" not in report.columns:
         return {}
     return {str(k): int(v) for k, v in report["catalog_issue_type"].value_counts().to_dict().items()}
+
+
+def _numeric(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if pd.isna(parsed):
+        return float(default)
+    return parsed
+
+
+def _epos_negative_clamp_totals(report: pd.DataFrame) -> dict[str, Any]:
+    if report.empty:
+        return {
+            "epos_negative_rows_clamped": 0,
+            "epos_negative_units_clamped": 0.0,
+            "epos_negative_stock_policy": EPOS_NEGATIVE_STOCK_POLICY,
+        }
+    rows = 0
+    units = 0.0
+    if "epos_negative_rows_clamped" in report.columns:
+        rows = int(pd.to_numeric(report["epos_negative_rows_clamped"], errors="coerce").fillna(0).sum())
+    if "epos_negative_units_clamped" in report.columns:
+        units = float(pd.to_numeric(report["epos_negative_units_clamped"], errors="coerce").fillna(0.0).sum())
+    return {
+        "epos_negative_rows_clamped": rows,
+        "epos_negative_units_clamped": units,
+        "epos_negative_stock_policy": EPOS_NEGATIVE_STOCK_POLICY,
+    }
 
 
 def _stable_count_map(values: dict[str, Any], keys: list[str]) -> dict[str, int]:
@@ -664,9 +698,15 @@ def _collect_product_details(
         details.append(
             {
                 "base_name": base,
-                "epos_expected_qty": float(row.get("epos_single_units", 0.0) or 0.0),
-                "qbo_final_qty": float(row.get("qbo_qty_on_hand", 0.0) or 0.0),
-                "delta": float(row.get("delta", 0.0) or 0.0),
+                "epos_expected_qty": _numeric(row.get("epos_single_units", 0.0)),
+                "qbo_final_qty": _numeric(row.get("qbo_qty_on_hand", 0.0)),
+                "delta": _numeric(row.get("delta", 0.0)),
+                "epos_negative_rows_clamped": int(_numeric(row.get("epos_negative_rows_clamped", 0), 0.0)),
+                "epos_negative_units_clamped": _numeric(row.get("epos_negative_units_clamped", 0.0)),
+                "epos_negative_stock_policy": str(
+                    row.get("epos_negative_stock_policy") or EPOS_NEGATIVE_STOCK_POLICY
+                ),
+                "epos_negative_clamped_row_names": str(row.get("epos_negative_clamped_row_names") or ""),
                 "catalog_fix_applied": base in catalog_fix_bases and int(catalog_result.get("applied", 0) or 0) > 0,
                 "base_item_created": base in created_bases,
                 "duplicate_base_resolved": base in duplicate_plan_bases and int(catalog_result.get("duplicate_base_items_resolved", 0) or 0) > 0,
@@ -720,6 +760,7 @@ def _stable_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
         "blocked_items": 0,
         "missing_base_item_in_qbo": 0,
         "duplicate_base_items_in_qbo": 0,
+        "epos_negative_rows_clamped": 0,
         "still_needs_review": 0,
         "skipped_unsupported": 0,
         "skipped_safely": 0,
@@ -731,6 +772,10 @@ def _stable_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
             payload[key] = int(default)
     payload["already_correct"] = int(payload.get("already_correct", 0) or 0)
     payload["in_sync"] = int(payload.get("in_sync", payload["already_correct"]) or 0)
+    payload["epos_negative_units_clamped"] = _numeric(payload.get("epos_negative_units_clamped", 0.0))
+    payload["epos_negative_stock_policy"] = str(
+        payload.get("epos_negative_stock_policy") or EPOS_NEGATIVE_STOCK_POLICY
+    )
     text_defaults = {
         "run_type": "inventory_pipeline",
         "company_key": "",
@@ -776,6 +821,12 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
         f"Duplicate base items in QBO: {summary['duplicate_base_items_in_qbo']}",
         f"Still needs review: {summary['still_needs_review']}",
     ]
+    if int(summary.get("epos_negative_rows_clamped", 0) or 0) > 0:
+        lines.append(
+            "EPOS negative rows clamped to zero: "
+            f"{summary['epos_negative_rows_clamped']} "
+            f"({summary['epos_negative_units_clamped']} units)"
+        )
     product_details = [d for d in (summary.get("product_details") or []) if isinstance(d, dict)]
     if product_details:
         lines.append("Product details:")
@@ -788,6 +839,12 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
             reason = str(detail.get("blocked_reason") or "").strip()
             if reason:
                 line += f" reason={reason}"
+            clamped_rows = int(_numeric(detail.get("epos_negative_rows_clamped", 0), 0.0))
+            if clamped_rows > 0:
+                line += (
+                    f" negative_rows_clamped={clamped_rows}"
+                    f" negative_units_clamped={_numeric(detail.get('epos_negative_units_clamped', 0.0))}"
+                )
             lines.append(line)
     blocked_examples = [str(x) for x in (summary.get("blocked_catalog_examples") or []) if str(x).strip()]
     if blocked_examples and int(summary.get("blocked_items", 0) or 0) <= 10:
@@ -989,6 +1046,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             "missing_from_qbo",
         ],
     )
+    epos_negative_clamp_totals = _epos_negative_clamp_totals(final.report)
     unsupported_total = sum(int(v) for v in stable_unsupported_counts.values())
     skipped_safely = (
         int(unsupported_total)
@@ -1046,6 +1104,9 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "blocked_items": int(blocked_items),
         "missing_base_item_in_qbo": int(missing_base_item_in_qbo),
         "duplicate_base_items_in_qbo": int(duplicate_base_items_in_qbo),
+        "epos_negative_rows_clamped": int(epos_negative_clamp_totals["epos_negative_rows_clamped"]),
+        "epos_negative_units_clamped": float(epos_negative_clamp_totals["epos_negative_units_clamped"]),
+        "epos_negative_stock_policy": str(epos_negative_clamp_totals["epos_negative_stock_policy"]),
         "skipped_unsupported": int(unsupported_total),
         "skipped_safely": int(skipped_safely),
         "still_needs_review": int(still_needs_review),

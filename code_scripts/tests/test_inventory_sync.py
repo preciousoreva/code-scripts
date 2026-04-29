@@ -1203,12 +1203,50 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                 "ACTION BITTERS50ml*120,ALCOHOLS & SPIRITS,0,-30 of 120 Each,-0.25\n",
                 encoding="utf-8",
             )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,ACTION BITTERS50ml,Inventory,true,15\n",
+                encoding="utf-8",
+            )
             epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo)
 
         self.assertEqual(len(epos), 1)
         row = epos.iloc[0].to_dict()
         self.assertEqual(row["base_name"], "ACTION BITTERS50ml")
         self.assertEqual(row["epos_single_units"], 15.0)
+        self.assertEqual(row["epos_negative_rows_clamped"], 1)
+        self.assertEqual(row["epos_negative_units_clamped"], 30.0)
+        self.assertEqual(row["epos_negative_stock_policy"], inventory_sync.EPOS_NEGATIVE_STOCK_POLICY)
+        self.assertIn("ACTION BITTERS50ml*120", row["epos_negative_clamped_row_names"])
+        audit_row = report.iloc[0].to_dict()
+        self.assertEqual(audit_row["epos_single_units"], 15.0)
+        self.assertEqual(audit_row["epos_negative_rows_clamped"], 1)
+        self.assertEqual(audit_row["epos_negative_units_clamped"], 30.0)
+
+    def test_negative_epos_non_pack_stock_is_clamped_before_grouping(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "SIMPLE BITTERS 50ml,ALCOHOLS & SPIRITS,-5\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+
+        self.assertEqual(len(epos), 1)
+        row = epos.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "SIMPLE BITTERS 50ml")
+        self.assertEqual(row["epos_single_units"], 0.0)
+        self.assertEqual(row["epos_negative_rows_clamped"], 1)
+        self.assertEqual(row["epos_negative_units_clamped"], 5.0)
+        self.assertEqual(row["epos_negative_stock_policy"], inventory_sync.EPOS_NEGATIVE_STOCK_POLICY)
 
     def test_product_filter_with_pack_multiplier_still_literal_text_with_volume_columns(self):
         import tempfile

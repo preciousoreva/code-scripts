@@ -91,6 +91,7 @@ Slack summarizes:
 - duplicate base items resolved
 - quantity updates
 - blocked items
+- EPOS negative rows clamped to zero, only when nonzero
 - final report path
 
 When `OIAT_PORTAL_BASE_URL` and `OIAT_RUN_JOB_ID` are set, Slack includes a Django run link:
@@ -113,7 +114,26 @@ Supported cases are fixed automatically. Unsupported or ambiguous cases remain v
 
 ## Quantity Semantics
 
-EPOS pack rows are normalized to single-unit quantities using the pack multiplier and Current Volume when available. Negative EPOS row quantities are clamped to zero before product grouping so one negative pack row does not subtract from a positive sibling pack row.
+EPOS pack rows are normalized to single-unit quantities using the pack multiplier and Current Volume when available.
+
+Inventory sync applies the explicit EPOS negative stock policy `clamp_to_zero`: any EPOS stock row that computes to a negative single-unit quantity is treated as `0` before product-level grouping. This applies only to inventory sync normalization. It does not change sales receipt upload behavior.
+
+The policy exists because EPOS can report a negative balance on one pack row while a sibling pack row still has valid positive stock. Without clamping, the negative row can incorrectly subtract from the product total and push QBO negative.
+
+Example:
+
+```text
+ACTION BITTERS50ml*20   Current Volume  15 of 20 Each    ->  15 units
+ACTION BITTERS50ml*120  Current Volume -30 of 120 Each   ->   0 units after clamp
+Grouped ACTION BITTERS50ml expected quantity             ->  15 units
+```
+
+The audit and pipeline summary expose the policy through:
+
+- `epos_negative_rows_clamped`
+- `epos_negative_units_clamped`
+- `epos_negative_stock_policy`
+- `epos_negative_clamped_row_names` in the audit CSV
 
 QBO pack variant rows are treated as separate QBO inventory items with their own raw `QtyOnHand` during catalog cleanup. QBO pack `QtyOnHand` is not multiplier-expanded. After cleanup, the final exact-match quantity adjustment forces the base item to the EPOS expected quantity.
 

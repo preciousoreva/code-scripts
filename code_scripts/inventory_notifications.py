@@ -101,6 +101,7 @@ def _friendly_count_lines(counts: Mapping[str, Any]) -> list[str]:
     missing = _as_int(counts.get("missing_in_qbo"), 0)
     posted = _as_int(counts.get("posted"), 0)
     skipped = _as_int(counts.get("skipped"), 0)
+    epos_negative_rows_clamped = _as_int(counts.get("epos_negative_rows_clamped"), 0)
 
     lines: list[str] = []
     if checked:
@@ -115,6 +116,8 @@ def _friendly_count_lines(counts: Mapping[str, Any]) -> list[str]:
     if missing:
         lines.append(f"• Missing in QuickBooks: {missing}")
     lines.append(f"• Catalog cleanup needed before update: {need_review + missing}")
+    if epos_negative_rows_clamped:
+        lines.append(f"• EPOS negative rows clamped to zero: {epos_negative_rows_clamped}")
 
     txn_date = str(counts.get("txn_date") or "").strip()
     if txn_date:

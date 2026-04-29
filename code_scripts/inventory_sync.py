@@ -59,6 +59,7 @@ from code_scripts.transform import strip_pack_multiplier
 _DEFAULT_STOCK_NAME_COL = "Name"
 _DEFAULT_STOCK_QTY_COL = "MeasuredCurrentStock"
 _DEFAULT_STOCK_CATEGORY_COL = "CategoryName"
+EPOS_NEGATIVE_STOCK_POLICY = "clamp_to_zero"
 _QBO_MINOR_VERSION = "70"
 _QBO_SNAPSHOT_COLUMNS = [
     "Id",
@@ -147,7 +148,7 @@ def _normalize_name_key(value: Any) -> str:
 
 
 _CURRENT_VOLUME_LOOSE_EACH_RE = re.compile(
-    r"^\s*(?P<loose>\d+(?:\.\d+)?)\s+of\s+\d+(?:\.\d+)?\s+Each\s*$",
+    r"^\s*(?P<loose>[-+]?\d+(?:\.\d+)?)\s+of\s+\d+(?:\.\d+)?\s+Each\s*$",
     re.IGNORECASE,
 )
 
@@ -169,6 +170,26 @@ def _parse_current_volume_loose_units(value: Any) -> float | None:
         return float(m.group("loose"))
     except Exception:
         return None
+
+
+def _apply_epos_negative_stock_policy(rows: pd.DataFrame) -> pd.DataFrame:
+    """Apply the inventory-sync policy for negative EPOS row quantities.
+
+    EPOS can report a negative stock/volume on one pack row while sibling pack
+    rows for the same product are positive. Inventory sync treats each negative
+    row as zero before grouping so the negative row cannot subtract from the
+    product-level expected quantity.
+    """
+    out = rows.copy()
+    computed_units = pd.to_numeric(out["epos_single_units"], errors="coerce").fillna(0.0)
+    negative_mask = computed_units < 0
+    out["epos_single_units_before_negative_policy"] = computed_units
+    out["epos_negative_rows_clamped"] = negative_mask.astype(int)
+    out["epos_negative_units_clamped"] = computed_units.where(negative_mask, 0.0).abs()
+    out["epos_negative_stock_policy"] = EPOS_NEGATIVE_STOCK_POLICY
+    out["epos_negative_clamped_row_names"] = out["raw_name"].where(negative_mask, "")
+    out["epos_single_units"] = computed_units.where(~negative_mask, 0.0)
+    return out
 
 
 def build_inventory_adjustment_doc_number(txn_date: str, item_id: str | int) -> str:
@@ -711,10 +732,7 @@ def load_epos_stock_snapshot(
             raw = total_stock.loc[mask_total_available] * out.loc[mask_total_available, "multiplier"]
             out.loc[mask_total_available, "epos_single_units"] = raw.map(lambda v: float(int(round(v))))
 
-    # EPOS can report negative stock/volume for one pack row while a sibling
-    # pack row is positive. Treat each negative row as zero before grouping so
-    # one bad location/pack balance does not subtract from the base product.
-    out["epos_single_units"] = out["epos_single_units"].map(lambda v: max(0.0, float(v or 0.0)))
+    out = _apply_epos_negative_stock_policy(out)
 
     if categories:
         requested = {_normalize_category_value(v).lower() for v in categories if _normalize_category_value(v)}
@@ -734,6 +752,10 @@ def load_epos_stock_snapshot(
             epos_has_pack=("epos_has_pack", "max"),
             epos_categories=("category_name", _join_unique_non_blank),
             epos_category_count=("category_name", lambda s: len({v for v in s if str(v).strip()})),
+            epos_negative_rows_clamped=("epos_negative_rows_clamped", "sum"),
+            epos_negative_units_clamped=("epos_negative_units_clamped", "sum"),
+            epos_negative_stock_policy=("epos_negative_stock_policy", "first"),
+            epos_negative_clamped_row_names=("epos_negative_clamped_row_names", _join_unique_non_blank),
         )
         .sort_values("base_name")
         .reset_index(drop=True)
@@ -961,6 +983,20 @@ def build_audit_report(
     )
     if "base_name_qbo" in merged.columns:
         merged = merged.drop(columns=["base_name_qbo"])
+    for col in ["epos_negative_rows_clamped"]:
+        if col not in merged.columns:
+            merged[col] = 0
+        merged[col] = merged[col].fillna(0).astype(int)
+    for col in ["epos_negative_units_clamped"]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        merged[col] = merged[col].fillna(0.0).astype(float)
+    if "epos_negative_stock_policy" not in merged.columns:
+        merged["epos_negative_stock_policy"] = EPOS_NEGATIVE_STOCK_POLICY
+    merged["epos_negative_stock_policy"] = merged["epos_negative_stock_policy"].fillna(EPOS_NEGATIVE_STOCK_POLICY)
+    if "epos_negative_clamped_row_names" not in merged.columns:
+        merged["epos_negative_clamped_row_names"] = ""
+    merged["epos_negative_clamped_row_names"] = merged["epos_negative_clamped_row_names"].fillna("")
     merged["qbo_qty_on_hand"] = merged["qbo_qty_on_hand"].fillna(0.0)
     merged["qbo_item_count_for_base"] = merged["qbo_item_count_for_base"].fillna(0).astype(int)
     merged["qbo_has_pack_variants"] = (
@@ -1062,6 +1098,10 @@ def build_audit_report(
         "epos_has_pack",
         "epos_categories",
         "epos_category_count",
+        "epos_negative_rows_clamped",
+        "epos_negative_units_clamped",
+        "epos_negative_stock_policy",
+        "epos_negative_clamped_row_names",
         "qbo_item_row_count_for_base",
         "qbo_unique_item_count_for_base",
         "qbo_item_count_for_base",
@@ -1214,6 +1254,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     needs_adjustment = int(counts.get("needs_adjustment", 0) or 0)
     ambiguous_in_qbo = int(counts.get("ambiguous_in_qbo", 0) or 0)
     missing_in_qbo = int(counts.get("missing_in_qbo", 0) or 0)
+    epos_negative_rows_clamped = 0
+    epos_negative_units_clamped = 0.0
+    if "epos_negative_rows_clamped" in report.columns:
+        epos_negative_rows_clamped = int(
+            pd.to_numeric(report["epos_negative_rows_clamped"], errors="coerce").fillna(0).sum()
+        )
+    if "epos_negative_units_clamped" in report.columns:
+        epos_negative_units_clamped = float(
+            pd.to_numeric(report["epos_negative_units_clamped"], errors="coerce").fillna(0.0).sum()
+        )
 
     def _manual_review_examples_for_audit() -> list[str]:
         examples: list[str] = []
@@ -1256,6 +1306,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     for key in ["in_sync", "needs_adjustment", "ambiguous_in_qbo", "missing_in_qbo"]:
         if key in counts:
             print(f"{key}: {counts[key]}")
+    if epos_negative_rows_clamped:
+        print(
+            "EPOS negative rows clamped to zero: "
+            f"{epos_negative_rows_clamped} ({epos_negative_units_clamped} units)"
+        )
     print("-" * 68)
     print(f"Wrote report: {out_path}")
     print("=" * 68)
@@ -1278,6 +1333,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                             "needs_adjustment": needs_adjustment,
                             "ambiguous_in_qbo": ambiguous_in_qbo,
                             "missing_in_qbo": missing_in_qbo,
+                            "epos_negative_rows_clamped": epos_negative_rows_clamped,
                         },
                         report_path=str(out_path),
                         warnings_count=manual_review,
@@ -1464,9 +1520,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 "needs_adjustment": needs_adjustment,
                                 "ambiguous_in_qbo": ambiguous_in_qbo,
                                 "missing_in_qbo": missing_in_qbo,
-                                "posted": posted,
-                                "skipped": skipped,
-                            },
+                            "posted": posted,
+                            "skipped": skipped,
+                            "epos_negative_rows_clamped": epos_negative_rows_clamped,
+                        },
                             report_path=str(out_path),
                             error=apply_error,
                             warnings_count=(ambiguous_in_qbo + missing_in_qbo + skipped_non_exact_pick),
@@ -1511,6 +1568,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                             "missing_in_qbo": missing_in_qbo,
                             "posted": posted,
                             "skipped": skipped,
+                            "epos_negative_rows_clamped": epos_negative_rows_clamped,
                             "txn_date": txn_date,
                         },
                         report_path=str(out_path),

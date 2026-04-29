@@ -109,6 +109,30 @@ class InventoryAuditSummaryTest(unittest.TestCase):
         )
         self.assertEqual(msg.count("Catalog cleanup needed before update: 109"), 1)
 
+    def test_epos_negative_clamp_line_only_renders_when_nonzero(self):
+        base_counts = {
+            "total_groups": 1,
+            "in_sync": 1,
+            "needs_adjustment": 0,
+            "ambiguous_in_qbo": 0,
+            "missing_in_qbo": 0,
+        }
+        msg_without_clamps = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="audit",
+            counts={**base_counts, "epos_negative_rows_clamped": 0},
+        )
+        self.assertNotIn("EPOS negative rows clamped to zero", msg_without_clamps)
+
+        msg_with_clamps = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="audit",
+            counts={**base_counts, "epos_negative_rows_clamped": 1},
+        )
+        self.assertIn("EPOS negative rows clamped to zero: 1", msg_with_clamps)
+
     def test_manual_review_examples_are_capped_at_10(self):
         examples = [f"ITEM {i} — missing_in_qbo / example" for i in range(25)]
         msg = format_inventory_audit_summary(
