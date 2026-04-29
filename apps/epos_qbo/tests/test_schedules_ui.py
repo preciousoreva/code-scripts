@@ -20,10 +20,10 @@ class SchedulesUiTests(TestCase):
         self.fixed_now = timezone.make_aware(datetime(2026, 2, 20, 10, 0, 0))
         self.company = CompanyConfigRecord.objects.create(
             company_key="company_a",
-            display_name="Company A",
+            display_name="AKPONORA VENTURES LTD.",
             config_json={
                 "company_key": "company_a",
-                "display_name": "Company A",
+                "display_name": "AKPONORA VENTURES LTD.",
                 "qbo": {"realm_id": "123"},
                 "epos": {"username_env_key": "EPOS_USERNAME_A", "password_env_key": "EPOS_PASSWORD_A"},
             },
@@ -48,6 +48,12 @@ class SchedulesUiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Create Schedule")
         self.assertContains(response, "Configured Schedules")
+        self.assertContains(response, "Worker Offline")
+        self.assertNotContains(response, "Scheduler: Running")
+        self.assertNotContains(response, "Scheduler: Not running")
+        self.assertContains(response, "Online means the scheduler worker is polling for due schedules")
+        self.assertContains(response, "It does not mean every schedule is enabled or successful")
+        self.assertContains(response, "Offline means scheduled runs will not be picked up")
 
     def test_create_update_toggle_delete_schedule(self):
         response = self.client.post(reverse("epos_qbo:schedule-create"), self._create_payload())
@@ -88,7 +94,7 @@ class SchedulesUiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Weekly Inventory Sync")
-        self.assertContains(response, "All products")
+        self.assertContains(response, "AKPONORA VENTURES LTD. · All products")
 
     def test_create_inventory_schedule_persists_inventory_options(self):
         payload = self._create_payload()
@@ -153,7 +159,12 @@ class SchedulesUiTests(TestCase):
         self.assertContains(response, "System-managed")
         self.assertNotContains(response, "Legacy Env Fallback")
         self.assertContains(response, "Daily at 19:00")
+        self.assertContains(response, "Workflow")
+        self.assertContains(response, "Status")
+        self.assertContains(response, "Schedule")
         self.assertContains(response, "Next Run")
+        self.assertContains(response, "Actions")
+        self.assertNotContains(response, "Last Result")
         self.assertNotContains(response, "Next Fire")
         self.assertNotContains(response, "Cron / TZ")
         self.assertContains(response, "Recent Schedule Activity")

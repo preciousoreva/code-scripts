@@ -108,6 +108,7 @@
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-600 flex flex-wrap items-center justify-between gap-3">
             <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">Configured Schedules</h2>
             <div class="flex items-center gap-3"
+                 x-ref="schedulerHelpPill"
                  data-initial-running="{% if scheduler_status.running %}true{% else %}false{% endif %}"
                  data-initial-message="{{ scheduler_status.message|default:'The scheduler worker process is not running.'|escape }}"
                  data-status-url="{% url 'epos_qbo:schedule-status' %}"
@@ -140,47 +141,58 @@
                     scheduleClose() { const t = this; this.helpCloseTimer = setTimeout(() => { t.schedulerHelpOpen = false }, 200) },
                     cancelClose() { clearTimeout(this.helpCloseTimer) }
                  }">
-                <span x-show="schedulerRunning" class="inline-flex items-center gap-2 rounded-full border border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 px-3 py-1.5 text-sm">
+                <span x-show="schedulerRunning"
+                      @mouseenter="openHelp()"
+                      @mouseleave="scheduleClose()"
+                      class="inline-flex items-center gap-2 rounded-full border border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 px-3 py-1.5 text-sm cursor-help"
+                      title="Worker Online means the scheduler worker is polling for due schedules. It does not mean every schedule is enabled or successful.">
                     <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-500/90" aria-hidden="true"></span>
-                    <span class="text-emerald-700 dark:text-emerald-300">Scheduler: <span class="font-medium">Running</span></span>
+                    <span class="font-medium text-emerald-700 dark:text-emerald-300">Worker Online</span>
                 </span>
                 <span x-show="!schedulerRunning" x-cloak
-                      x-ref="schedulerHelpPill"
                       @mouseenter="openHelp()"
                       @mouseleave="scheduleClose()"
                       class="inline-flex items-center gap-2 rounded-full border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-1.5 text-sm cursor-help"
-                      title="Hover for details">
+                      title="Worker Offline means scheduled runs will not be picked up until the scheduler worker or container is started.">
                     <span class="inline-block w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400 shrink-0" aria-hidden="true"></span>
-                    <span class="text-slate-700 dark:text-slate-200">Scheduler: <span class="font-medium text-amber-600 dark:text-amber-400">Not running</span></span>
+                    <span class="font-medium text-amber-600 dark:text-amber-400">Worker Offline</span>
                 </span>
                 <template x-teleport="body">
-                    <div x-show="!schedulerRunning && schedulerHelpOpen && helpY > 0" x-cloak x-transition
+                    <div x-show="schedulerHelpOpen && helpY > 0" x-cloak x-transition
                          @mouseenter="cancelClose()"
                          @mouseleave="scheduleClose()"
                          :style="'position: fixed; left: ' + helpX + 'px; top: ' + helpY + 'px;'"
                          class="w-80 max-w-[calc(100vw-2rem)] p-5 rounded-xl shadow-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-left z-[200]">
-                        <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">Why</p>
+                        <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">Worker heartbeat</p>
+                        <p class="text-sm text-slate-700 dark:text-slate-200 mb-3">Online means the scheduler worker is polling for due schedules. It does not mean every schedule is enabled or successful.</p>
+                        <p class="text-sm text-slate-700 dark:text-slate-200 mb-4">Offline means scheduled runs will not be picked up until the scheduler worker or container is started.</p>
+                        <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">Current signal</p>
                         <p class="text-sm text-slate-700 dark:text-slate-200 mb-4" x-text="schedulerMessage"></p>
-                        <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">What to do</p>
+                        <p class="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">Start worker</p>
                         <ul class="text-sm text-slate-700 dark:text-slate-200 space-y-2 list-none">
                             <li><span class="font-medium text-slate-600 dark:text-slate-300">Docker:</span> <code class="block mt-0.5 text-xs bg-slate-100 dark:bg-slate-700 px-2 py-1.5 rounded-md font-mono break-all">docker compose up -d scheduler</code></li>
                             <li><span class="font-medium text-slate-600 dark:text-slate-300">Local:</span> <code class="block mt-0.5 text-xs bg-slate-100 dark:bg-slate-700 px-2 py-1.5 rounded-md font-mono break-all">python manage.py run_schedule_worker</code></li>
                         </ul>
-                        <p class="text-xs text-slate-500 dark:text-slate-400 mt-4 pt-3 border-t border-slate-200 dark:border-slate-600">Schedules will run at their next fire time once the worker is running.</p>
                     </div>
                 </template>
             </div>
         </div>
         {% if schedule_rows %}
         <div class="overflow-x-auto">
-            <table class="w-full text-sm min-w-max">
+            <table class="w-full table-fixed text-sm">
+                <colgroup>
+                    <col class="w-[34%]">
+                    <col class="w-[14%]">
+                    <col class="w-[24%]">
+                    <col class="w-[18%]">
+                    <col class="w-[10%]">
+                </colgroup>
                 <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                     <tr>
                         <th class="text-left px-4 py-3 font-medium">Workflow</th>
                         <th class="text-left px-4 py-3 font-medium">Status</th>
                         <th class="text-left px-4 py-3 font-medium">Schedule</th>
                         <th class="text-left px-4 py-3 font-medium">Next Run</th>
-                        <th class="text-left px-4 py-3 font-medium">Last Result</th>
                         <th class="text-center px-4 py-3 font-medium w-20">Actions</th>
                     </tr>
                 </thead>
@@ -189,13 +201,18 @@
                     {% with schedule=row.schedule %}
                     <tr>
                         <td class="px-4 py-3 align-top">
-                            <div class="font-medium text-slate-900 dark:text-slate-100">{{ row.display_name }}</div>
-                            <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                            <div class="font-medium text-slate-900 dark:text-slate-100 break-words">{{ row.display_name }}</div>
+                            <div class="text-xs text-slate-500 dark:text-slate-400 mt-1 break-words">
                                 {{ row.subtitle }}
                             </div>
+                            {% if row.last_run_at %}
+                            <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">Last run: {{ row.last_run_at|date:"Y-m-d H:i" }} · {{ row.last_result_label }}</div>
+                            {% elif row.last_result_label != "Never run" %}
+                            <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{{ row.last_result_label }}</div>
+                            {% endif %}
                         </td>
                         <td class="px-4 py-3 align-top">
-                            <div class="flex flex-wrap gap-1.5">
+                            <div class="flex flex-col items-start gap-1.5">
                                 {% if schedule.enabled %}
                                 <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Enabled</span>
                                 {% else %}
@@ -207,16 +224,12 @@
                             </div>
                         </td>
                         <td class="px-4 py-3 align-top">
-                            <div class="text-sm text-slate-800 dark:text-slate-200">{{ row.friendly_cron }}</div>
+                            <div class="text-sm text-slate-800 dark:text-slate-200 break-words">{{ row.friendly_cron }}</div>
                             <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ schedule.timezone_name }}</div>
-                            <div class="font-mono text-[11px] text-slate-400 dark:text-slate-500 mt-1">Cron: {{ schedule.cron_expr }}</div>
+                            <div class="font-mono text-[11px] text-slate-400 dark:text-slate-500 mt-1 break-words">Cron: {{ schedule.cron_expr }}</div>
                         </td>
                         <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
-                            <div>{% if schedule.next_fire_at %}{{ schedule.next_fire_at|date:"Y-m-d H:i:s" }}{% else %}-{% endif %}</div>
-                        </td>
-                        <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
-                            <div>{{ row.last_result_label }}</div>
-                            <div class="mt-1 text-slate-500">Last run: {% if row.last_run_at %}{{ row.last_run_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</div>
+                            <div class="break-words">{% if schedule.next_fire_at %}{{ schedule.next_fire_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</div>
                             {% if row.current_status_label %}
                             <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Current: {{ row.current_status_label }}</span>
                             {% endif %}
@@ -265,7 +278,7 @@
                     {% if not schedule.is_system_managed %}
                     <tr x-show="openEditId === '{{ schedule.id }}'" x-cloak x-transition class="bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                         x-data="{ scope: '{{ schedule.scope }}' }">
-                        <td colspan="6" class="px-4 py-4">
+                        <td colspan="5" class="px-4 py-4">
                             <p class="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">Edit schedule</p>
                             <form method="post" action="{% url 'epos_qbo:schedule-update' schedule.id %}" class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl">
                                 {% csrf_token %}

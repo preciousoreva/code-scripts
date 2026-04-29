@@ -1544,8 +1544,7 @@ def _company_display(company_map: dict[str, str], company_key: str | None) -> st
     key = (company_key or "").strip()
     if not key:
         return ""
-    display = company_map.get(key) or key
-    return f"{display} / {key}" if display != key else key
+    return company_map.get(key) or key
 
 
 def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> str:
@@ -1560,7 +1559,7 @@ def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> st
         parts = []
         company = _company_display(company_map, schedule.company_key)
         if company:
-            parts.append(f"Company: {company}")
+            parts.append(company)
         category = _first_inventory_category(schedule)
         product = _inventory_product_filter(schedule)
         if category:
@@ -1569,7 +1568,7 @@ def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> st
             parts.append(f"Product: {product}")
         if not category and not product:
             parts.append("All products")
-        return " | ".join(parts) if parts else "Inventory"
+        return " · ".join(parts) if parts else "Inventory"
     return schedule.get_scope_display()
 
 
