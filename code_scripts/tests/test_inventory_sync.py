@@ -657,6 +657,107 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
         self.assertEqual(row["qbo_name_display"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
 
+    def test_qbo_item_snapshot_query_does_not_select_subitem(self):
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"QueryResponse": {}}
+
+        queries: list[str] = []
+
+        def fake_request(_method, url, _token_mgr):
+            raw_query = parse_qs(urlparse(url).query)["query"][0]
+            queries.append(unquote(raw_query))
+            return FakeResponse()
+
+        with mock.patch.object(inventory_sync, "get_qbo_api_base_url", return_value="https://qbo.example"), \
+             mock.patch.object(inventory_sync, "_make_qbo_request", side_effect=fake_request):
+            inventory_sync._qbo_query_items_page(
+                mock.Mock(),
+                realm_id="REALM123",
+                start_position=1,
+                max_results=1000,
+            )
+
+        self.assertEqual(len(queries), 1)
+        self.assertIn("ParentRef", queries[0])
+        self.assertNotIn("SubItem", queries[0])
+
+    def test_fetch_qbo_snapshot_retries_safe_baseline_when_optional_field_rejected(self):
+        import tempfile
+        from pathlib import Path
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        class FakeResponse:
+            def __init__(self, status_code, text="", payload=None):
+                self.status_code = status_code
+                self.text = text
+                self._payload = payload or {}
+
+            def json(self):
+                return self._payload
+
+        queries: list[str] = []
+        responses = [
+            FakeResponse(
+                400,
+                "QueryValidationError: Property ParentRef not found for Entity Item",
+            ),
+            FakeResponse(
+                200,
+                payload={
+                    "QueryResponse": {
+                        "Item": [
+                            {
+                                "Id": "13875",
+                                "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                                "Type": "Inventory",
+                                "TrackQtyOnHand": True,
+                                "QtyOnHand": -229,
+                                "Active": True,
+                            }
+                        ]
+                    }
+                },
+            ),
+        ]
+
+        def fake_request(_method, url, _token_mgr):
+            raw_query = parse_qs(urlparse(url).query)["query"][0]
+            queries.append(unquote(raw_query))
+            return responses.pop(0)
+
+        with tempfile.TemporaryDirectory() as td:
+            output_path = Path(td) / "exports" / "company_a_products.csv"
+            with mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "get_qbo_api_base_url", return_value="https://qbo.example"), \
+                 mock.patch.object(inventory_sync, "_make_qbo_request", side_effect=fake_request), \
+                 redirect_stdout(io.StringIO()) as buf:
+                inventory_sync.fetch_qbo_inventory_items_snapshot(
+                    company_key="company_a",
+                    realm_id="REALM123",
+                    token_mgr=mock.Mock(),
+                    output_path=output_path,
+                    force_refresh=True,
+                )
+            rows = pd.read_csv(output_path)
+
+        self.assertEqual(len(queries), 2)
+        self.assertIn("ParentRef", queries[0])
+        self.assertNotIn("SubItem", queries[0])
+        self.assertNotIn("ParentRef", queries[1])
+        self.assertNotIn("InvStartDate", queries[1])
+        self.assertIn("Active", queries[1])
+        self.assertIn("retrying with safe baseline fields", buf.getvalue())
+        row = rows.iloc[0].to_dict()
+        self.assertEqual(row["Name"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+        self.assertEqual(row["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+        self.assertEqual(row["qbo_name_raw"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+
     def test_auto_fetch_qbo_writes_default_path_and_uses_it(self):
         import tempfile
         from pathlib import Path

@@ -11,7 +11,7 @@ from unittest import mock
 
 import pandas as pd
 
-from code_scripts import inventory_pipeline
+from code_scripts import inventory_pipeline, inventory_sync
 
 
 class InventoryPipelineOrchestrationTests(unittest.TestCase):
@@ -544,6 +544,86 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertEqual(summary["base_items_created"], 1)
         self.assertEqual(summary["quantity_updates_applied"], 0)
         self.assertEqual(summary["unsupported_catalog_issues"].get("only_pack_variant_exists", 0), 0)
+
+    def test_pipeline_auto_fetch_retries_when_optional_qbo_diagnostics_are_unavailable(self):
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        class FakeResponse:
+            def __init__(self, status_code, text="", payload=None):
+                self.status_code = status_code
+                self.text = text
+                self._payload = payload or {}
+
+            def json(self):
+                return self._payload
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stock_path = root / "action_stock.csv"
+            stock_path.write_text(
+                "Name,CategoryName,MeasuredCurrentStock,Current Volume,Total Stock\n"
+                "ACTION BITTERS50ml*20,ALCOHOLS & SPIRITS,0,15 of 20 Each,0.75\n"
+                "ACTION BITTERS50ml*120,ALCOHOLS & SPIRITS,0,-30 of 120 Each,-0.25\n",
+                encoding="utf-8",
+            )
+            qbo_export_path = root / "qbo.csv"
+            queries: list[str] = []
+            responses = [
+                FakeResponse(
+                    400,
+                    "QueryValidationError: Property ParentRef not found for Entity Item",
+                ),
+                FakeResponse(
+                    200,
+                    payload={
+                        "QueryResponse": {
+                            "Item": [
+                                {
+                                    "Id": "10",
+                                    "Name": "ACTION BITTERS50ml",
+                                    "Type": "Inventory",
+                                    "TrackQtyOnHand": True,
+                                    "QtyOnHand": 15,
+                                    "Active": True,
+                                }
+                            ]
+                        }
+                    },
+                ),
+            ]
+
+            def fake_request(_method, url, _token_mgr):
+                raw_query = parse_qs(urlparse(url).query)["query"][0]
+                queries.append(unquote(raw_query))
+                return responses.pop(0)
+
+            cfg = self._cfg()
+            with mock.patch.object(inventory_pipeline, "load_company_config", return_value=cfg), \
+                 mock.patch.object(inventory_pipeline, "ensure_company_runtime_compatible"), \
+                 mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(inventory_sync, "get_qbo_api_base_url", return_value="https://qbo.example"), \
+                 mock.patch.object(inventory_sync, "_make_qbo_request", side_effect=fake_request), \
+                 mock.patch.object(inventory_pipeline, "_catalog_output_path", return_value=root / "catalog.csv"):
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(
+                        td,
+                        stock_csv=str(stock_path),
+                        qbo_export_path=str(qbo_export_path),
+                        product_filter="ACTION BITTERS50ml",
+                        categories=["ALCOHOLS & SPIRITS"],
+                    )
+                )
+
+        self.assertEqual(summary["completion_status"], "clean")
+        self.assertEqual(summary["products_checked"], 1)
+        self.assertEqual(summary["in_sync"], 1)
+        self.assertEqual(summary["epos_negative_rows_clamped"], 1)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("ParentRef", queries[0])
+        self.assertNotIn("SubItem", queries[0])
+        self.assertNotIn("ParentRef", queries[1])
+        self.assertIn("Active", queries[1])
 
     def test_case_insensitive_base_detection_enables_pack_consolidation_flow(self):
         with tempfile.TemporaryDirectory() as td:

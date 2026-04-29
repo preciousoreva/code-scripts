@@ -70,12 +70,26 @@ _QBO_SNAPSHOT_COLUMNS = [
     "Active",
     "InvStartDate",
     "ParentRef",
-    "SubItem",
     "UnitPrice",
     "PurchaseCost",
     "qbo_name_original",
     "qbo_name_raw",
     "qbo_name_display",
+]
+_QBO_ITEM_SAFE_SELECT_FIELDS = [
+    "Id",
+    "Name",
+    "Type",
+    "TrackQtyOnHand",
+    "QtyOnHand",
+    "Active",
+]
+_QBO_ITEM_DIAGNOSTIC_SELECT_FIELDS = [
+    *_QBO_ITEM_SAFE_SELECT_FIELDS,
+    "InvStartDate",
+    "ParentRef",
+    "UnitPrice",
+    "PurchaseCost",
 ]
 
 
@@ -524,19 +538,29 @@ def _is_cache_fresh(path: Path, *, max_age_hours: int) -> bool:
     return age_s <= float(max_age_hours) * 3600.0
 
 
+class QBOItemQueryValidationError(RuntimeError):
+    """Raised when QBO rejects an Item query SELECT field."""
+
+
+def _is_query_validation_error_response(status_code: int, text: str | None) -> bool:
+    body = str(text or "").lower()
+    return int(status_code) == 400 and "queryvalidationerror" in body
+
+
 def _qbo_query_items_page(
     token_mgr: TokenManager,
     *,
     realm_id: str,
     start_position: int,
     max_results: int,
+    select_fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch a single page of Inventory Items from QBO via the query endpoint."""
     from urllib.parse import quote
 
+    fields = list(select_fields or _QBO_ITEM_DIAGNOSTIC_SELECT_FIELDS)
     query = (
-        "select Id, Name, Type, TrackQtyOnHand, QtyOnHand, Active, "
-        "InvStartDate, ParentRef, SubItem, UnitPrice, PurchaseCost "
+        f"select {', '.join(fields)} "
         "from Item "
         "where Active = true and Type = 'Inventory' "
         f"startposition {int(start_position)} maxresults {int(max_results)}"
@@ -545,6 +569,10 @@ def _qbo_query_items_page(
     url = f"{base_url}/v3/company/{realm_id}/query?query={quote(query)}&minorversion={_QBO_MINOR_VERSION}"
     resp = _make_qbo_request("GET", url, token_mgr)
     if resp.status_code != 200:
+        if _is_query_validation_error_response(resp.status_code, resp.text):
+            raise QBOItemQueryValidationError(
+                f"QBO Item query rejected select fields {fields}: {resp.text[:2000] if resp.text else ''}"
+            )
         raise RuntimeError(f"QBO query failed: HTTP {resp.status_code}: {resp.text[:2000] if resp.text else ''}")
     payload = resp.json()
     items = payload.get("QueryResponse", {}).get("Item", [])
@@ -598,22 +626,35 @@ def fetch_qbo_inventory_items_snapshot(
 
     print(f"[INFO] Fetching QBO Inventory items snapshot -> {output_path}")
 
-    rows: list[dict[str, Any]] = []
-    start = 1
-    page_size = 1000
-    while True:
-        page = _qbo_query_items_page(
-            token_mgr,
-            realm_id=realm_id,
-            start_position=start,
-            max_results=page_size,
+    def _fetch_all_pages(select_fields: list[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        start = 1
+        page_size = 1000
+        while True:
+            page = _qbo_query_items_page(
+                token_mgr,
+                realm_id=realm_id,
+                start_position=start,
+                max_results=page_size,
+                select_fields=select_fields,
+            )
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+        return out
+
+    try:
+        rows = _fetch_all_pages(_QBO_ITEM_DIAGNOSTIC_SELECT_FIELDS)
+    except QBOItemQueryValidationError as exc:
+        print(
+            "[WARN] QBO rejected optional Item diagnostic fields; "
+            f"retrying with safe baseline fields: {', '.join(_QBO_ITEM_SAFE_SELECT_FIELDS)}. "
+            f"Reason: {exc}"
         )
-        if not page:
-            break
-        rows.extend(page)
-        if len(page) < page_size:
-            break
-        start += page_size
+        rows = _fetch_all_pages(_QBO_ITEM_SAFE_SELECT_FIELDS)
 
     with open(output_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
@@ -634,7 +675,6 @@ def fetch_qbo_inventory_items_snapshot(
                     "Active": str(it.get("Active", True)).strip(),
                     "InvStartDate": str(it.get("InvStartDate", "")).strip(),
                     "ParentRef": _qbo_parent_ref_value(it.get("ParentRef")),
-                    "SubItem": str(it.get("SubItem", "")).strip(),
                     "UnitPrice": str(it.get("UnitPrice", "")).strip(),
                     "PurchaseCost": str(it.get("PurchaseCost", "")).strip(),
                     "qbo_name_original": name_original,
