@@ -137,6 +137,8 @@ Assign via Django admin (`/admin/`):
 - `can_manage_schedules`
 - `can_manage_portal_settings`
 
+Lower-level inventory utilities (audit-only, catalog cleanup planning, snapshot inspection) still exist, but the main operator workflow is **Runs → Inventory** and the unified CLI `python -m code_scripts.inventory_pipeline`.
+
 ## CLI examples
 
 ### Sales
