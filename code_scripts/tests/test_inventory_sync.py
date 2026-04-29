@@ -1279,6 +1279,52 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(set(rows["Id"].tolist()), {"10", "11"})
 
+    def test_qbo_item_row_loader_preserves_original_name_spacing(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "9355,SMIRNOFF ICE DOUBLE BLACK  CAN 330ml,Inventory,true,10\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n",
+                encoding="utf-8",
+            )
+            rows = inventory_sync.load_qbo_inventory_item_rows(str(qbo_csv))
+
+        typo = rows[rows["Id"] == "9355"].iloc[0]
+        canonical = rows[rows["Id"] == "13875"].iloc[0]
+        self.assertEqual(typo["Name"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(typo["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(typo["qbo_name_raw"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(typo["qbo_name_display"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+        self.assertEqual(canonical["Name"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+        self.assertEqual(typo["base_name"], canonical["base_name"])
+
+    def test_qbo_grouped_snapshot_keeps_original_name_field_separate_from_display(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "9355,SMIRNOFF ICE DOUBLE BLACK  CAN 330ml,Inventory,true,10\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n",
+                encoding="utf-8",
+            )
+            rows = inventory_sync.load_qbo_inventory_item_rows(str(qbo_csv))
+            grouped = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+
+        self.assertIn("qbo_name_original", rows.columns)
+        self.assertEqual(rows[rows["Id"] == "9355"].iloc[0]["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped.iloc[0]["qbo_base_item_names_for_base"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+        self.assertEqual(grouped.iloc[0]["qbo_base_item_ids"], "9355,13875")
+
     def test_qbo_grouped_quantity_uses_raw_qtyonhand_without_pack_multiplier_scaling(self):
         import tempfile
         from pathlib import Path

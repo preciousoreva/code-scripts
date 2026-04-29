@@ -195,6 +195,20 @@ class PlannedAction:
     block_reason: str
 
 
+def _canonical_name_series(rows: pd.DataFrame) -> pd.Series:
+    """Return the least-normalized QBO name column available for strict matching."""
+    if "qbo_name_original" in rows.columns:
+        return rows["qbo_name_original"].where(rows["qbo_name_original"].notna(), "").astype(str)
+    candidates = [col for col in ("Name", "qbo_name_raw") if col in rows.columns]
+    if candidates:
+        best_col = max(
+            candidates,
+            key=lambda col: rows[col].where(rows[col].notna(), "").astype(str).str.strip().nunique(),
+        )
+        return rows[best_col].where(rows[best_col].notna(), "").astype(str)
+    return pd.Series([""] * len(rows), index=rows.index, dtype="object")
+
+
 def _select_duplicate_base_canonical(
     *,
     base_name: str,
@@ -208,10 +222,9 @@ def _select_duplicate_base_canonical(
         return None, "not_duplicate_base_items"
 
     base_trim = str(base_name or "").strip()
+    canonical_names = _canonical_name_series(base_rows)
     # Strict match first: trim + case-insensitive (no internal space collapse).
-    strict = base_rows[
-        base_rows["Name"].astype(str).map(lambda v: str(v).strip().lower()) == base_trim.lower()
-    ]
+    strict = base_rows[canonical_names.map(lambda v: str(v).strip().lower()) == base_trim.lower()]
     if len(strict) == 1:
         return strict.iloc[0], ""
     if len(strict) > 1:
@@ -219,9 +232,7 @@ def _select_duplicate_base_canonical(
 
     # Fallback: collapsed-space case-insensitive match.
     base_norm = _normalize_name_key(base_trim)
-    collapsed = base_rows[
-        base_rows["Name"].astype(str).map(_normalize_name_key) == base_norm
-    ]
+    collapsed = base_rows[canonical_names.map(_normalize_name_key) == base_norm]
     if len(collapsed) == 1:
         return collapsed.iloc[0], ""
     if len(collapsed) > 1:
@@ -410,9 +421,10 @@ def _run_apply_for_existing_base_pack_variants(
     if not unsupported.empty:
         for _, r in unsupported.iterrows():
             skipped += 1
+            reason = str(r.get("block_reason") or "unsupported_planned_action")
             print(
                 f"[SKIP] base={str(r.get('base_name') or '')!r} planned_action={r.get('planned_action')} "
-                "reason=unsupported_planned_action"
+                f"reason={reason}"
             )
 
     eligible = supported[supported["action_eligible"] == True].copy()  # noqa: E712
@@ -573,7 +585,9 @@ def _run_apply_for_existing_base_pack_variants(
                                     "Name": base_name,
                                     "base_name": base_name,
                                     "base_name_norm": base_norm,
+                                    "qbo_name_original": base_name,
                                     "qbo_name_raw": base_name,
+                                    "qbo_name_display": base_name,
                                     "qbo_has_pack": False,
                                     "qbo_qty_on_hand": base_qty_live,
                                 }

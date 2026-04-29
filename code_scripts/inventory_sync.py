@@ -106,6 +106,11 @@ def _collapse_spaces(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def _original_qbo_names(series: pd.Series) -> pd.Series:
+    """Preserve QBO item names exactly enough for catalog decisions."""
+    return series.where(series.notna(), "").astype(str)
+
+
 def _normalize_name_key(value: Any) -> str:
     """Canonical key for case-insensitive product-name matching/grouping."""
     return _collapse_spaces(str(value or "")).lower()
@@ -707,16 +712,19 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
     inv = df[is_inventory & tracks].copy()
     inv = _dedupe_qbo_rows_by_id(inv)
 
-    names = inv["Name"].astype(str).map(_collapse_spaces)
+    names_original = _original_qbo_names(inv["Name"])
+    names_display = names_original.map(_collapse_spaces)
     base_names = []
     had_pack = []
-    for n in names.tolist():
+    for n in names_display.tolist():
         base, mult = strip_pack_multiplier(n)
         base_names.append(_collapse_spaces(base))
         had_pack.append(mult > 1)
     inv["base_name"] = base_names
     inv["base_name_norm"] = inv["base_name"].map(_normalize_name_key)
-    inv["qbo_name_raw"] = names
+    inv["qbo_name_original"] = names_original
+    inv["qbo_name_raw"] = names_original
+    inv["qbo_name_display"] = names_display
     inv["qbo_has_pack"] = had_pack
     inv["qbo_qty_on_hand"] = inv.get("QtyOnHand", 0).map(_safe_float)
     inv["qbo_is_base_item"] = [not v for v in had_pack]
@@ -740,11 +748,11 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
 
     def _join_pack_names(df_group: pd.DataFrame) -> str:
         items = df_group[df_group["qbo_has_pack"] == True]  # noqa: E712
-        return _join_names(items["qbo_name_raw"].tolist())
+        return _join_names(items["qbo_name_display"].tolist())
 
     def _join_base_names(df_group: pd.DataFrame) -> str:
         items = df_group[df_group["qbo_has_pack"] == False]  # noqa: E712
-        return _join_names(items["qbo_name_raw"].tolist())
+        return _join_names(items["qbo_name_display"].tolist())
 
     grouped = (
         inv.groupby("base_name_norm", as_index=False)
@@ -754,7 +762,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
             qbo_item_count_for_base=("Id", "count"),
             qbo_has_pack_variants=("qbo_has_pack", "max"),
             qbo_base_item_count=("qbo_is_base_item", "sum"),
-            qbo_item_names_for_base=("qbo_name_raw", _join_names),
+            qbo_item_names_for_base=("qbo_name_display", _join_names),
         )
         .sort_values("base_name")
         .reset_index(drop=True)
@@ -785,7 +793,7 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
     Load per-QBO-item rows (not grouped) for Inventory + TrackQtyOnHand.
 
     Columns returned (best-effort):
-    - Id, Name, base_name, qbo_name_raw, qbo_has_pack, qbo_qty_on_hand
+    - Id, Name, base_name, qbo_name_original, qbo_name_raw, qbo_has_pack, qbo_qty_on_hand
     """
     df = pd.read_csv(qbo_csv_path)
     if "Name" not in df.columns:
@@ -801,10 +809,11 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
 
     inv = df[is_inventory & tracks].copy()
     inv = _dedupe_qbo_rows_by_id(inv)
-    names = inv["Name"].astype(str).map(_collapse_spaces)
+    names_original = _original_qbo_names(inv["Name"])
+    names_display = names_original.map(_collapse_spaces)
     base_names = []
     had_pack = []
-    for n in names.tolist():
+    for n in names_display.tolist():
         base, mult = strip_pack_multiplier(n)
         base_names.append(_collapse_spaces(base))
         had_pack.append(mult > 1)
@@ -812,10 +821,12 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
     out = pd.DataFrame(
         {
             "Id": inv.get("Id", pd.Series([""] * len(inv))),
-            "Name": names,
+            "Name": names_original,
             "base_name": base_names,
             "base_name_norm": [_normalize_name_key(v) for v in base_names],
-            "qbo_name_raw": names,
+            "qbo_name_original": names_original,
+            "qbo_name_raw": names_original,
+            "qbo_name_display": names_display,
             "qbo_has_pack": had_pack,
             "qbo_qty_on_hand": inv.get("QtyOnHand", 0).map(_safe_float),
         }

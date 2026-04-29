@@ -7,7 +7,7 @@ from unittest import mock
 
 import pandas as pd
 
-from code_scripts import inventory_catalog_cleanup
+from code_scripts import inventory_catalog_cleanup, inventory_sync
 
 
 class CatalogCleanupPlannerTest(unittest.TestCase):
@@ -157,6 +157,107 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         row = plan.iloc[0].to_dict()
         self.assertEqual(row["planned_action"], "resolve_duplicate_base_items")
         self.assertTrue(row["action_eligible"])
+
+        canonical, reason = inventory_catalog_cleanup._select_duplicate_base_canonical(
+            base_name="SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+            qbo_group=qbo_rows,
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(str(canonical["Id"]), "13875")
+
+    def test_qbo_loader_preserves_raw_typo_space_for_duplicate_base_planning(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            qbo_csv = Path(td) / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "9355,SMIRNOFF ICE DOUBLE BLACK  CAN 330ml,Inventory,true,10\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n"
+                "13956,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12,Inventory,true,-1\n"
+                "13942,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,Inventory,true,-2\n",
+                encoding="utf-8",
+            )
+            qbo_rows = inventory_sync.load_qbo_inventory_item_rows(str(qbo_csv))
+
+        typo = qbo_rows[qbo_rows["Id"] == "9355"].iloc[0]
+        self.assertEqual(typo["Name"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(typo["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(typo["qbo_name_raw"], "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml")
+        self.assertEqual(typo["qbo_name_display"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+
+        audit = self._audit_df(
+            [
+                {
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "epos_single_units": 0.0,
+                    "catalog_issue_type": "multiple_active_base_items",
+                }
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "resolve_duplicate_base_items")
+        self.assertTrue(row["action_eligible"])
+
+        canonical, reason = inventory_catalog_cleanup._select_duplicate_base_canonical(
+            base_name="SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+            qbo_group=qbo_rows,
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(str(canonical["Id"]), "13875")
+
+    def test_mutated_display_name_still_uses_original_name_for_canonical_selection(self):
+        audit = self._audit_df(
+            [
+                {
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "epos_single_units": 0.0,
+                    "catalog_issue_type": "multiple_active_base_items",
+                }
+            ]
+        )
+        qbo_rows = pd.DataFrame(
+            [
+                {
+                    "Id": "9355",
+                    "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "qbo_name_original": "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml",
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "base_name_norm": "smirnoff ice double black can 330ml",
+                    "qbo_has_pack": False,
+                },
+                {
+                    "Id": "13875",
+                    "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "qbo_name_original": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "base_name_norm": "smirnoff ice double black can 330ml",
+                    "qbo_has_pack": False,
+                },
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "resolve_duplicate_base_items")
+        self.assertTrue(row["action_eligible"])
+
+        canonical, reason = inventory_catalog_cleanup._select_duplicate_base_canonical(
+            base_name="SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+            qbo_group=qbo_rows,
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(str(canonical["Id"]), "13875")
 
     def test_missing_from_qbo_becomes_create_inventory_item(self):
         audit = self._audit_df(
@@ -844,6 +945,53 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         post_mock.assert_called_once()
         self.assertGreaterEqual(inact_mock.call_count, 3)
 
+    def test_dry_run_duplicate_base_items_prints_canonical_and_duplicate_ids(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        plan_df = pd.DataFrame(
+            [
+                {
+                    "company_key": "company_a",
+                    "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml",
+                    "epos_single_units": 0.0,
+                    "catalog_issue_type": "multiple_active_base_items",
+                    "planned_action": "resolve_duplicate_base_items",
+                    "action_eligible": True,
+                    "block_reason": "",
+                }
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "9355", "Name": "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml", "qbo_name_original": "SMIRNOFF ICE DOUBLE BLACK  CAN 330ml", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": False, "qbo_qty_on_hand": 10},
+                {"Id": "13875", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "qbo_name_original": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": False, "qbo_qty_on_hand": -229},
+                {"Id": "13956", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12", "qbo_name_original": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": True, "qbo_qty_on_hand": -1},
+                {"Id": "13942", "Name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24", "qbo_name_original": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24", "base_name": "SMIRNOFF ICE DOUBLE BLACK CAN 330ml", "base_name_norm": "smirnoff ice double black can 330ml", "qbo_has_pack": True, "qbo_qty_on_hand": -2},
+            ]
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            exit_code = inventory_catalog_cleanup._run_apply_for_existing_base_pack_variants(
+                cfg=fake_cfg,
+                plan_df=plan_df,
+                qbo_item_rows=qbo_item_rows,
+                txn_date="2026-04-28",
+                max_products=1,
+                dry_run=True,
+            )
+
+        self.assertEqual(exit_code, 0)
+        out = buf.getvalue()
+        self.assertIn("[PLAN] resolve_duplicate_base", out)
+        self.assertIn("canonical=13875:'SMIRNOFF ICE DOUBLE BLACK CAN 330ml'", out)
+        self.assertIn("[DRY-RUN] canonical_base=13875:'SMIRNOFF ICE DOUBLE BLACK CAN 330ml'", out)
+        self.assertIn("SMIRNOFF ICE DOUBLE BLACK  CAN 330ml", out)
+
     def test_duplicate_base_items_without_unique_canonical_remain_manual_review(self):
         audit = self._audit_df(
             [{"base_name": "WIDGET", "epos_single_units": 1.0, "catalog_issue_type": "multiple_active_base_items"}]
@@ -863,6 +1011,48 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         row = plan.iloc[0].to_dict()
         self.assertEqual(row["planned_action"], "manual_review_duplicate_base_items")
         self.assertFalse(row["action_eligible"])
+        self.assertEqual(row["block_reason"], "duplicate_base_items_multiple_strict_canonical_candidates")
+
+    def test_duplicate_base_items_with_multiple_collapsed_matches_remain_manual_review(self):
+        audit = self._audit_df(
+            [
+                {
+                    "base_name": "WIDGET CAN 330ml",
+                    "epos_single_units": 1.0,
+                    "catalog_issue_type": "multiple_active_base_items",
+                }
+            ]
+        )
+        qbo_rows = pd.DataFrame(
+            [
+                {
+                    "Id": "1",
+                    "Name": "WIDGET  CAN 330ml",
+                    "qbo_name_original": "WIDGET  CAN 330ml",
+                    "base_name": "WIDGET CAN 330ml",
+                    "base_name_norm": "widget can 330ml",
+                    "qbo_has_pack": False,
+                },
+                {
+                    "Id": "2",
+                    "Name": "WIDGET   CAN 330ml",
+                    "qbo_name_original": "WIDGET   CAN 330ml",
+                    "base_name": "WIDGET CAN 330ml",
+                    "base_name_norm": "widget can 330ml",
+                    "qbo_has_pack": False,
+                },
+            ]
+        )
+        plan = inventory_catalog_cleanup.plan_catalog_cleanup(
+            company_key="company_a",
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            source_inventory_report="/r.csv",
+        )
+        row = plan.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "manual_review_duplicate_base_items")
+        self.assertFalse(row["action_eligible"])
+        self.assertEqual(row["block_reason"], "duplicate_base_items_multiple_collapsed_canonical_candidates")
 
     def test_non_inventory_duplicate_remains_manual_review(self):
         audit = self._audit_df(
@@ -1000,4 +1190,3 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

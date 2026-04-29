@@ -241,6 +241,17 @@ def _catalog_counts(plan_df: pd.DataFrame) -> dict[str, int]:
     return {str(k): int(v) for k, v in counts.items()}
 
 
+def _print_unsupported_catalog_rows(plan_df: pd.DataFrame) -> None:
+    if plan_df.empty:
+        return
+    for _, row in plan_df.iterrows():
+        print(
+            f"[SKIP] base={str(row.get('base_name') or '')!r} "
+            f"planned_action={str(row.get('planned_action') or '')} "
+            f"reason={str(row.get('block_reason') or 'unsupported_catalog_cleanup_row')}"
+        )
+
+
 def _supported_catalog_rows(plan_df: pd.DataFrame) -> pd.DataFrame:
     if plan_df.empty:
         return plan_df.copy()
@@ -295,6 +306,7 @@ def _apply_catalog_cleanup(
         if unsupported.empty:
             print("[INFO] No catalog cleanup rows require action.")
         else:
+            _print_unsupported_catalog_rows(unsupported)
             print("[INFO] Catalog rows needing manual review were reported; none were applied.")
         return result
 

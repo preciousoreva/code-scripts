@@ -162,6 +162,14 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             ]
         )
 
+    def test_supported_catalog_rows_includes_resolvable_duplicate_base_items(self):
+        supported = inventory_pipeline._supported_catalog_rows(self._duplicate_resolvable_plan())
+
+        self.assertEqual(len(supported), 1)
+        row = supported.iloc[0].to_dict()
+        self.assertEqual(row["planned_action"], "resolve_duplicate_base_items")
+        self.assertTrue(row["action_eligible"])
+
     def _qbo_rows(self, count: int = 1) -> pd.DataFrame:
         return pd.DataFrame(
             [
