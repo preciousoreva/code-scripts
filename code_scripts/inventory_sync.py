@@ -755,7 +755,6 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
             qbo_has_pack_variants=("qbo_has_pack", "max"),
             qbo_base_item_count=("qbo_is_base_item", "sum"),
             qbo_item_names_for_base=("qbo_name_raw", _join_names),
-            qbo_base_item_ids=("Id", _join_ids),
         )
         .sort_values("base_name")
         .reset_index(drop=True)
@@ -765,12 +764,17 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
         by_base = {}
         for _, g in inv.groupby("base_name_norm"):
             key = str(g.iloc[0]["base_name_norm"])
+            base_ids = _join_ids(
+                g[g["qbo_has_pack"] == False]["Id"].tolist()  # noqa: E712
+            )
             by_base[key] = {
                 "base_names": _join_base_names(g),
                 "pack_names": _join_pack_names(g),
+                "base_ids": base_ids,
             }
         grouped["qbo_base_item_names"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("base_names", ""))
         grouped["qbo_pack_variant_names"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("pack_names", ""))
+        grouped["qbo_base_item_ids"] = grouped["base_name_norm"].map(lambda k: by_base.get(str(k), {}).get("base_ids", ""))
         grouped["qbo_base_item_names_for_base"] = grouped["qbo_base_item_names"]
         grouped["qbo_pack_variant_names_for_base"] = grouped["qbo_pack_variant_names"]
     return grouped

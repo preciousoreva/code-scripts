@@ -607,6 +607,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
             self.assertTrue(mock_token_mgr.called)
             contents = output_path.read_text(encoding="utf-8")
             self.assertIn("Fresh Widget", contents)
+            self.assertNotIn("Old Widget", contents)
 
     def test_auto_fetch_qbo_writes_default_path_and_uses_it(self):
         import tempfile
@@ -1257,7 +1258,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
             row["qbo_item_names_for_base"],
             "SMIRNOFF ICE DOUBLE BLACK CAN 330ml | SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12 | SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24",
         )
-        self.assertEqual(row["qbo_base_item_ids"], "13875,13956,13942")
+        self.assertEqual(row["qbo_base_item_ids"], "13875")
 
     def test_qbo_item_row_loader_dedupes_duplicate_ids(self):
         import tempfile
@@ -1297,6 +1298,44 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(len(qbo), 1)
         # Current audit intent is to aggregate raw per-item QtyOnHand values.
         self.assertEqual(float(qbo.iloc[0]["qbo_qty_on_hand"]), -232.0)
+
+    def test_current_qbo_snapshot_output_ignores_stale_prior_ids(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,ALCOHOLS,1\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo_current.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n"
+                "13956,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12,Inventory,true,-1\n"
+                "13942,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,Inventory,true,-2\n",
+                encoding="utf-8",
+            )
+            # Simulate prior/stale IDs that must not leak into current grouping.
+            stale_prior = pd.DataFrame(
+                [{"qbo_base_item_ids": "9355,13702,13703,13875,13956,13942"}]
+            )
+            self.assertIn("9355", stale_prior.iloc[0]["qbo_base_item_ids"])
+
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["qbo_item_count_for_base"], 3)
+        self.assertEqual(row["qbo_base_item_count"], 1)
+        self.assertEqual(row["qbo_base_item_ids"], "13875")
+        self.assertNotIn("9355", row["qbo_base_item_ids"])
+        self.assertEqual(row["catalog_issue_type"], "base_with_pack_variants")
+        self.assertNotEqual(row["catalog_issue_type"], "multiple_active_base_items")
 
     def test_product_filter_with_pack_multiplier_is_case_insensitive_and_literal(self):
         import tempfile
