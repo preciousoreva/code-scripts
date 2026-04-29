@@ -1220,6 +1220,84 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["qbo_item_count_for_base"], 3)
         self.assertTrue(row["qbo_has_pack_variants"])
 
+    def test_qbo_duplicate_rows_by_id_are_deduped_before_classification(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,ALCOHOLS,1\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n"
+                "13956,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12,Inventory,true,-1\n"
+                "13942,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,Inventory,true,-2\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n"
+                "13956,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12,Inventory,true,-1\n"
+                "13942,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,Inventory,true,-2\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        self.assertEqual(len(report), 1)
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["catalog_issue_type"], "base_with_pack_variants")
+        self.assertNotEqual(row["catalog_issue_type"], "multiple_active_base_items")
+        self.assertEqual(row["qbo_item_count_for_base"], 3)
+        self.assertEqual(row["qbo_base_item_count"], 1)
+        self.assertEqual(
+            row["qbo_item_names_for_base"],
+            "SMIRNOFF ICE DOUBLE BLACK CAN 330ml | SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12 | SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24",
+        )
+        self.assertEqual(row["qbo_base_item_ids"], "13875,13956,13942")
+
+    def test_qbo_item_row_loader_dedupes_duplicate_ids(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "10,ITEM A,Inventory,true,1\n"
+                "10,ITEM A,Inventory,true,1\n"
+                "11,ITEM A*12,Inventory,true,2\n",
+                encoding="utf-8",
+            )
+            rows = inventory_sync.load_qbo_inventory_item_rows(str(qbo_csv))
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(set(rows["Id"].tolist()), {"10", "11"})
+
+    def test_qbo_grouped_quantity_uses_raw_qtyonhand_without_pack_multiplier_scaling(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "13875,SMIRNOFF ICE DOUBLE BLACK CAN 330ml,Inventory,true,-229\n"
+                "13956,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*12,Inventory,true,-1\n"
+                "13942,SMIRNOFF ICE DOUBLE BLACK CAN 330ml*24,Inventory,true,-2\n",
+                encoding="utf-8",
+            )
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+
+        self.assertEqual(len(qbo), 1)
+        # Current audit intent is to aggregate raw per-item QtyOnHand values.
+        self.assertEqual(float(qbo.iloc[0]["qbo_qty_on_hand"]), -232.0)
+
     def test_product_filter_with_pack_multiplier_is_case_insensitive_and_literal(self):
         import tempfile
         from pathlib import Path

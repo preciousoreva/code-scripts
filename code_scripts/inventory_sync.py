@@ -157,6 +157,17 @@ def _join_unique_non_blank(series: Iterable[Any]) -> str:
     return " | ".join(seen)
 
 
+def _dedupe_qbo_rows_by_id(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop duplicate QBO rows by item Id while preserving first-seen order."""
+    if "Id" not in df.columns or df.empty:
+        return df
+    out = df.copy()
+    out["Id"] = out["Id"].map(lambda x: str(x or "").strip())
+    with_id = out[out["Id"] != ""].drop_duplicates(subset=["Id"], keep="first")
+    without_id = out[out["Id"] == ""]
+    return pd.concat([with_id, without_id], ignore_index=True)
+
+
 def literal_product_filter_mask(
     df: pd.DataFrame,
     product_filter: str | None,
@@ -694,6 +705,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
         tracks = True
 
     inv = df[is_inventory & tracks].copy()
+    inv = _dedupe_qbo_rows_by_id(inv)
 
     names = inv["Name"].astype(str).map(_collapse_spaces)
     base_names = []
@@ -711,11 +723,19 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
 
     # Group by base_name to detect ambiguity; keep ids list for base-names
     def _join_ids(series: Iterable[Any]) -> str:
-        ids = [str(x).strip() for x in series if str(x).strip()]
+        ids = []
+        for raw in series:
+            value = str(raw).strip()
+            if value and value not in ids:
+                ids.append(value)
         return ",".join(ids[:50])  # cap to avoid huge cells
 
     def _join_names(series: Iterable[Any]) -> str:
-        names_out = [str(x).strip() for x in series if str(x).strip()]
+        names_out = []
+        for raw in series:
+            value = str(raw).strip()
+            if value and value not in names_out:
+                names_out.append(value)
         return " | ".join(names_out[:10])
 
     def _join_pack_names(df_group: pd.DataFrame) -> str:
@@ -776,6 +796,7 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
         tracks = True
 
     inv = df[is_inventory & tracks].copy()
+    inv = _dedupe_qbo_rows_by_id(inv)
     names = inv["Name"].astype(str).map(_collapse_spaces)
     base_names = []
     had_pack = []
