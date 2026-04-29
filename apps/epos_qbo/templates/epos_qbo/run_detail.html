@@ -108,12 +108,14 @@
                             {% endif %}
                         </td>
                         <td class="px-3 py-2">
-                            {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
-                            <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">Inventory report</span>
-                            {% elif artifact.reliability_status == 'warning' %}
-                            <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">Sales metadata</span>
+                            {% if artifact.operator_label_color == 'emerald' %}
+                            <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
+                            {% elif artifact.operator_label_color == 'amber' %}
+                            <span class="inline-flex px-2 py-0.5 bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
+                            {% elif artifact.operator_label_color == 'blue' %}
+                            <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
                             {% else %}
-                            <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">Sales metadata</span>
+                            <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
                             {% endif %}
                         </td>
                     </tr>

@@ -480,6 +480,53 @@ class RunArtifact(models.Model):
             models.Index(fields=["company_key", "reconcile_status"]),
         ]
 
+    @property
+    def operator_label(self) -> str:
+        """Operator-facing artifact label for Run Detail."""
+        stats = self.upload_stats_json if isinstance(self.upload_stats_json, dict) else {}
+        report_type = str(stats.get("report_type") or "").strip()
+        run_type = str(stats.get("run_type") or "").strip()
+        path = str(self.source_path or "")
+        lowered = path.lower()
+
+        # Inventory pipeline summary artifact
+        if report_type == RunJob.SCOPE_INVENTORY_PIPELINE or run_type == RunJob.SCOPE_INVENTORY_PIPELINE:
+            return "Inventory report"
+        if "inventory_pipeline_" in lowered or "/inventory_pipeline/" in lowered:
+            return "Inventory report"
+
+        # Inventory audits / sidecars
+        if self.kind == self.KIND_INVENTORY_AUDIT:
+            if "inventory_catalog_cleanup" in lowered:
+                return "Catalog cleanup report"
+            if "inventory_audit_" in lowered or "/inventory_sync/" in lowered:
+                return "Inventory audit"
+            # Default inventory artifact classification (safe)
+            return "Inventory audit"
+
+        if "inventory_catalog_cleanup" in lowered:
+            return "Catalog cleanup report"
+        if "inventory_audit_" in lowered or "/inventory_sync/" in lowered:
+            return "Inventory audit"
+
+        # Sales artifacts
+        if self.kind == self.KIND_SALES_UPLOAD:
+            return "Sales metadata"
+
+        return "Artifact"
+
+    @property
+    def operator_label_color(self) -> str:
+        """Tailwind-ish color key for `operator_label` badge."""
+        label = self.operator_label
+        if label == "Inventory report":
+            return "emerald"
+        if label in {"Inventory audit", "Catalog cleanup report"}:
+            return "amber"
+        if label == "Sales metadata":
+            return "blue"
+        return "slate"
+
 
 class RunLock(models.Model):
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)

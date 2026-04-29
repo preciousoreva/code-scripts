@@ -85,6 +85,96 @@ class RunsAndRunDetailRenderingTests(TestCase):
         self.assertNotIn("Rolling (last_*)", html)
         self.assertNotIn("last_", html)
 
+    def test_artifact_kind_inventory_audit_renders_inventory_audit_label(self):
+        job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a", status=RunJob.STATUS_SUCCEEDED)
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            processed_at=datetime(2026, 4, 29, 1, 39, tzinfo=dt_timezone.utc),
+            source_path="/data/code_scripts/reports/inventory_sync/2026-04-29/inventory_audit_company_a_initial_014004.json",
+            source_hash="a" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            upload_stats_json={},
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Inventory audit", html)
+        self.assertNotIn("Sales metadata", html)
+
+    def test_artifact_inventory_pipeline_report_type_renders_inventory_report_label(self):
+        job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a", status=RunJob.STATUS_SUCCEEDED)
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            processed_at=datetime(2026, 4, 29, 1, 39, tzinfo=dt_timezone.utc),
+            source_path="/data/code_scripts/reports/inventory_pipeline/2026-04-29/inventory_pipeline_company_a_014346.json",
+            source_hash="b" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            upload_stats_json={"report_type": "inventory_pipeline"},
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Inventory report", html)
+
+    def test_artifact_catalog_cleanup_path_renders_catalog_cleanup_label(self):
+        job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a", status=RunJob.STATUS_SUCCEEDED)
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            processed_at=datetime(2026, 4, 29, 1, 39, tzinfo=dt_timezone.utc),
+            source_path="/data/code_scripts/reports/inventory_sync/2026-04-29/inventory_catalog_cleanup_company_a_014308.csv",
+            source_hash="c" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            upload_stats_json={},
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Catalog cleanup report", html)
+
+    def test_unknown_artifact_does_not_render_sales_metadata(self):
+        job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a", status=RunJob.STATUS_SUCCEEDED)
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            kind="other",
+            processed_at=datetime(2026, 4, 29, 1, 39, tzinfo=dt_timezone.utc),
+            source_path="/tmp/unknown_artifact.json",
+            source_hash="e" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            upload_stats_json={"report_type": "unknown"},
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Artifact", html)
+        self.assertNotIn("Sales metadata", html)
+
+    def test_inventory_pipeline_run_with_audit_sidecars_does_not_label_them_as_sales_metadata(self):
+        job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a", status=RunJob.STATUS_SUCCEEDED)
+        for phase in ("initial", "post_catalog", "final"):
+            RunArtifact.objects.create(
+                run_job=job,
+                company_key="company_a",
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                processed_at=datetime(2026, 4, 29, 1, 39, tzinfo=dt_timezone.utc),
+                source_path=f"/data/code_scripts/reports/inventory_sync/2026-04-29/inventory_audit_company_a_{phase}_014004.json",
+                source_hash=(phase[0] * 64),
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={},
+            )
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            processed_at=datetime(2026, 4, 29, 1, 40, tzinfo=dt_timezone.utc),
+            source_path="/data/code_scripts/reports/inventory_pipeline/2026-04-29/inventory_pipeline_company_a_014346.json",
+            source_hash="p" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            upload_stats_json={"report_type": "inventory_pipeline"},
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Inventory report", html)
+        self.assertIn("Inventory audit", html)
+        self.assertNotIn("Sales metadata", html)
+
     def test_inventory_product_run_detail_shows_target_product(self):
         job = RunJob.objects.create(
             scope=RunJob.SCOPE_INVENTORY_PIPELINE,
