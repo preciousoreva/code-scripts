@@ -476,6 +476,231 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         verify_mock.assert_not_called()
         token_mock.assert_not_called()
 
+    def test_dry_run_only_pack_variant_create_path_does_not_write(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+            default_qty_on_hand=0,
+            inventory_start_date="2026-01-01",
+            tax_code_id="2",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {
+                    "base_name": "BACARDI WHITE RUM 750ml",
+                    "epos_single_units": 12.0,
+                    "epos_categories": "ALCOHOLS & SPIRITS",
+                    "catalog_issue_type": "only_pack_variant_exists",
+                },
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "99", "Name": "BACARDI WHITE RUM 750ml*12", "base_name": "BACARDI WHITE RUM 750ml", "base_name_norm": "bacardi white rum 750ml", "qbo_has_pack": True, "qbo_qty_on_hand": 2},
+            ]
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "load_category_account_mapping", return_value={"ALCOHOLS & SPIRITS": {"asset": "a", "income": "i", "expense": "e"}}), \
+             mock.patch.object(inventory_catalog_cleanup, "create_inventory_item") as create_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment") as post_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate") as inact_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match") as verify_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager") as token_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--dry-run",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 0)
+        create_mock.assert_not_called()
+        post_mock.assert_not_called()
+        inact_mock.assert_not_called()
+        verify_mock.assert_not_called()
+        token_mock.assert_not_called()
+
+    def test_apply_only_pack_variant_creates_base_then_consolidates(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+            default_qty_on_hand=0,
+            inventory_start_date="2026-01-01",
+            tax_code_id="2",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {
+                    "base_name": "BACARDI WHITE RUM 750ml",
+                    "epos_single_units": 12.0,
+                    "epos_categories": "ALCOHOLS & SPIRITS",
+                    "catalog_issue_type": "only_pack_variant_exists",
+                },
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "99", "Name": "BACARDI WHITE RUM 750ml*12", "base_name": "BACARDI WHITE RUM 750ml", "base_name_norm": "bacardi white rum 750ml", "qbo_has_pack": True, "qbo_qty_on_hand": 2},
+            ]
+        )
+
+        def fake_fetch(_tm, _realm, item_id):
+            if str(item_id) == "99":
+                return {"Id": "99", "Name": "BACARDI WHITE RUM 750ml*12", "SyncToken": "0", "QtyOnHand": 0, "UnitPrice": 2000.0, "PurchaseCost": 1500.0}
+            return {"Id": str(item_id), "Name": "BACARDI WHITE RUM 750ml", "SyncToken": "0", "QtyOnHand": 0}
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "load_category_account_mapping", return_value={"ALCOHOLS & SPIRITS": {"asset": "a", "income": "i", "expense": "e"}}), \
+             mock.patch.object(inventory_catalog_cleanup, "get_or_create_item_category_id", return_value="321"), \
+             mock.patch.object(inventory_catalog_cleanup, "create_inventory_item", return_value="123") as create_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_fetch_item_with_sync_token", side_effect=fake_fetch), \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment", return_value={"InventoryAdjustment": {"Id": "1"}}) as post_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate", return_value={}) as inact_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "mark_qbo_snapshot_stale"), \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--apply",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+
+        self.assertEqual(exit_code, 0)
+        create_mock.assert_called_once()
+        post_mock.assert_called_once()
+        inact_mock.assert_called_once()
+
+    def test_apply_only_pack_variant_skips_when_mapping_missing(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+            default_qty_on_hand=0,
+            inventory_start_date="2026-01-01",
+            tax_code_id="2",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {
+                    "base_name": "BACARDI WHITE RUM 750ml",
+                    "epos_single_units": 12.0,
+                    "epos_categories": "ALCOHOLS & SPIRITS",
+                    "catalog_issue_type": "only_pack_variant_exists",
+                },
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "99", "Name": "BACARDI WHITE RUM 750ml*12", "base_name": "BACARDI WHITE RUM 750ml", "base_name_norm": "bacardi white rum 750ml", "qbo_has_pack": True, "qbo_qty_on_hand": 2},
+            ]
+        )
+        import tempfile
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "load_category_account_mapping", side_effect=RuntimeError("mapping missing")), \
+             mock.patch.object(inventory_catalog_cleanup, "create_inventory_item") as create_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(buf):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--apply",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 0)
+        create_mock.assert_not_called()
+        self.assertIn("missing_account_mapping", buf.getvalue())
+
+    def test_apply_only_pack_variant_does_not_create_when_base_exists_case_insensitive(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {
+                    "base_name": "LEGEND EXTRA STOUT CAN 440ml",
+                    "epos_single_units": 12.0,
+                    "epos_categories": "ALCOHOLS & SPIRITS",
+                    "catalog_issue_type": "only_pack_variant_exists",
+                },
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "LEGEND EXTRA STOUT CAN 440ML", "base_name": "LEGEND EXTRA STOUT CAN 440ML", "base_name_norm": "legend extra stout can 440ml", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+                {"Id": "11", "Name": "LEGEND EXTRA STOUT CAN 440ml*24", "base_name": "LEGEND EXTRA STOUT CAN 440ml", "base_name_norm": "legend extra stout can 440ml", "qbo_has_pack": True, "qbo_qty_on_hand": 1},
+            ]
+        )
+        import tempfile
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "_default_qbo_snapshot_path", return_value=Path(td) / "qbo.csv"), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "create_inventory_item") as create_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "verify_realm_match"), \
+             mock.patch.object(inventory_catalog_cleanup, "TokenManager", return_value=mock.Mock()), \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(buf):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            exit_code = inventory_catalog_cleanup.main([
+                "--company", "company_a",
+                "--from-report", "/tmp/r.csv",
+                "--apply",
+                "--max-products", "1",
+                "--qbo-csv", str(Path(td) / "qbo.csv"),
+            ])
+        self.assertEqual(exit_code, 0)
+        create_mock.assert_not_called()
+        self.assertIn("active_base_already_exists", buf.getvalue())
+
     def test_apply_processes_only_consolidate_rows_and_respects_cap(self):
         fake_cfg = mock.Mock(
             company_key="company_a",

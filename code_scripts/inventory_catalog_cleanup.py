@@ -35,13 +35,15 @@ from code_scripts.qbo_pack_variant_cleanup import (
 )
 from code_scripts.qbo_pack_variant_consolidation import (
     build_doc_number as build_consolidation_doc_number,
-    build_lines_from_plan_row,
-    build_private_note,
-    build_consolidation_plan,
     is_duplicate_doc_number_error,
 )
 from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path, mark_qbo_snapshot_stale
 from code_scripts.qbo_upload import TokenManager
+from code_scripts.qbo_upload import (
+    create_inventory_item,
+    get_or_create_item_category_id,
+    load_category_account_mapping,
+)
 from code_scripts.run_lock import GlobalRunLock
 from code_scripts.token_manager import verify_realm_match
 
@@ -50,6 +52,7 @@ _PLANNER_COLUMNS = [
     "company_key",
     "base_name",
     "epos_single_units",
+    "epos_categories",
     "catalog_issue_type",
     "planned_action",
     "action_eligible",
@@ -264,6 +267,7 @@ def plan_catalog_cleanup(
                 "company_key": company_key,
                 "base_name": base_name,
                 "epos_single_units": float(row.get("epos_single_units") or 0.0),
+                "epos_categories": str(row.get("epos_categories") or ""),
                 "catalog_issue_type": issue,
                 "planned_action": planned.planned_action,
                 "action_eligible": bool(planned.action_eligible),
@@ -307,10 +311,14 @@ def _run_apply_for_existing_base_pack_variants(
     return_stats: bool = False,
 ) -> int | dict[str, int]:
     """
-    Apply-mode runner: only supports planned_action=consolidate_existing_base_pack_variants.
+    Apply-mode runner for:
+    - consolidate_existing_base_pack_variants
+    - create_base_then_consolidate_pack_variant
     """
     attempted = consolidated = cleaned_up = skipped = failed = 0
+    base_items_created = 0
     partial_failures: list[str] = []
+    created_base_details: list[dict[str, Any]] = []
 
     def _result(exit_code: int) -> int | dict[str, int]:
         if return_stats:
@@ -321,12 +329,17 @@ def _run_apply_for_existing_base_pack_variants(
                 "cleaned_up": int(cleaned_up),
                 "skipped": int(skipped),
                 "failed": int(failed),
+                "base_items_created": int(base_items_created),
+                "created_base_details": list(created_base_details),
             }
         return int(exit_code)
 
-    # Enforce exact scope: only existing-base consolidation.
-    supported = plan_df[plan_df["planned_action"] == "consolidate_existing_base_pack_variants"].copy()
-    unsupported = plan_df[plan_df["planned_action"] != "consolidate_existing_base_pack_variants"].copy()
+    supported_actions = {
+        "consolidate_existing_base_pack_variants",
+        "create_base_then_consolidate_pack_variant",
+    }
+    supported = plan_df[plan_df["planned_action"].isin(supported_actions)].copy()
+    unsupported = plan_df[~plan_df["planned_action"].isin(supported_actions)].copy()
     if not unsupported.empty:
         for _, r in unsupported.iterrows():
             skipped += 1
@@ -356,6 +369,14 @@ def _run_apply_for_existing_base_pack_variants(
     if skipped_due_to_cap:
         print(f"[INFO] Cap active: skipped_due_to_cap={skipped_due_to_cap}")
 
+    mapping_cache: dict[str, dict[str, str]] | None = None
+    mapping_load_error: str | None = None
+    if not capped[capped["planned_action"] == "create_base_then_consolidate_pack_variant"].empty:
+        try:
+            mapping_cache = load_category_account_mapping(cfg)
+        except Exception as exc:  # noqa: BLE001
+            mapping_load_error = str(exc)
+
     token_mgr = None
     if not dry_run:
         verify_realm_match(cfg.company_key, cfg.realm_id)
@@ -370,37 +391,167 @@ def _run_apply_for_existing_base_pack_variants(
             return _result(2)
 
     try:
-        # Build consolidation plan rows from the live QBO snapshot for *only* the selected bases,
-        # so we reuse the proven consolidation math without duplicating it.
-        qbo_rows = qbo_item_rows.to_dict(orient="records")
-        epos_targets = {
-            str(r["base_name"]).strip().lower(): float(r.get("epos_single_units") or 0.0)
-            for _, r in capped.iterrows()
-            if str(r.get("base_name") or "").strip()
-        }
-        in_scope = set(epos_targets.keys())
-        consolidation_plan = build_consolidation_plan(
-            qbo_rows=qbo_rows,
-            epos_targets=epos_targets,
-            company_key=cfg.company_key,
-            in_scope_bases=in_scope,
-        )
-        # Only post rows where the consolidation planner says it's safe/available.
-        postable = [r for r in consolidation_plan if r.get("consolidation_recommended_action") == "consolidation_plan_available"]
-
-        for row in postable[: int(max_products)]:
+        qbo_rows_df = qbo_item_rows.copy()
+        if "base_name_norm" not in qbo_rows_df.columns and "base_name" in qbo_rows_df.columns:
+            qbo_rows_df["base_name_norm"] = qbo_rows_df["base_name"].map(_normalize_name_key)
+        for _, planned_row in capped.iterrows():
             attempted += 1
-            base_name = str(row.get("base_name") or "").strip()
-            base_item_id = str(row.get("base_qbo_item_id") or "").strip()
-            pack_ids = str(row.get("pack_variant_item_ids") or "").strip()
-            print(f"[PLAN] base={base_name!r} base_item_id={base_item_id} packs={pack_ids}")
+            base_name = str(planned_row.get("base_name") or "").strip()
+            action = str(planned_row.get("planned_action") or "").strip()
+            base_norm = _normalize_name_key(base_name)
+            group = qbo_rows_df[qbo_rows_df["base_name_norm"] == base_norm].copy()
+            base_rows = group[group["qbo_has_pack"] == False]  # noqa: E712
+            pack_rows = group[group["qbo_has_pack"] == True]  # noqa: E712
 
-            lines = build_lines_from_plan_row(row)
+            if action == "create_base_then_consolidate_pack_variant":
+                if len(base_rows) > 0:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=active_base_already_exists")
+                    continue
+                if pack_rows.empty:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=no_pack_variant_found")
+                    continue
+                if mapping_load_error:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=missing_account_mapping detail={mapping_load_error}")
+                    continue
+                assert mapping_cache is not None
+
+                category_text = str(planned_row.get("epos_categories") or "").strip()
+                category = category_text.split("|")[0].strip() if category_text else ""
+                if not category:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=missing_epos_category_for_item_creation")
+                    continue
+                if category not in mapping_cache:
+                    skipped += 1
+                    print(f"[SKIP] base={base_name!r} reason=missing_account_mapping_for_category category={category!r}")
+                    continue
+
+                source_pack_id = str(pack_rows.iloc[0].get("Id") or "").strip()
+                source_pack_name = str(pack_rows.iloc[0].get("Name") or "").strip()
+                unit_sales_price = 0.0
+                unit_purchase_cost = 0.0
+                category_item_id_val: str | None = None
+
+                if dry_run:
+                    print(
+                        f"[DRY-RUN] would create base inventory item base={base_name!r} "
+                        f"category={category!r} from_pack={source_pack_name!r}"
+                    )
+                    base_item_id = f"DRYRUN:{base_name}"
+                    base_qty_live = float(getattr(cfg, "default_qty_on_hand", 0) or 0)
+                    base_items_created += 1
+                else:
+                    assert token_mgr is not None
+                    try:
+                        source_pack_live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, source_pack_id)
+                        unit_sales_price = float(source_pack_live.get("UnitPrice", 0) or 0)
+                        unit_purchase_cost = float(source_pack_live.get("PurchaseCost", 0) or 0)
+                        category_item_id_val = get_or_create_item_category_id(
+                            token_mgr, cfg.realm_id, category
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        print(f"[FAIL] base={base_name!r} pre-create lookup failed: {exc}")
+                        continue
+
+                    try:
+                        base_item_id = create_inventory_item(
+                            base_name,
+                            category,
+                            unit_sales_price,
+                            unit_purchase_cost,
+                            cfg,
+                            token_mgr,
+                            cfg.realm_id,
+                            mapping_cache,
+                            {},
+                            target_date=txn_date,
+                            category_item_id=category_item_id_val,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        print(f"[FAIL] base={base_name!r} create_base_item failed: {exc}")
+                        continue
+
+                    base_items_created += 1
+                    created_base_details.append(
+                        {
+                            "base_name": base_name,
+                            "base_item_id": str(base_item_id),
+                            "created": True,
+                            "source_pack_variant": source_pack_name,
+                        }
+                    )
+                    try:
+                        base_live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, str(base_item_id))
+                        base_qty_live = float(base_live.get("QtyOnHand", 0) or 0)
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        print(f"[FAIL] base={base_name!r} fetch_created_base failed: {exc}")
+                        continue
+
+                qbo_rows_df = pd.concat(
+                    [
+                        qbo_rows_df,
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Id": str(base_item_id),
+                                    "Name": base_name,
+                                    "base_name": base_name,
+                                    "base_name_norm": base_norm,
+                                    "qbo_name_raw": base_name,
+                                    "qbo_has_pack": False,
+                                    "qbo_qty_on_hand": base_qty_live,
+                                }
+                            ]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
+                group = qbo_rows_df[qbo_rows_df["base_name_norm"] == base_norm].copy()
+                base_rows = group[group["qbo_has_pack"] == False]  # noqa: E712
+                pack_rows = group[group["qbo_has_pack"] == True]  # noqa: E712
+
+            if base_rows.empty:
+                skipped += 1
+                print(f"[SKIP] base={base_name!r} reason=no_base_item_for_consolidation")
+                continue
+            if len(base_rows) > 1:
+                skipped += 1
+                print(f"[SKIP] base={base_name!r} reason=multiple_active_base_items")
+                continue
+
+            base_item_id = str(base_rows.iloc[0].get("Id") or "").strip()
+            base_qty = float(base_rows.iloc[0].get("qbo_qty_on_hand", 0) or 0)
+            epos_target = float(planned_row.get("epos_single_units") or 0.0)
+            lines = []
+            base_diff = epos_target - base_qty
+            if base_diff != 0:
+                lines.append({"item_id": base_item_id, "qty_diff": base_diff})
+            pack_ids_for_cleanup: list[str] = []
+            for _, pr in pack_rows.iterrows():
+                pid = str(pr.get("Id") or "").strip()
+                if not pid:
+                    continue
+                pack_ids_for_cleanup.append(pid)
+                pack_qty = float(pr.get("qbo_qty_on_hand", 0) or 0)
+                if pack_qty != 0:
+                    lines.append({"item_id": pid, "qty_diff": -pack_qty})
+
+            if not lines:
+                skipped += 1
+                print(f"[SKIP] base={base_name!r} reason=no_nonzero_qty_diffs")
+                continue
+
             doc_number = build_consolidation_doc_number(txn_date=txn_date, base_item_id=base_item_id)
             payload = build_inventory_adjustment_payload(
                 adjust_account_id=str((cfg.inventory_adjustment_account_id or "")).strip(),
                 txn_date=txn_date,
-                private_note=build_private_note(row),
+                private_note=f"OIAT catalog cleanup | base={base_name!r} | action={action}",
                 lines=lines,
                 doc_number=doc_number,
             )
@@ -408,58 +559,53 @@ def _run_apply_for_existing_base_pack_variants(
             if dry_run:
                 print("[DRY-RUN] would post InventoryAdjustment payload=" + str(payload))
                 consolidated += 1
-            else:
-                assert token_mgr is not None
-                try:
-                    resp = post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
-                    consolidated += 1
-                    inv_id = ""
-                    try:
-                        inv_id = str(((resp or {}).get("InventoryAdjustment") or {}).get("Id") or "").strip()
-                    except Exception:  # noqa: BLE001
-                        inv_id = ""
-                    suffix = f"id={inv_id}" if inv_id else f"doc={doc_number}"
-                    print(f"[OK] Posted InventoryAdjustment {suffix} for base={base_name!r}")
-                except Exception as exc:  # noqa: BLE001
-                    failed += 1
-                    if is_duplicate_doc_number_error(exc):
-                        print(f"[FAIL] base={base_name!r} duplicate DocNumber={doc_number}: {exc}")
-                    else:
-                        print(f"[FAIL] base={base_name!r} consolidation failed: {exc}")
-                    continue
+                cleaned_up += 1 if pack_ids_for_cleanup else 0
+                continue
 
-            # Cleanup step: inactivate now-zero pack variants (best-effort per base).
-            pack_ids_list = [p.strip() for p in str(row.get("pack_variant_item_ids") or "").split("|") if p.strip()]
+            assert token_mgr is not None
+            try:
+                resp = post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
+                consolidated += 1
+                inv_id = ""
+                try:
+                    inv_id = str(((resp or {}).get("InventoryAdjustment") or {}).get("Id") or "").strip()
+                except Exception:  # noqa: BLE001
+                    inv_id = ""
+                suffix = f"id={inv_id}" if inv_id else f"doc={doc_number}"
+                print(f"[OK] Posted InventoryAdjustment {suffix} for base={base_name!r}")
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                if is_duplicate_doc_number_error(exc):
+                    print(f"[FAIL] base={base_name!r} duplicate DocNumber={doc_number}: {exc}")
+                else:
+                    print(f"[FAIL] base={base_name!r} consolidation failed: {exc}")
+                continue
+
             cleanup_failed = False
-            if dry_run:
-                print(f"[DRY-RUN] would cleanup/inactivate pack variants: {pack_ids_list}")
-                cleaned_up += 1 if pack_ids_list else 0
-            else:
-                assert token_mgr is not None
-                for pid in pack_ids_list:
-                    try:
-                        live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, pid)
-                        qty = float(live.get("QtyOnHand", 0) or 0)
-                        if qty != 0:
-                            print(f"[SKIP] pack_variant_id={pid} qty_on_hand={qty} reason=nonzero_qty_on_hand")
-                            continue
-                        sync_token = str(live.get("SyncToken", "")).strip()
-                        payload_inactivate = build_inactivate_payload(
-                            item_id=pid,
-                            sync_token=sync_token,
-                            original_name=str(live.get("Name", "") or "").strip(),
-                        )
-                        _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
-                        nm = str(live.get("Name", "") or "").strip()
-                        print(f"[OK] Inactivated pack_variant_id={pid} {nm!r}")
-                    except Exception as exc:  # noqa: BLE001
-                        cleanup_failed = True
-                        failed += 1
-                        partial_failures.append(f"base={base_name} cleanup_failed pack_id={pid}: {exc}")
-                        print(f"[FAIL] base={base_name!r} cleanup failed for pack_id={pid}: {exc}")
-                        break
-                if not cleanup_failed:
-                    cleaned_up += 1 if pack_ids_list else 0
+            for pid in pack_ids_for_cleanup:
+                try:
+                    live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, pid)
+                    qty = float(live.get("QtyOnHand", 0) or 0)
+                    if qty != 0:
+                        print(f"[SKIP] pack_variant_id={pid} qty_on_hand={qty} reason=nonzero_qty_on_hand")
+                        continue
+                    sync_token = str(live.get("SyncToken", "")).strip()
+                    payload_inactivate = build_inactivate_payload(
+                        item_id=pid,
+                        sync_token=sync_token,
+                        original_name=str(live.get("Name", "") or "").strip(),
+                    )
+                    _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
+                    nm = str(live.get("Name", "") or "").strip()
+                    print(f"[OK] Inactivated pack_variant_id={pid} {nm!r}")
+                except Exception as exc:  # noqa: BLE001
+                    cleanup_failed = True
+                    failed += 1
+                    partial_failures.append(f"base={base_name} cleanup_failed pack_id={pid}: {exc}")
+                    print(f"[FAIL] base={base_name!r} cleanup failed for pack_id={pid}: {exc}")
+                    break
+            if not cleanup_failed:
+                cleaned_up += 1 if pack_ids_for_cleanup else 0
 
             if cleanup_failed:
                 print(f"[WARN] base={base_name!r} consolidation succeeded but cleanup failed (partial).")
@@ -475,7 +621,7 @@ def _run_apply_for_existing_base_pack_variants(
     print(
         "Apply summary: "
         f"attempted={attempted} consolidated={consolidated} cleaned_up={cleaned_up} "
-        f"skipped={skipped} failed={failed}"
+        f"base_items_created={base_items_created} skipped={skipped} failed={failed}"
     )
     if partial_failures:
         for line in partial_failures[:10]:

@@ -66,7 +66,7 @@ from code_scripts.slack_notify import send_slack_success
 from code_scripts.token_manager import verify_realm_match
 
 
-SAFE_CATALOG_ISSUE_TYPES = {"base_with_pack_variants"}
+SAFE_CATALOG_ISSUE_TYPES = {"base_with_pack_variants", "only_pack_variant_exists"}
 UNSUPPORTED_CATALOG_ISSUE_TYPES = {
     "only_pack_variant_exists",
     "missing_from_qbo",
@@ -240,9 +240,13 @@ def _catalog_counts(plan_df: pd.DataFrame) -> dict[str, int]:
 def _supported_catalog_rows(plan_df: pd.DataFrame) -> pd.DataFrame:
     if plan_df.empty:
         return plan_df.copy()
+    supported_actions = {
+        "consolidate_existing_base_pack_variants",
+        "create_base_then_consolidate_pack_variant",
+    }
     return plan_df[
         (plan_df["catalog_issue_type"].astype(str).isin(SAFE_CATALOG_ISSUE_TYPES))
-        & (plan_df["planned_action"].astype(str) == "consolidate_existing_base_pack_variants")
+        & (plan_df["planned_action"].astype(str).isin(supported_actions))
         & (plan_df["action_eligible"] == True)  # noqa: E712
     ].copy()
 
@@ -275,6 +279,8 @@ def _apply_catalog_cleanup(
         "unsupported_counts": _catalog_counts(unsupported),
         "skipped_due_to_cap": int(skipped_due_to_cap),
         "applied": 0,
+        "base_items_created": 0,
+        "created_base_details": [],
         "changed_qbo": False,
         "exit_code": 0,
     }
@@ -301,6 +307,8 @@ def _apply_catalog_cleanup(
         exit_code = int(apply_result.get("exit_code", 0))
         consolidated = int(apply_result.get("consolidated", 0))
         cleaned_up = int(apply_result.get("cleaned_up", 0))
+        result["base_items_created"] = int(apply_result.get("base_items_created", 0))
+        result["created_base_details"] = list(apply_result.get("created_base_details") or [])
     else:
         exit_code = int(apply_result)
         consolidated = min(int(apply_limit), len(supported))
@@ -460,6 +468,7 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
         "products_checked": payload.get("products_checked"),
         "products_clean": payload.get("already_correct"),
         "catalog_fixes_applied": payload.get("catalog_fixes_applied"),
+        "base_items_created": payload.get("base_items_created"),
         "quantity_updates_applied": payload.get("quantity_updates_applied"),
         "blocked_items": payload.get("skipped_unsupported"),
         "missing_base_item_in_qbo": int((payload.get("unsupported_catalog_issues") or {}).get("only_pack_variant_exists", 0) or 0),
@@ -490,6 +499,7 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
         f"Products checked: {summary['products_checked']}",
         f"In sync / Products clean: {summary['already_correct']}",
         f"Catalog fixes applied: {summary['catalog_fixes_applied']}",
+        f"Base items created: {int(summary.get('base_items_created', 0) or 0)}",
         f"Quantity updates applied: {summary['quantity_updates_applied']}",
         f"Blocked items: {summary['skipped_unsupported']}",
         f"Missing base item in QBO: {int((summary.get('unsupported_catalog_issues') or {}).get('only_pack_variant_exists', 0) or 0)}",
@@ -687,6 +697,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "products_checked": int(len(final.report)),
         "already_correct": int(counts.get("in_sync", 0)),
         "catalog_fixes_applied": int(catalog_result["applied"]),
+        "base_items_created": int(catalog_result.get("base_items_created", 0) or 0),
         "quantity_updates_applied": int(quantity_result["posted"]),
         "skipped_unsupported": int(unsupported_total),
         "skipped_safely": int(skipped_safely),
@@ -694,6 +705,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "final_status_counts": counts,
         "unsupported_catalog_issues": catalog_result["unsupported_counts"],
         "blocked_catalog_examples": blocked_examples,
+        "created_base_details": list(catalog_result.get("created_base_details") or []),
         "quantity_adjustment_stats": quantity_result,
         "child_reports": child_reports,
         "finished_at": _now_utc_iso(),

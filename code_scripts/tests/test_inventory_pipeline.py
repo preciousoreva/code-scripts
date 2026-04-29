@@ -231,6 +231,10 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertIn("Catalog fixes limit: 1", msg)
         self.assertIn("Quantity updates limit: 2", msg)
 
+    def test_final_summary_includes_base_items_created(self):
+        msg = inventory_pipeline._format_final_summary(self._summary_payload(base_items_created=3))
+        self.assertIn("Base items created: 3", msg)
+
     def test_final_summary_includes_blocked_examples_when_blocked_count_is_small(self):
         msg = inventory_pipeline._format_final_summary(
             self._summary_payload(
@@ -293,7 +297,20 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                  mock.patch.object(inventory_pipeline, "ensure_company_runtime_compatible"), \
                  mock.patch.object(inventory_pipeline, "_resolve_qbo_snapshot", return_value=qbo_path), \
                  mock.patch.object(inventory_pipeline, "_catalog_output_path", return_value=root / "catalog.csv"), \
-                 mock.patch.object(inventory_pipeline, "_run_apply_for_existing_base_pack_variants") as cleanup_mock:
+                 mock.patch.object(
+                     inventory_pipeline,
+                     "_run_apply_for_existing_base_pack_variants",
+                     return_value={
+                         "exit_code": 0,
+                         "attempted": 1,
+                         "consolidated": 1,
+                         "cleaned_up": 1,
+                         "skipped": 0,
+                         "failed": 0,
+                         "base_items_created": 1,
+                         "created_base_details": [{"base_name": "GOLDBERG CAN 50cl", "base_item_id": "123", "created": True}],
+                     },
+                 ) as cleanup_mock:
                 summary = inventory_pipeline.run_inventory_pipeline(
                     self._args(
                         td,
@@ -303,11 +320,12 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     )
                 )
 
-        cleanup_mock.assert_not_called()
+        cleanup_mock.assert_called_once()
         self.assertEqual(summary["products_checked"], 1)
-        self.assertEqual(summary["catalog_fixes_applied"], 0)
+        self.assertEqual(summary["catalog_fixes_applied"], 1)
+        self.assertEqual(summary["base_items_created"], 1)
         self.assertEqual(summary["quantity_updates_applied"], 0)
-        self.assertEqual(summary["unsupported_catalog_issues"]["only_pack_variant_exists"], 1)
+        self.assertEqual(summary["unsupported_catalog_issues"].get("only_pack_variant_exists", 0), 0)
 
     def test_case_insensitive_base_detection_enables_pack_consolidation_flow(self):
         with tempfile.TemporaryDirectory() as td:
@@ -602,6 +620,16 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             with mock.patch.object(
                 inventory_pipeline,
                 "_run_apply_for_existing_base_pack_variants",
+                return_value={
+                    "exit_code": 0,
+                    "attempted": 1,
+                    "consolidated": 0,
+                    "cleaned_up": 0,
+                    "skipped": 1,
+                    "failed": 0,
+                    "base_items_created": 0,
+                    "created_base_details": [],
+                },
             ) as cleanup_mock, mock.patch.object(
                 inventory_pipeline,
                 "_apply_exact_match_quantity_adjustments",
@@ -616,9 +644,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             ):
                 summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
 
-            cleanup_mock.assert_not_called()
+            cleanup_mock.assert_called_once()
             self.assertEqual(summary["catalog_fixes_applied"], 0)
-            self.assertEqual(summary["unsupported_catalog_issues"]["only_pack_variant_exists"], 1)
+            self.assertEqual(summary["unsupported_catalog_issues"].get("only_pack_variant_exists", 0), 0)
             self.assertEqual(summary["unsupported_catalog_issues"]["missing_from_qbo"], 1)
             self.assertEqual(summary["unsupported_catalog_issues"]["multiple_active_base_items"], 1)
 
