@@ -354,6 +354,39 @@ class RunJob(models.Model):
             return "Inventory audit"
         return str(self.scope).replace("_", " ").strip() or "Run"
 
+    def get_target_label(self, *, company_display_name: str | None = None) -> str:
+        """Operator-facing target summary for Run Detail."""
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            opts = self.inventory_options_json if isinstance(self.inventory_options_json, dict) else {}
+            raw_categories = opts.get("categories") or []
+            categories: list[str] = []
+            if isinstance(raw_categories, str):
+                raw_categories = [raw_categories]
+            if isinstance(raw_categories, list):
+                categories = [str(c).strip() for c in raw_categories if str(c).strip()]
+            product = str(opts.get("product_filter") or "").strip()
+            parts: list[str] = []
+            if categories:
+                parts.append(f"Category: {', '.join(categories)}")
+            if product:
+                parts.append(f"Product: {product}")
+            return "; ".join(parts) if parts else "All products"
+
+        if self.scope == self.SCOPE_ALL:
+            return "All companies"
+
+        if self.scope == self.SCOPE_SINGLE:
+            label = (company_display_name or self.company_key or "").strip()
+            return f"Company: {label}" if label else "Company"
+
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            label = (company_display_name or self.company_key or "").strip()
+            if label:
+                return f"Inventory audit — {label}"
+            return "Inventory audit"
+
+        return self.scope_label
+
     @property
     def run_prefix(self) -> str:
         if self.scope in {self.SCOPE_SINGLE, self.SCOPE_ALL}:

@@ -17,7 +17,7 @@
         class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
         <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>
         <div><span class="text-slate-500 dark:text-slate-400 block">Workflow</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.workflow_label }}</span></div>
-        <div><span class="text-slate-500 dark:text-slate-400 block">Scope</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.scope_label }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Target</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ target_label }}</span></div>
         <div><span class="text-slate-500 dark:text-slate-400 block">Company</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.company_key|default:"all" }}</span></div>
         <div>
             <span class="text-slate-500 dark:text-slate-400 block">Exit Code</span>

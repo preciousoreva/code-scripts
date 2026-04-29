@@ -1944,12 +1944,17 @@ def logs_list(request):
 @login_required
 def run_detail(request, job_id):
     job = get_object_or_404(RunJob, id=job_id)
+    company_display_name = ""
+    if (job.company_key or "").strip():
+        record = CompanyConfigRecord.objects.filter(company_key=job.company_key).only("display_name").first()
+        company_display_name = record.display_name if record else ""
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
     artifacts_list = list(artifacts)
     active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
     run_upload_summary_message = _run_detail_upload_summary_message(artifacts_list)
     context = {
         "job": job,
+        "target_label": job.get_target_label(company_display_name=company_display_name),
         "artifacts": artifacts,
         "active_run_ids": active_run_ids_list,
         "active_run_ids_json": json.dumps(active_run_ids_list),
