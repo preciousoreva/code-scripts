@@ -370,6 +370,166 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertIn("Blocked Widget", msg)
         self.assertIn("reason=product not found in QuickBooks", msg)
 
+    def test_slack_product_success_is_compact_and_operator_friendly(self):
+        msg = inventory_pipeline._format_slack_summary(
+            self._summary_payload(
+                scope="product=ACTION BITTERS50ml",
+                products_checked=1,
+                already_correct=1,
+                in_sync=1,
+                catalog_fixes_applied=0,
+                blocked_items=0,
+                still_needs_review=0,
+                quantity_updates_applied=1,
+                completion_status="clean",
+                run_url="https://portal.example/epos-qbo/runs/job-1/",
+                product_details=[
+                    {
+                        "base_name": "ACTION BITTERS50ml",
+                        "epos_expected_qty": 15.0,
+                        "qbo_final_qty": 15.0,
+                        "delta": 0.0,
+                        "final_status": "in_sync",
+                    }
+                ],
+            )
+        )
+
+        self.assertIn("✅ Inventory synced — ACTION BITTERS50ml", msg)
+        self.assertIn("EPOS: 15", msg)
+        self.assertIn("QBO: 15", msg)
+        self.assertIn("Difference: 0", msg)
+        self.assertIn("Updated in QBO: Yes", msg)
+        self.assertIn("Catalog fixes: 0", msg)
+        self.assertIn("Blocked: 0", msg)
+        self.assertIn("Run: https://portal.example/epos-qbo/runs/job-1/", msg)
+        self.assertNotIn("negative EPOS", msg)
+        self.assertNotIn("Report path:", msg)
+        self.assertNotIn("epos_expected_qty", msg)
+        self.assertNotIn("EPOS=", msg)
+
+    def test_slack_category_success_includes_sync_ratio_and_negative_note(self):
+        msg = inventory_pipeline._format_slack_summary(
+            self._summary_payload(
+                scope="category=ALCOHOLS & SPIRITS",
+                products_checked=147,
+                already_correct=147,
+                in_sync=147,
+                catalog_fixes_applied=0,
+                quantity_updates_applied=0,
+                blocked_items=0,
+                still_needs_review=0,
+                completion_status="clean",
+                epos_negative_rows_clamped=1,
+                epos_negative_units_clamped=30.0,
+                run_url="https://portal.example/epos-qbo/runs/job-2/",
+            )
+        )
+
+        self.assertIn("✅ Inventory synced — ALCOHOLS & SPIRITS", msg)
+        self.assertIn("In sync: 147/147", msg)
+        self.assertIn("Catalog fixes: 0", msg)
+        self.assertIn("Quantity updates: 0", msg)
+        self.assertIn("Blocked: 0", msg)
+        self.assertIn("Note: 1 negative EPOS row ignored (30 units)", msg)
+        self.assertNotIn("negative_rows_clamped", msg)
+
+    def test_slack_blocked_summary_shows_first_item_and_reason(self):
+        msg = inventory_pipeline._format_slack_summary(
+            self._summary_payload(
+                scope="category=ALCOHOLS & SPIRITS",
+                products_checked=147,
+                already_correct=146,
+                in_sync=146,
+                blocked_items=1,
+                still_needs_review=1,
+                completion_status="completed_with_blocked_items",
+                blocked_catalog_examples=[
+                    "SMIRNOFF ICE DOUBLE BLACK CAN 330ml — multiple_active_base_items",
+                ],
+                run_url="https://portal.example/epos-qbo/runs/job-3/",
+            )
+        )
+
+        self.assertIn("⚠️ Inventory needs review — ALCOHOLS & SPIRITS", msg)
+        self.assertIn("In sync: 146/147", msg)
+        self.assertIn("Blocked: 1", msg)
+        self.assertIn("SMIRNOFF ICE DOUBLE BLACK CAN 330ml", msg)
+        self.assertIn("Reason: duplicate base items in QBO", msg)
+        self.assertNotIn("catalog_issue_type", msg)
+        self.assertNotIn("multiple_active_base_items", msg)
+        self.assertNotIn("/tmp/report.json", msg)
+
+    def test_slack_product_blocked_summary_keeps_reconciliation_numbers(self):
+        msg = inventory_pipeline._format_slack_summary(
+            self._summary_payload(
+                scope="product=ACTION BITTERS50ml",
+                products_checked=1,
+                already_correct=0,
+                in_sync=0,
+                blocked_items=1,
+                still_needs_review=1,
+                completion_status="completed_with_blocked_items",
+                product_details=[
+                    {
+                        "base_name": "ACTION BITTERS50ml",
+                        "epos_expected_qty": 15.0,
+                        "qbo_final_qty": -15.0,
+                        "delta": 30.0,
+                        "final_status": "needs_adjustment",
+                    }
+                ],
+                run_url="https://portal.example/epos-qbo/runs/job-5/",
+            )
+        )
+
+        self.assertIn("⚠️ Inventory needs review — ACTION BITTERS50ml", msg)
+        self.assertIn("EPOS: 15", msg)
+        self.assertIn("QBO: -15", msg)
+        self.assertIn("Difference: 30", msg)
+        self.assertIn("Blocked: 1", msg)
+        self.assertIn("Reason: quantity mismatch needs review", msg)
+        self.assertNotIn("In sync:", msg)
+
+    def test_slack_failed_summary_uses_short_reason_and_report_filename_without_run_link(self):
+        msg = inventory_pipeline._format_slack_summary(
+            self._summary_payload(
+                scope="category=ALCOHOLS & SPIRITS",
+                completion_status="failed",
+                error=(
+                    "QBO query failed: HTTP 400: QueryValidationError: "
+                    "Property SubItem not found for Entity Item"
+                ),
+                run_url="",
+                summary_json="/tmp/reports/inventory_pipeline_company_a_120000.json",
+            )
+        )
+
+        self.assertIn("❌ Inventory sync failed — ALCOHOLS & SPIRITS", msg)
+        self.assertIn("Reason: QBO query failed", msg)
+        self.assertNotIn("SubItem", msg)
+        self.assertIn("Report: inventory_pipeline_company_a_120000.json", msg)
+        self.assertNotIn("/tmp/reports", msg)
+
+    def test_slack_report_filename_is_hidden_when_run_link_exists(self):
+        msg = inventory_pipeline._format_slack_summary(
+            self._summary_payload(
+                scope="category=ALCOHOLS & SPIRITS",
+                products_checked=1,
+                already_correct=1,
+                in_sync=1,
+                blocked_items=0,
+                still_needs_review=0,
+                completion_status="clean",
+                run_url="https://portal.example/epos-qbo/runs/job-4/",
+                summary_json="/tmp/reports/inventory_pipeline_company_a_120000.json",
+            )
+        )
+
+        self.assertIn("Run: https://portal.example/epos-qbo/runs/job-4/", msg)
+        self.assertNotIn("Report:", msg)
+        self.assertNotIn("inventory_pipeline_company_a_120000.json", msg)
+
     def test_write_summary_reports_includes_blocked_fields_in_csv_and_json(self):
         with tempfile.TemporaryDirectory() as td:
             summary = self._summary_payload(

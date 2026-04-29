@@ -861,6 +861,183 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_operator_number(value: Any) -> str:
+    number = _numeric(value, 0.0)
+    if abs(number - int(number)) <= 0.0000001:
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _scope_part(scope: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(scope or "").split(";"):
+        chunk = part.strip()
+        if chunk.startswith(prefix):
+            return chunk.removeprefix(prefix).strip()
+    return ""
+
+
+def _first_product_detail(summary: dict[str, Any]) -> dict[str, Any]:
+    details = [d for d in (summary.get("product_details") or []) if isinstance(d, dict)]
+    return details[0] if details else {}
+
+
+def _is_product_scope(summary: dict[str, Any]) -> bool:
+    if _first_product_detail(summary):
+        return True
+    return bool(_scope_part(str(summary.get("scope") or ""), "product"))
+
+
+def _slack_scope_title(summary: dict[str, Any]) -> str:
+    detail = _first_product_detail(summary)
+    if detail.get("base_name"):
+        return str(detail.get("base_name"))
+    scope = str(summary.get("scope") or "")
+    product = _scope_part(scope, "product")
+    if product:
+        return product
+    category = _scope_part(scope, "category")
+    if category:
+        return category
+    return "all products"
+
+
+def _compact_catalog_fix_count(summary: dict[str, Any]) -> int:
+    applied = int(summary.get("catalog_fixes_applied", 0) or 0)
+    subcounts = (
+        int(summary.get("base_items_created", 0) or 0)
+        + int(summary.get("duplicate_base_items_resolved", 0) or 0)
+    )
+    return max(applied, subcounts)
+
+
+def _negative_epos_note(summary: dict[str, Any]) -> str:
+    rows = int(summary.get("epos_negative_rows_clamped", 0) or 0)
+    if rows <= 0:
+        return ""
+    row_word = "row" if rows == 1 else "rows"
+    units = _format_operator_number(summary.get("epos_negative_units_clamped", 0.0))
+    return f"Note: {rows} negative EPOS {row_word} ignored ({units} units)"
+
+
+def _short_block_reason(raw: str) -> str:
+    text = str(raw or "").strip()
+    lowered = text.lower()
+    normalized = lowered.replace("_", " ")
+    if "duplicate" in normalized or "multiple active" in normalized:
+        return "duplicate base items in QBO"
+    if "only pack variant" in normalized:
+        return "only pack variant exists in QBO"
+    if "missing" in normalized or "not found" in normalized:
+        return "product not found in QuickBooks"
+    if "needs adjustment" in normalized:
+        return "quantity mismatch needs review"
+    if "ambiguous" in normalized:
+        return "ambiguous QBO match"
+    return text or "see final audit"
+
+
+def _short_failure_reason(raw: str) -> str:
+    text = " ".join(str(raw or "").strip().split())
+    if not text:
+        return "see run log"
+    lowered = text.lower()
+    if "qbo query failed" in lowered or "queryvalidationerror" in lowered:
+        return "QBO query failed"
+    if len(text) > 120:
+        return text[:117].rstrip() + "..."
+    return text
+
+
+def _first_blocked_item(summary: dict[str, Any]) -> tuple[str, str]:
+    details = [d for d in (summary.get("product_details") or []) if isinstance(d, dict)]
+    for detail in details:
+        if str(detail.get("final_status") or "") != "in_sync":
+            return (
+                str(detail.get("base_name") or _slack_scope_title(summary)),
+                _short_block_reason(str(detail.get("blocked_reason") or detail.get("final_status") or "")),
+            )
+    examples = [str(x).strip() for x in (summary.get("blocked_catalog_examples") or []) if str(x).strip()]
+    if examples:
+        if "—" in examples[0]:
+            base, reason = [p.strip() for p in examples[0].split("—", 1)]
+            return base, _short_block_reason(reason)
+        return _slack_scope_title(summary), _short_block_reason(examples[0])
+    return _slack_scope_title(summary), "see final audit"
+
+
+def _append_run_or_report(lines: list[str], summary: dict[str, Any]) -> None:
+    run_url = str(summary.get("run_url") or "").strip()
+    if run_url:
+        lines.append(f"Run: {run_url}")
+        return
+    report = Path(str(summary.get("summary_json") or "")).name
+    if report:
+        lines.append(f"Report: {report}")
+
+
+def _format_slack_summary(summary: dict[str, Any]) -> str:
+    summary = _stable_summary_payload(summary)
+    title = _slack_scope_title(summary)
+    blocked = int(summary.get("blocked_items", 0) or 0) > 0 or int(summary.get("still_needs_review", 0) or 0) > 0
+    failed = str(summary.get("completion_status") or "") == "failed"
+    is_product = _is_product_scope(summary)
+
+    if failed:
+        lines = [f"❌ Inventory sync failed — {title}", ""]
+        lines.append(
+            f"Reason: {_short_failure_reason(str(summary.get('error') or summary.get('failure_reason') or 'see run log'))}"
+        )
+        _append_run_or_report(lines, summary)
+        return "\n".join(lines)
+
+    if blocked:
+        lines = [f"⚠️ Inventory needs review — {title}", ""]
+        detail = _first_product_detail(summary)
+        if is_product and detail:
+            lines.append(f"EPOS: {_format_operator_number(detail.get('epos_expected_qty', 0))}")
+            lines.append(f"QBO: {_format_operator_number(detail.get('qbo_final_qty', 0))}")
+            lines.append(f"Difference: {_format_operator_number(detail.get('delta', 0))}")
+            lines.append("")
+        else:
+            lines.append(f"In sync: {summary['in_sync']}/{summary['products_checked']}")
+        lines.append(f"Blocked: {summary['blocked_items']}")
+        item, reason = _first_blocked_item(summary)
+        if item and not (is_product and item == title):
+            lines.extend(["", item, f"Reason: {reason}"])
+        elif reason:
+            lines.extend(["", f"Reason: {reason}"])
+        note = _negative_epos_note(summary)
+        if note:
+            lines.extend(["", note])
+        lines.append("")
+        _append_run_or_report(lines, summary)
+        return "\n".join(lines)
+
+    lines = [f"✅ Inventory synced — {title}", ""]
+    if is_product:
+        detail = _first_product_detail(summary)
+        lines.append(f"EPOS: {_format_operator_number(detail.get('epos_expected_qty', 0))}")
+        lines.append(f"QBO: {_format_operator_number(detail.get('qbo_final_qty', 0))}")
+        lines.append(f"Difference: {_format_operator_number(detail.get('delta', 0))}")
+        lines.append("")
+        lines.append(f"Updated in QBO: {'Yes' if int(summary.get('quantity_updates_applied', 0) or 0) > 0 else 'No'}")
+        lines.append(f"Catalog fixes: {_compact_catalog_fix_count(summary)}")
+        lines.append(f"Blocked: {summary['blocked_items']}")
+    else:
+        lines.append(f"In sync: {summary['in_sync']}/{summary['products_checked']}")
+        lines.append(f"Catalog fixes: {_compact_catalog_fix_count(summary)}")
+        lines.append(f"Quantity updates: {summary['quantity_updates_applied']}")
+        lines.append(f"Blocked: {summary['blocked_items']}")
+
+    note = _negative_epos_note(summary)
+    if note:
+        lines.extend(["", note])
+    lines.append("")
+    _append_run_or_report(lines, summary)
+    return "\n".join(lines)
+
+
 def _format_unsupported_breakdown(unsupported_counts: dict[str, Any]) -> str:
     labels = {
         "base_with_pack_variants": "Blocked pack-variant action",
@@ -1139,7 +1316,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     webhook = getattr(cfg, "slack_webhook_url", None)
     if webhook and not args.no_slack:
-        send_slack_success(_format_final_summary(summary), webhook)
+        send_slack_success(_format_slack_summary(summary), webhook)
 
     return summary
 
