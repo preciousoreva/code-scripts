@@ -7,6 +7,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.epos_qbo.models import CompanyConfigRecord, RunJob
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 class AuthAndPermissionsTests(TestCase):
@@ -50,15 +51,17 @@ class AuthAndPermissionsTests(TestCase):
 
     def test_trigger_requires_permission(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:run-trigger"),
-            {"scope": "all_companies", "date_mode": "yesterday"},
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:run-trigger"),
+                {"scope": "all_companies", "date_mode": "yesterday"},
+            )
         self.assertEqual(response.status_code, 403)
 
     def test_company_create_requires_edit_permission(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.get(reverse("epos_qbo:company-new"))
+        with suppress_expected_request_logs():
+            response = self.client.get(reverse("epos_qbo:company-new"))
         self.assertEqual(response.status_code, 403)
 
     def test_trigger_with_permission_creates_job(self):

@@ -10,6 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 class CompanyRunActivityTests(TestCase):
@@ -46,7 +47,8 @@ class CompanyRunActivityTests(TestCase):
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
-            yield
+            with suppress_expected_request_logs():
+                yield
 
     def test_companies_list_uses_run_linked_via_artifact(self):
         run = RunJob.objects.create(

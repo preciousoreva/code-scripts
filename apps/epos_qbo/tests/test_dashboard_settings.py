@@ -20,6 +20,7 @@ from apps.epos_qbo.models import (
     RunArtifact,
     RunJob,
 )
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 def _reset_portal_settings_defaults():
@@ -297,15 +298,18 @@ class SettingsPageTests(TestCase):
         self.assertEqual(row.default_stagger_seconds, 5)
 
     def test_user_without_permission_gets_403_when_posting_portal_defaults(self):
-        response = self.client.post(
-            reverse("epos_qbo:settings"),
-            {
-                "csrfmiddlewaretoken": self.client.get(reverse("epos_qbo:settings")).cookies["csrftoken"].value,
-                "save_portal": "1",
-                "default_parallel": "3",
-            },
-            follow=False,
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:settings"),
+                {
+                    "csrfmiddlewaretoken": self.client.get(reverse("epos_qbo:settings")).cookies[
+                        "csrftoken"
+                    ].value,
+                    "save_portal": "1",
+                    "default_parallel": "3",
+                },
+                follow=False,
+            )
         self.assertEqual(response.status_code, 403)
 
     def test_user_can_save_preferences(self):

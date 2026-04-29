@@ -8,6 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 class InventoryTriggerViewTests(TestCase):
@@ -29,10 +30,11 @@ class InventoryTriggerViewTests(TestCase):
     def test_requires_permission(self):
         no_perm = User.objects.create_user(username="np", password="pw")
         self.client.login(username="np", password="pw")
-        response = self.client.post(
-            reverse("epos_qbo:run-trigger-inventory"),
-            {"company_key": "company_a"},
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:run-trigger-inventory"),
+                {"company_key": "company_a"},
+            )
         self.assertEqual(response.status_code, 403)
 
     def test_rejects_unknown_company(self):

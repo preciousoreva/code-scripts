@@ -5,6 +5,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.epos_qbo.models import CompanyConfigRecord
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 class SchedulePermissionsTests(TestCase):
@@ -28,7 +29,8 @@ class SchedulePermissionsTests(TestCase):
 
     def test_schedules_page_requires_manage_permission(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.get(reverse("epos_qbo:schedules"))
+        with suppress_expected_request_logs():
+            response = self.client.get(reverse("epos_qbo:schedules"))
         self.assertEqual(response.status_code, 403)
 
     def test_schedules_page_with_permission_returns_ok(self):
@@ -40,18 +42,19 @@ class SchedulePermissionsTests(TestCase):
 
     def test_schedule_create_requires_manage_permission(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:schedule-create"),
-            {
-                "name": "Daily",
-                "enabled": "on",
-                "scope": "all_companies",
-                "company_key": "",
-                "cron_expr": "*/5 * * * *",
-                "timezone_name": "UTC",
-                "target_date_mode": "trading_date",
-                "parallel": "2",
-                "stagger_seconds": "2",
-            },
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:schedule-create"),
+                {
+                    "name": "Daily",
+                    "enabled": "on",
+                    "scope": "all_companies",
+                    "company_key": "",
+                    "cron_expr": "*/5 * * * *",
+                    "timezone_name": "UTC",
+                    "target_date_mode": "trading_date",
+                    "parallel": "2",
+                    "stagger_seconds": "2",
+                },
+            )
         self.assertEqual(response.status_code, 403)
