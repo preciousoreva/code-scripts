@@ -4,8 +4,9 @@ from datetime import date
 
 from django.test import TestCase
 
-from apps.epos_qbo.models import RunJob
+from apps.epos_qbo.models import RunJob, RunSchedule
 from apps.epos_qbo.services.job_runner import build_command, build_command_for_job
+from apps.epos_qbo.services.schedule_worker import enqueue_run_for_schedule
 
 
 class InventoryPipelineBuildCommandTests(TestCase):
@@ -90,6 +91,38 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("2", cmd)
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("4", cmd)
+
+    def test_inventory_schedule_builds_weekly_pipeline_command(self):
+        schedule = RunSchedule.objects.create(
+            name="Weekly Inventory Sync",
+            enabled=False,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            cron_expr="0 20 * * 0",
+            timezone_name="Africa/Lagos",
+            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+
+        job, result = enqueue_run_for_schedule(schedule)
+
+        self.assertEqual(result, "queued")
+        assert job is not None
+        cmd = build_command_for_job(job)
+        self.assertEqual(
+            cmd[1:],
+            [
+                "-m",
+                "code_scripts.inventory_pipeline",
+                "--company",
+                "company_a",
+                "--auto-download",
+                "--auto-fetch-qbo",
+                "--qbo-force-refresh",
+                "--category",
+                "ALCOHOLS & SPIRITS",
+            ],
+        )
 
 
 class InventoryBuildCommandTests(TestCase):

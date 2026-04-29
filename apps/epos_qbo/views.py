@@ -1515,6 +1515,182 @@ def _schedule_create_initial() -> dict:
     }
 
 
+def _operator_schedule_name(schedule: RunSchedule) -> str:
+    if schedule.name == "All Companies Daily Run":
+        return "Daily Sales Sync"
+    if schedule.name == "Legacy Env Fallback":
+        return "System Fallback Schedule"
+    return schedule.name
+
+
+def _inventory_options(schedule: RunSchedule) -> dict:
+    return schedule.inventory_options_json if isinstance(schedule.inventory_options_json, dict) else {}
+
+
+def _first_inventory_category(schedule: RunSchedule) -> str:
+    categories = _inventory_options(schedule).get("categories") or []
+    if isinstance(categories, str):
+        return categories.strip()
+    if isinstance(categories, list) and categories:
+        return str(categories[0] or "").strip()
+    return ""
+
+
+def _inventory_product_filter(schedule: RunSchedule) -> str:
+    return str(_inventory_options(schedule).get("product_filter") or "").strip()
+
+
+def _company_display(company_map: dict[str, str], company_key: str | None) -> str:
+    key = (company_key or "").strip()
+    if not key:
+        return ""
+    display = company_map.get(key) or key
+    return f"{display} / {key}" if display != key else key
+
+
+def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> str:
+    if schedule.name == "Legacy Env Fallback" and schedule.is_system_managed:
+        return "Legacy environment configuration"
+    if schedule.scope == RunJob.SCOPE_ALL:
+        return "All companies"
+    if schedule.scope == RunJob.SCOPE_SINGLE:
+        company = _company_display(company_map, schedule.company_key)
+        return f"Company: {company}" if company else "Company"
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        parts = []
+        company = _company_display(company_map, schedule.company_key)
+        if company:
+            parts.append(f"Company: {company}")
+        category = _first_inventory_category(schedule)
+        product = _inventory_product_filter(schedule)
+        if category:
+            parts.append(f"Category: {category}")
+        if product:
+            parts.append(f"Product: {product}")
+        return " | ".join(parts) if parts else "Inventory"
+    return schedule.get_scope_display()
+
+
+def _friendly_cron_label(schedule: RunSchedule) -> str:
+    parts = (schedule.cron_expr or "").split()
+    if len(parts) != 5:
+        return "Custom schedule"
+    minute, hour, day, month, weekday = parts
+    if not minute.isdigit() or not hour.isdigit():
+        return "Custom schedule"
+    minute_int = int(minute)
+    hour_int = int(hour)
+    if not (0 <= minute_int <= 59 and 0 <= hour_int <= 23):
+        return "Custom schedule"
+    time_label = f"{hour_int:02d}:{minute_int:02d}"
+    weekday_labels = {
+        "0": "Sunday",
+        "7": "Sunday",
+        "1": "Monday",
+        "2": "Tuesday",
+        "3": "Wednesday",
+        "4": "Thursday",
+        "5": "Friday",
+        "6": "Saturday",
+    }
+    if day == "*" and month == "*" and weekday == "*":
+        return f"Daily at {time_label}"
+    if day == "*" and month == "*" and weekday in weekday_labels:
+        return f"Weekly on {weekday_labels[weekday]} at {time_label}"
+    return "Custom schedule"
+
+
+def _last_result_label_from_event(event: RunScheduleEvent) -> str:
+    if event.event_type == RunScheduleEvent.TYPE_RUN_SUCCEEDED:
+        return "Succeeded"
+    if event.event_type in {RunScheduleEvent.TYPE_RUN_FAILED, RunScheduleEvent.TYPE_ERROR}:
+        return "Failed"
+    if event.event_type in {
+        RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
+        RunScheduleEvent.TYPE_SKIPPED_INVALID,
+    }:
+        return "Skipped"
+    return "Queued"
+
+
+def _last_result_label_from_value(value: str) -> str:
+    labels = {
+        RunSchedule.LAST_RESULT_QUEUED: "Queued",
+        RunSchedule.LAST_RESULT_SUCCEEDED: "Succeeded",
+        RunSchedule.LAST_RESULT_FAILED: "Failed",
+        RunSchedule.LAST_RESULT_CANCELLED: "Skipped",
+        RunSchedule.LAST_RESULT_SKIPPED_OVERLAP: "Skipped",
+        RunSchedule.LAST_RESULT_SKIPPED_INVALID: "Skipped",
+        RunSchedule.LAST_RESULT_ERROR: "Failed",
+    }
+    return labels.get(value or "", "Never run")
+
+
+def _schedule_last_result(schedule: RunSchedule) -> dict:
+    terminal_event = (
+        schedule.events.select_related("run_job")
+        .filter(
+            event_type__in=[
+                RunScheduleEvent.TYPE_RUN_SUCCEEDED,
+                RunScheduleEvent.TYPE_RUN_FAILED,
+                RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
+                RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                RunScheduleEvent.TYPE_ERROR,
+            ]
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    active_job = (
+        schedule.scheduled_jobs.filter(status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING])
+        .order_by("-created_at")
+        .first()
+    )
+    if terminal_event is not None:
+        run_job = terminal_event.run_job
+        last_run_at = (
+            run_job.finished_at
+            if run_job is not None and run_job.finished_at is not None
+            else terminal_event.created_at
+        )
+        return {
+            "label": _last_result_label_from_event(terminal_event),
+            "last_run_at": last_run_at,
+            "current": active_job.status.capitalize() if active_job is not None else "",
+        }
+    if active_job is not None:
+        return {
+            "label": active_job.status.capitalize(),
+            "last_run_at": None,
+            "current": active_job.status.capitalize(),
+        }
+    return {
+        "label": _last_result_label_from_value(schedule.last_result),
+        "last_run_at": schedule.last_fired_at if schedule.last_result else None,
+        "current": "",
+    }
+
+
+def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) -> list[dict]:
+    rows: list[dict] = []
+    for schedule in schedules:
+        result = _schedule_last_result(schedule)
+        rows.append(
+            {
+                "schedule": schedule,
+                "display_name": _operator_schedule_name(schedule),
+                "subtitle": _schedule_subtitle(schedule, company_map),
+                "friendly_cron": _friendly_cron_label(schedule),
+                "last_result_label": result["label"],
+                "last_run_at": result["last_run_at"],
+                "current_status_label": result["current"],
+                "category": _first_inventory_category(schedule),
+                "product_filter": _inventory_product_filter(schedule),
+            }
+        )
+    return rows
+
+
 def _form_error_text(form: RunScheduleForm) -> str:
     parts: list[str] = []
     for field_name, errors in form.errors.items():
@@ -1542,16 +1718,18 @@ def schedules_page(request):
         .order_by("-created_at")
         .values_list("id", flat=True)[:20]
     )
-    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    company_map = {company.company_key: company.display_name for company in companies}
     context = {
         "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
-        "schedules": schedules,
+        "schedule_rows": _schedule_rows(schedules, company_map),
         "recent_events": recent_events,
         "companies": companies,
         "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
         "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
         "single_scope": RunJob.SCOPE_SINGLE,
         "all_scope": RunJob.SCOPE_ALL,
+        "inventory_scope": RunJob.SCOPE_INVENTORY_PIPELINE,
         "scheduler_status": get_scheduler_status(),
     }
     context.update(_nav_context())
@@ -1664,13 +1842,15 @@ def schedule_toggle(request, schedule_id):
 @require_POST
 def schedule_run_now(request, schedule_id):
     schedule = get_object_or_404(RunSchedule, id=schedule_id)
-    if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
-        messages.error(request, "Single-company schedule is missing company key.")
+    if schedule.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE} and not (
+        schedule.company_key or ""
+    ).strip():
+        messages.error(request, "Schedule is missing company key.")
         return redirect("epos_qbo:schedules")
 
     job, result = enqueue_run_for_schedule(schedule, now=timezone.now(), source="manual")
     if job is None and result == RunScheduleEvent.TYPE_SKIPPED_OVERLAP:
-        messages.warning(request, "Schedule already has a queued/running run. Manual enqueue skipped.")
+        messages.warning(request, "Skipped because another run is active.")
         return redirect("epos_qbo:schedules")
     if job is None:
         messages.error(request, "Could not queue run for schedule.")

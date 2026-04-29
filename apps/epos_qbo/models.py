@@ -548,11 +548,17 @@ class RunSchedule(models.Model):
     ]
 
     LAST_RESULT_QUEUED = "queued"
+    LAST_RESULT_SUCCEEDED = "succeeded"
+    LAST_RESULT_FAILED = "failed"
+    LAST_RESULT_CANCELLED = "cancelled"
     LAST_RESULT_SKIPPED_OVERLAP = "skipped_overlap"
     LAST_RESULT_SKIPPED_INVALID = "skipped_invalid"
     LAST_RESULT_ERROR = "error"
     LAST_RESULT_CHOICES = [
         (LAST_RESULT_QUEUED, "Queued"),
+        (LAST_RESULT_SUCCEEDED, "Succeeded"),
+        (LAST_RESULT_FAILED, "Failed"),
+        (LAST_RESULT_CANCELLED, "Cancelled"),
         (LAST_RESULT_SKIPPED_OVERLAP, "Skipped (Overlap)"),
         (LAST_RESULT_SKIPPED_INVALID, "Skipped (Invalid)"),
         (LAST_RESULT_ERROR, "Error"),
@@ -565,6 +571,7 @@ class RunSchedule(models.Model):
     company_key = models.SlugField(max_length=64, null=True, blank=True)
     cron_expr = models.CharField(max_length=120)
     timezone_name = models.CharField(max_length=64, default="UTC")
+    inventory_options_json = models.JSONField(default=dict, blank=True)
     target_date_mode = models.CharField(
         max_length=32,
         choices=TARGET_DATE_MODE_CHOICES,
@@ -624,13 +631,17 @@ class RunSchedule(models.Model):
         except ValidationError:
             errors["timezone_name"] = "Enter a valid timezone."
 
-        if self.scope == RunJob.SCOPE_SINGLE and not (self.company_key or "").strip():
-            errors["company_key"] = "Company key is required for single-company schedules."
+        if self.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE} and not (
+            self.company_key or ""
+        ).strip():
+            errors["company_key"] = "Company key is required for this schedule."
         if self.scope == RunJob.SCOPE_ALL:
             self.company_key = None
-        if self.scope == RunJob.SCOPE_SINGLE:
+        if self.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE}:
             self.parallel = 1
             self.continue_on_failure = False
+        if self.scope != RunJob.SCOPE_INVENTORY_PIPELINE:
+            self.inventory_options_json = {}
 
         if errors:
             raise ValidationError(errors)
@@ -705,11 +716,11 @@ class RunScheduleEvent(models.Model):
     @property
     def resolved_schedule_name(self) -> str:
         if self.schedule is not None:
-            return self.schedule.name
+            return _operator_schedule_name(self.schedule.name)
         if isinstance(self.payload_json, dict):
             payload_name = self.payload_json.get("schedule_name")
             if payload_name:
-                return str(payload_name)
+                return _operator_schedule_name(str(payload_name))
             payload_scope = self.payload_json.get("scope")
             if payload_scope == RunJob.SCOPE_ALL:
                 return "All companies (legacy)"
@@ -719,8 +730,40 @@ class RunScheduleEvent(models.Model):
                     return f"{payload_company} (legacy)"
                 return "Single company (legacy)"
         if self.run_job is not None and self.run_job.scheduled_by is not None:
-            return self.run_job.scheduled_by.name
+            return _operator_schedule_name(self.run_job.scheduled_by.name)
         return "-"
+
+    @property
+    def friendly_type_label(self) -> str:
+        labels = {
+            self.TYPE_QUEUED: "Run queued",
+            self.TYPE_RUN_SUCCEEDED: "Run succeeded",
+            self.TYPE_RUN_FAILED: "Run failed",
+            self.TYPE_SKIPPED_OVERLAP: "Run skipped",
+            self.TYPE_SKIPPED_INVALID: "Run skipped",
+            self.TYPE_ERROR: "Run failed",
+            self.TYPE_FALLBACK_ENABLED: "Schedule enabled",
+            self.TYPE_FALLBACK_DISABLED: "Schedule disabled",
+        }
+        return labels.get(self.event_type, self.get_event_type_display() or self.event_type)
+
+    @property
+    def friendly_message(self) -> str:
+        messages = {
+            self.TYPE_QUEUED: "Run queued",
+            self.TYPE_RUN_SUCCEEDED: "Run completed successfully",
+            self.TYPE_RUN_FAILED: "Run failed",
+            self.TYPE_SKIPPED_OVERLAP: "Skipped because another run is active",
+            self.TYPE_ERROR: "Run failed",
+            self.TYPE_FALLBACK_ENABLED: "Schedule enabled",
+            self.TYPE_FALLBACK_DISABLED: "Schedule is disabled",
+        }
+        if self.event_type == self.TYPE_SKIPPED_INVALID:
+            raw = (self.message or "").lower()
+            if "disabled" in raw:
+                return "Schedule is disabled"
+            return "Schedule is invalid"
+        return messages.get(self.event_type, self.message or self.friendly_type_label)
 
     def __str__(self) -> str:
         return f"{self.event_type} @ {self.created_at.isoformat() if self.created_at else '-'}"
@@ -796,3 +839,12 @@ class DashboardUserPreference(models.Model):
     class Meta:
         verbose_name = "Dashboard user preference"
         verbose_name_plural = "Dashboard user preferences"
+
+
+def _operator_schedule_name(name: str) -> str:
+    raw = (name or "").strip()
+    if raw == "All Companies Daily Run":
+        return "Daily Sales Sync"
+    if raw == "Legacy Env Fallback":
+        return "System Fallback Schedule"
+    return raw or "-"

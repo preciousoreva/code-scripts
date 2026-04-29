@@ -8,11 +8,11 @@
 {% endblock %}
 
 {% block content %}
-<div class="space-y-8" x-data="{ showCreate: false }">
+<div class="space-y-8" x-data="{ showCreate: false, createScope: '{{ all_scope }}' }">
     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
             <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Schedules</h1>
-            <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Manage cron-based run schedules and monitor scheduler events.</p>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Manage Sales and Inventory schedules.</p>
         </div>
         {% if perms.epos_qbo.can_manage_schedules %}
         <button type="button" @click="showCreate = !showCreate"
@@ -36,25 +36,36 @@
 
             <div>
                 <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Name</label>
-                <input type="text" name="name" required class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm" placeholder="Daily All Companies">
+                <input type="text" name="name" required class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm" placeholder="Daily Sales Sync">
             </div>
 
             <div>
-                <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Scope</label>
-                <select name="scope" class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm">
-                    <option value="{{ all_scope }}">All Companies</option>
-                    <option value="{{ single_scope }}">Single Company</option>
+                <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Workflow</label>
+                <select name="scope" x-model="createScope" class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm">
+                    <option value="{{ all_scope }}">Sales - all companies</option>
+                    <option value="{{ single_scope }}">Sales - single company</option>
+                    <option value="{{ inventory_scope }}">Inventory</option>
                 </select>
             </div>
 
-            <div>
-                <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Company (for single scope)</label>
+            <div x-show="createScope !== '{{ all_scope }}'" x-cloak>
+                <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Company</label>
                 <select name="company_key" class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm">
-                    <option value="">All companies</option>
+                    <option value="">Select company</option>
                     {% for company in companies %}
                     <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
                     {% endfor %}
                 </select>
+            </div>
+
+            <div x-show="createScope === '{{ inventory_scope }}'" x-cloak>
+                <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</label>
+                <input type="text" name="category" class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm" placeholder="ALCOHOLS &amp; SPIRITS">
+            </div>
+
+            <div x-show="createScope === '{{ inventory_scope }}'" x-cloak>
+                <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Product filter</label>
+                <input type="text" name="product_filter" class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm">
             </div>
 
             <div>
@@ -83,7 +94,7 @@
                     <input type="checkbox" name="enabled" checked class="rounded border-slate-300 dark:border-slate-600">
                     Enabled
                 </label>
-                <label class="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                <label class="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300" x-show="createScope === '{{ all_scope }}'">
                     <input type="checkbox" name="continue_on_failure" class="rounded border-slate-300 dark:border-slate-600">
                     Continue on failure (all-companies only)
                 </label>
@@ -160,30 +171,27 @@
                 </template>
             </div>
         </div>
-        {% if schedules %}
+        {% if schedule_rows %}
         <div class="overflow-x-auto">
             <table class="w-full text-sm min-w-max">
                 <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                     <tr>
-                        <th class="text-left px-4 py-3 font-medium">Schedule</th>
+                        <th class="text-left px-4 py-3 font-medium">Workflow</th>
                         <th class="text-left px-4 py-3 font-medium">Status</th>
-                        <th class="text-left px-4 py-3 font-medium">Cron / TZ</th>
-                        <th class="text-left px-4 py-3 font-medium">Next Fire</th>
+                        <th class="text-left px-4 py-3 font-medium">Schedule</th>
+                        <th class="text-left px-4 py-3 font-medium">Next Run</th>
                         <th class="text-left px-4 py-3 font-medium">Last Result</th>
                         <th class="text-center px-4 py-3 font-medium w-20">Actions</th>
                     </tr>
                 </thead>
                 <tbody x-data="{ openEditId: null }" @close-edit="openEditId = null" class="divide-y divide-slate-200 dark:divide-slate-700 text-slate-900 dark:text-slate-200">
-                    {% for schedule in schedules %}
+                    {% for row in schedule_rows %}
+                    {% with schedule=row.schedule %}
                     <tr>
                         <td class="px-4 py-3 align-top">
-                            <div class="font-medium text-slate-900 dark:text-slate-100">{{ schedule.name }}</div>
+                            <div class="font-medium text-slate-900 dark:text-slate-100">{{ row.display_name }}</div>
                             <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                                {% if schedule.scope == single_scope %}
-                                    Single company: {{ schedule.company_key|default:"-" }}
-                                {% else %}
-                                    All companies
-                                {% endif %}
+                                {{ row.subtitle }}
                             </div>
                         </td>
                         <td class="px-4 py-3 align-top">
@@ -194,20 +202,24 @@
                                 <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">Disabled</span>
                                 {% endif %}
                                 {% if schedule.is_system_managed %}
-                                <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
+                                <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
                                 {% endif %}
                             </div>
                         </td>
                         <td class="px-4 py-3 align-top">
-                            <div class="font-mono text-xs text-slate-800 dark:text-slate-200">{{ schedule.cron_expr }}</div>
+                            <div class="text-sm text-slate-800 dark:text-slate-200">{{ row.friendly_cron }}</div>
                             <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ schedule.timezone_name }}</div>
+                            <div class="font-mono text-[11px] text-slate-400 dark:text-slate-500 mt-1">Cron: {{ schedule.cron_expr }}</div>
                         </td>
                         <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
                             <div>{% if schedule.next_fire_at %}{{ schedule.next_fire_at|date:"Y-m-d H:i:s" }}{% else %}-{% endif %}</div>
-                            <div class="mt-1 text-slate-500">Last: {% if schedule.last_fired_at %}{{ schedule.last_fired_at|date:"Y-m-d H:i:s" }}{% else %}-{% endif %}</div>
                         </td>
                         <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
-                            <div>{{ schedule.last_result|default:"-" }}</div>
+                            <div>{{ row.last_result_label }}</div>
+                            <div class="mt-1 text-slate-500">Last run: {% if row.last_run_at %}{{ row.last_run_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</div>
+                            {% if row.current_status_label %}
+                            <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Current: {{ row.current_status_label }}</span>
+                            {% endif %}
                             {% if schedule.last_error %}
                             <div class="mt-1 text-red-600 dark:text-red-400">{{ schedule.last_error|truncatechars:80 }}</div>
                             {% endif %}
@@ -240,7 +252,7 @@
                                                 {% if schedule.enabled %}Disable{% else %}Enable{% endif %}
                                             </button>
                                         </form>
-                                        <form method="post" action="{% url 'epos_qbo:schedule-delete' schedule.id %}" class="block" onsubmit="return confirm('Delete schedule &quot;{{ schedule.name|escapejs }}&quot;? This cannot be undone.');">
+                                        <form method="post" action="{% url 'epos_qbo:schedule-delete' schedule.id %}" class="block" onsubmit="return confirm('Delete schedule &quot;{{ row.display_name|escapejs }}&quot;? This cannot be undone.');">
                                             {% csrf_token %}
                                             <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
                                         </form>
@@ -260,23 +272,32 @@
                                 <input type="hidden" name="target_date_mode" value="{{ schedule_target_date_mode }}">
                                 <div>
                                     <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Name</label>
-                                    <input type="text" name="name" value="{{ schedule.name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                    <input type="text" name="name" value="{{ row.display_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
                                 </div>
                                 <div>
-                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Scope</label>
+                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Workflow</label>
                                     <select name="scope" @change="scope = $event.target.value" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                        <option value="{{ all_scope }}" {% if schedule.scope == all_scope %}selected{% endif %}>All companies</option>
-                                        <option value="{{ single_scope }}" {% if schedule.scope == single_scope %}selected{% endif %}>Single company</option>
+                                        <option value="{{ all_scope }}" {% if schedule.scope == all_scope %}selected{% endif %}>Sales - all companies</option>
+                                        <option value="{{ single_scope }}" {% if schedule.scope == single_scope %}selected{% endif %}>Sales - single company</option>
+                                        <option value="{{ inventory_scope }}" {% if schedule.scope == inventory_scope %}selected{% endif %}>Inventory</option>
                                     </select>
                                 </div>
-                                <div x-show="scope === '{{ single_scope }}'" x-cloak class="md:col-span-2">
-                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company (when single scope)</label>
+                                <div x-show="scope !== '{{ all_scope }}'" x-cloak class="md:col-span-2">
+                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company</label>
                                     <select name="company_key" class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
                                         <option value="">—</option>
                                         {% for company in companies %}
                                         <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
                                         {% endfor %}
                                     </select>
+                                </div>
+                                <div x-show="scope === '{{ inventory_scope }}'" x-cloak>
+                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Category</label>
+                                    <input type="text" name="category" value="{{ row.category }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                </div>
+                                <div x-show="scope === '{{ inventory_scope }}'" x-cloak>
+                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Product filter</label>
+                                    <input type="text" name="product_filter" value="{{ row.product_filter }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
                                 </div>
                                 <div class="md:col-span-2">
                                     <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Cron</label>
@@ -301,7 +322,7 @@
                                     <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
                                         <input type="checkbox" name="enabled" {% if schedule.enabled %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Enabled
                                     </label>
-                                    <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                                    <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200" x-show="scope === '{{ all_scope }}'">
                                         <input type="checkbox" name="continue_on_failure" {% if schedule.continue_on_failure %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Continue on failure
                                     </label>
                                     <div class="flex gap-2 ml-auto">
@@ -313,6 +334,7 @@
                         </td>
                     </tr>
                     {% endif %}
+                    {% endwith %}
                     {% endfor %}
                 </tbody>
             </table>
@@ -324,7 +346,7 @@
 
     <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-sm overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-600">
-            <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">Recent Scheduled Events</h2>
+            <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">Recent Schedule Activity</h2>
             <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Latest scheduler activity</p>
         </div>
         {% if recent_events %}
@@ -345,15 +367,17 @@
                         <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-400 whitespace-nowrap">{{ event.created_at|date:"Y-m-d H:i:s" }}</td>
                         <td class="px-4 py-3">
                             {% if event.event_type == 'queued' %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Queued</span>
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">{{ event.friendly_type_label }}</span>
                             {% elif event.event_type == 'run_succeeded' %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300">Run Succeeded</span>
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300">{{ event.friendly_type_label }}</span>
                             {% elif event.event_type == 'run_failed' or event.event_type == 'error' %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300">{{ event.get_event_type_display }}</span>
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300">{{ event.friendly_type_label }}</span>
                             {% elif event.event_type == 'fallback_enabled' or event.event_type == 'fallback_disabled' %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">{{ event.get_event_type_display }}</span>
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">{{ event.friendly_type_label }}</span>
+                            {% elif event.event_type == 'skipped_overlap' or event.event_type == 'skipped_invalid' %}
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300">{{ event.friendly_type_label }}</span>
                             {% else %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300">{{ event.get_event_type_display|default:event.event_type }}</span>
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300">{{ event.friendly_type_label }}</span>
                             {% endif %}
                         </td>
                         <td class="px-4 py-3 text-slate-700 dark:text-slate-200">{{ event.resolved_schedule_name|default:"-" }}</td>
@@ -375,7 +399,7 @@
                             <span class="text-slate-400 dark:text-slate-500">—</span>
                             {% endif %}
                         </td>
-                        <td class="px-4 py-3 text-xs text-slate-600 dark:text-slate-400 max-w-sm">{{ event.message|default:"—" }}</td>
+                        <td class="px-4 py-3 text-xs text-slate-600 dark:text-slate-400 max-w-sm">{{ event.friendly_message|default:"—" }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>

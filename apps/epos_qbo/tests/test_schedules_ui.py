@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 from django.contrib.auth.models import Permission, User
@@ -73,6 +73,143 @@ class SchedulesUiTests(TestCase):
         response = self.client.post(reverse("epos_qbo:schedule-delete", args=[schedule.id]))
         self.assertEqual(response.status_code, 302)
         self.assertFalse(RunSchedule.objects.filter(id=schedule.id).exists())
+
+    def test_create_inventory_schedule_persists_inventory_options(self):
+        payload = self._create_payload()
+        payload.update(
+            {
+                "name": "Weekly Inventory Sync",
+                "enabled": "",
+                "scope": RunJob.SCOPE_INVENTORY_PIPELINE,
+                "company_key": "company_a",
+                "cron_expr": "0 20 * * 0",
+                "timezone_name": "Africa/Lagos",
+                "parallel": "2",
+                "stagger_seconds": "2",
+                "continue_on_failure": "on",
+                "category": "ALCOHOLS & SPIRITS",
+                "product_filter": "TROPHY",
+            }
+        )
+
+        response = self.client.post(reverse("epos_qbo:schedule-create"), payload)
+
+        self.assertEqual(response.status_code, 302)
+        schedule = RunSchedule.objects.filter(name="Weekly Inventory Sync").order_by("-created_at").first()
+        assert schedule is not None
+        self.assertFalse(schedule.enabled)
+        self.assertEqual(schedule.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
+        self.assertEqual(schedule.company_key, "company_a")
+        self.assertEqual(
+            schedule.inventory_options_json,
+            {"categories": ["ALCOHOLS & SPIRITS"], "product_filter": "TROPHY"},
+        )
+        self.assertEqual(schedule.parallel, 1)
+        self.assertFalse(schedule.continue_on_failure)
+
+    def test_schedules_page_uses_operator_friendly_schedule_wording(self):
+        RunSchedule.objects.create(
+            name="All Companies Daily Run",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            next_fire_at=self.fixed_now + timedelta(hours=1),
+        )
+        RunSchedule.objects.create(
+            name="Legacy Env Fallback",
+            enabled=False,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 18 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            is_system_managed=True,
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Daily Sales Sync")
+        self.assertNotContains(response, "All Companies Daily Run")
+        self.assertContains(response, "System Fallback Schedule")
+        self.assertContains(response, "Legacy environment configuration")
+        self.assertContains(response, "System-managed")
+        self.assertNotContains(response, "Legacy Env Fallback")
+        self.assertContains(response, "Daily at 19:00")
+        self.assertContains(response, "Next Run")
+        self.assertNotContains(response, "Next Fire")
+        self.assertNotContains(response, "Cron / TZ")
+        self.assertContains(response, "Recent Schedule Activity")
+        self.assertNotContains(response, "Recent Scheduled Events")
+
+    def test_last_result_uses_latest_terminal_event_not_queued(self):
+        schedule = RunSchedule.objects.create(
+            name="Daily Sales Sync",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_ALL,
+            status=RunJob.STATUS_SUCCEEDED,
+            scheduled_by=schedule,
+            finished_at=self.fixed_now,
+        )
+        RunScheduleEvent.objects.create(
+            schedule=schedule,
+            run_job=job,
+            event_type=RunScheduleEvent.TYPE_QUEUED,
+            message="Run queued (worker).",
+            payload_json={"schedule_name": schedule.name},
+        )
+        RunScheduleEvent.objects.create(
+            schedule=schedule,
+            run_job=job,
+            event_type=RunScheduleEvent.TYPE_RUN_SUCCEEDED,
+            message="Run completed with status=succeeded exit_code=0",
+            payload_json={"schedule_name": schedule.name},
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Succeeded")
+        self.assertContains(response, "Last run:")
+        self.assertContains(response, "Run completed successfully")
+        self.assertContains(response, "Run queued")
+        self.assertNotContains(response, "status=succeeded exit_code=0")
+
+    def test_recent_events_render_friendly_type_and_message(self):
+        schedule = RunSchedule.objects.create(
+            name="Daily Sales Sync",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+        RunScheduleEvent.objects.create(
+            schedule=schedule,
+            event_type=RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
+            message="Skipped worker enqueue because this schedule already has a queued/running run.",
+        )
+        RunScheduleEvent.objects.create(
+            schedule=schedule,
+            event_type=RunScheduleEvent.TYPE_RUN_FAILED,
+            message="Run completed with status=failed exit_code=1",
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Run skipped")
+        self.assertContains(response, "Skipped because another run is active")
+        self.assertContains(response, "Run failed")
+        self.assertNotContains(response, "queued/running")
+        self.assertNotContains(response, "exit_code=1")
 
     @mock.patch("apps.epos_qbo.views.dispatch_next_queued_job")
     @mock.patch("apps.epos_qbo.services.schedule_worker.get_target_trading_date")

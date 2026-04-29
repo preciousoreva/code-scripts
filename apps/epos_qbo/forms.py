@@ -156,6 +156,17 @@ class CompanyAdvancedForm(forms.Form):
 
 
 class RunScheduleForm(forms.ModelForm):
+    category = forms.CharField(
+        max_length=255,
+        required=False,
+        help_text="Optional EPOS category filter for inventory schedules.",
+    )
+    product_filter = forms.CharField(
+        max_length=255,
+        required=False,
+        help_text="Optional EPOS product filter for inventory schedules.",
+    )
+
     class Meta:
         model = RunSchedule
         fields = [
@@ -176,13 +187,28 @@ class RunScheduleForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["scope"].choices = RunJob.SCOPE_CHOICES
+        self.fields["scope"].choices = [
+            (RunJob.SCOPE_ALL, "Sales - all companies"),
+            (RunJob.SCOPE_SINGLE, "Sales - single company"),
+            (RunJob.SCOPE_INVENTORY_PIPELINE, "Inventory"),
+        ]
         self.fields["target_date_mode"].initial = RunSchedule.TARGET_DATE_MODE_TRADING_DATE
         self.fields["timezone_name"].initial = self.initial.get("timezone_name") or _default_schedule_timezone()
         self.fields["parallel"].min_value = 1
         self.fields["stagger_seconds"].min_value = 0
         self.fields["parallel"].initial = self.initial.get("parallel", portal_settings.get_default_parallel())
         self.fields["stagger_seconds"].initial = self.initial.get("stagger_seconds", portal_settings.get_default_stagger_seconds())
+        if self.instance and self.instance.pk:
+            opts = self.instance.inventory_options_json if isinstance(self.instance.inventory_options_json, dict) else {}
+            categories = opts.get("categories") or []
+            if isinstance(categories, str):
+                category = categories
+            elif isinstance(categories, list) and categories:
+                category = str(categories[0] or "")
+            else:
+                category = ""
+            self.fields["category"].initial = category
+            self.fields["product_filter"].initial = str(opts.get("product_filter") or "")
 
     def clean_cron_expr(self) -> str:
         value = (self.cleaned_data.get("cron_expr") or "").strip()
@@ -212,13 +238,27 @@ class RunScheduleForm(forms.ModelForm):
         cleaned = super().clean()
         scope = cleaned.get("scope")
         company_key = (cleaned.get("company_key") or "").strip()
+        category = (cleaned.get("category") or "").strip()
+        product_filter = (cleaned.get("product_filter") or "").strip()
+        cleaned["category"] = category
+        cleaned["product_filter"] = product_filter
 
         if scope == RunJob.SCOPE_SINGLE and not company_key:
             self.add_error("company_key", "Company key is required for single-company schedules.")
+        if scope == RunJob.SCOPE_INVENTORY_PIPELINE and not company_key:
+            self.add_error("company_key", "Company key is required for inventory schedules.")
 
         if scope == RunJob.SCOPE_ALL:
             cleaned["company_key"] = None
-        else:
+            cleaned["category"] = ""
+            cleaned["product_filter"] = ""
+        elif scope == RunJob.SCOPE_SINGLE:
+            cleaned["company_key"] = company_key
+            cleaned["parallel"] = 1
+            cleaned["continue_on_failure"] = False
+            cleaned["category"] = ""
+            cleaned["product_filter"] = ""
+        elif scope == RunJob.SCOPE_INVENTORY_PIPELINE:
             cleaned["company_key"] = company_key
             cleaned["parallel"] = 1
             cleaned["continue_on_failure"] = False
@@ -232,6 +272,24 @@ class RunScheduleForm(forms.ModelForm):
 
         cleaned["target_date_mode"] = RunSchedule.TARGET_DATE_MODE_TRADING_DATE
         return cleaned
+
+    def save(self, commit=True):
+        instance: RunSchedule = super().save(commit=False)
+        if instance.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+            opts: dict[str, object] = {}
+            category = (self.cleaned_data.get("category") or "").strip()
+            product_filter = (self.cleaned_data.get("product_filter") or "").strip()
+            if category:
+                opts["categories"] = [category]
+            if product_filter:
+                opts["product_filter"] = product_filter
+            instance.inventory_options_json = opts
+        else:
+            instance.inventory_options_json = {}
+        if commit:
+            instance.save()
+            self.save_m2m()
+        return instance
 
 
 # Tailwind classes for form inputs on Settings page (light + dark, so fields are clearly visible)

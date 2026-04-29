@@ -16,7 +16,7 @@ from django.utils import timezone
 from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 
 from .. import portal_settings
-from ..models import RunJob, RunLock, RunScheduleEvent
+from ..models import RunJob, RunLock, RunSchedule, RunScheduleEvent
 from .artifact_ingestion import attach_recent_artifacts_to_job
 from .locking import release_run_lock
 
@@ -274,16 +274,19 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
                     if job.status == RunJob.STATUS_SUCCEEDED
                     else RunScheduleEvent.TYPE_RUN_FAILED
                 )
-                message = (
-                    f"Run completed with status={job.status} exit_code={exit_code}"
-                    if exit_code is not None
-                    else f"Run completed with status={job.status}"
-                )
+                message = "Run completed successfully" if job.status == RunJob.STATUS_SUCCEEDED else "Run failed"
                 payload_json = {
                     "status": job.status,
                     "exit_code": exit_code,
                 }
                 if schedule is not None:
+                    if job.status == RunJob.STATUS_SUCCEEDED:
+                        schedule.last_result = RunSchedule.LAST_RESULT_SUCCEEDED
+                        schedule.last_error = ""
+                    else:
+                        schedule.last_result = RunSchedule.LAST_RESULT_FAILED
+                        schedule.last_error = job.failure_reason or "Run failed."
+                    schedule.save(update_fields=["last_result", "last_error", "updated_at"])
                     payload_json["schedule_id"] = str(schedule.id)
                     payload_json["schedule_name"] = schedule.name
                 RunScheduleEvent.objects.create(

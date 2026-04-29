@@ -217,6 +217,38 @@ class StartRunJobEnvTests(TestCase):
         self.assertIn("OIAT_RUN_STARTED_AT", env)
         self.assertEqual(env["OIAT_PORTAL_BASE_URL"], "https://portal.example.com")
 
+    @override_settings(OIAT_PORTAL_BASE_URL="https://portal.example.com")
+    @patch("apps.epos_qbo.services.job_runner.threading.Thread")
+    @patch("apps.epos_qbo.services.job_runner.subprocess.Popen")
+    def test_scheduled_inventory_start_sets_run_metadata_env(self, popen_mock, thread_mock):
+        popen_mock.return_value.pid = 12345
+        thread_mock.return_value.start.return_value = None
+        schedule = RunSchedule.objects.create(
+            name="Weekly Inventory Sync",
+            enabled=False,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            cron_expr="0 20 * * 0",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            scheduled_by=schedule,
+        )
+
+        with patch("builtins.open", create=True) as open_mock:
+            open_mock.return_value = Mock()
+            start_run_job(job, ["python", "-m", "code_scripts.inventory_pipeline"])
+
+        _, kwargs = popen_mock.call_args
+        env = kwargs["env"]
+        self.assertEqual(env["OIAT_RUN_JOB_ID"], str(job.id))
+        self.assertEqual(env["OIAT_RUN_SCOPE"], RunJob.SCOPE_INVENTORY_PIPELINE)
+        self.assertIn("OIAT_RUN_STARTED_AT", env)
+        self.assertEqual(env["OIAT_PORTAL_BASE_URL"], "https://portal.example.com")
+
     @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
     @patch("apps.epos_qbo.services.job_runner.release_run_lock")
     @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
@@ -280,8 +312,11 @@ class StartRunJobEnvTests(TestCase):
         self.assertIsNotNone(event)
         assert event is not None
         self.assertEqual(event.event_type, RunScheduleEvent.TYPE_RUN_SUCCEEDED)
+        self.assertEqual(event.message, "Run completed successfully")
         self.assertEqual(event.payload_json.get("status"), RunJob.STATUS_SUCCEEDED)
         self.assertEqual(event.payload_json.get("schedule_name"), schedule.name)
         self.assertEqual(event.payload_json.get("schedule_id"), str(schedule.id))
+        schedule.refresh_from_db()
+        self.assertEqual(schedule.last_result, RunSchedule.LAST_RESULT_SUCCEEDED)
         release_run_lock_mock.assert_called_once()
         dispatch_next_queued_job_mock.assert_called_once_with()

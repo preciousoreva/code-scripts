@@ -66,6 +66,15 @@ python -m code_scripts.inventory_pipeline \
   --category "ALCOHOLS & SPIRITS"
 ```
 
+## Scheduling
+
+Inventory Sync can be scheduled weekly or bi-weekly from the portal Schedules page.
+Run Sales first, then Inventory after the Sales automation has had time to finish.
+Inventory is a live EPOS stock correction snapshot, not a trading-day sales posting.
+
+Suggested timing: if the Sunday Sales sync runs at 19:00 Africa/Lagos, schedule
+Inventory for 20:00 or 20:30 Africa/Lagos on Sunday.
+
 ## Reports
 
 Pipeline summaries are written under:
