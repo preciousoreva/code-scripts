@@ -20,6 +20,7 @@ from code_scripts.inventory_sync import (
     _collapse_spaces,
     _time_stamp,
     fetch_qbo_inventory_items_snapshot,
+    literal_product_filter_mask,
     load_epos_stock_snapshot,
     load_qbo_inventory_item_rows,
     load_qbo_inventory_snapshot,
@@ -534,13 +535,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         audit_df = _read_inventory_report(report_path)
         source_inventory_report = str(report_path)
         if args.product_filter:
-            needle = str(args.product_filter).strip().lower()
-            audit_df = audit_df[
-                audit_df["base_name"]
-                .astype(str)
-                .str.lower()
-                .str.contains(needle, na=False, regex=False)
-            ].copy()
+            audit_df = audit_df[literal_product_filter_mask(audit_df, args.product_filter)].copy()
         qbo_path = Path(args.qbo_csv).expanduser() if args.qbo_csv else _default_qbo_snapshot_path(cfg.company_key)
         if args.auto_fetch_qbo and not args.qbo_csv:
             qbo_path = fetch_qbo_inventory_items_snapshot(

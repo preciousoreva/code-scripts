@@ -228,6 +228,42 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertIn("Catalog fixes limit: 1", msg)
         self.assertIn("Quantity updates limit: 2", msg)
 
+    def test_product_filter_with_pack_multiplier_runs_real_audit_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stock_path = root / "goldberg_stock.csv"
+            stock_path.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS & SPIRITS,2\n",
+                encoding="utf-8",
+            )
+            qbo_path = root / "qbo.csv"
+            qbo_path.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "99,GOLDBERG CAN 50cl*24,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            cfg = self._cfg()
+            with mock.patch.object(inventory_pipeline, "load_company_config", return_value=cfg), \
+                 mock.patch.object(inventory_pipeline, "ensure_company_runtime_compatible"), \
+                 mock.patch.object(inventory_pipeline, "_resolve_qbo_snapshot", return_value=qbo_path), \
+                 mock.patch.object(inventory_pipeline, "_catalog_output_path", return_value=root / "catalog.csv"), \
+                 mock.patch.object(inventory_pipeline, "_run_apply_for_existing_base_pack_variants") as cleanup_mock:
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(
+                        td,
+                        stock_csv=str(stock_path),
+                        product_filter="GOLDBERG CAN 50cl*24",
+                        categories=["ALCOHOLS & SPIRITS"],
+                    )
+                )
+
+        cleanup_mock.assert_not_called()
+        self.assertEqual(summary["products_checked"], 1)
+        self.assertEqual(summary["catalog_fixes_applied"], 0)
+        self.assertEqual(summary["quantity_updates_applied"], 0)
+        self.assertEqual(summary["unsupported_catalog_issues"]["only_pack_variant_exists"], 1)
+
     def test_dry_run_passes_dry_flags_and_reports_no_writes(self):
         with tempfile.TemporaryDirectory() as td:
             qbo_path = Path(td) / "qbo.csv"

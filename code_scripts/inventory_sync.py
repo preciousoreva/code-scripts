@@ -113,6 +113,37 @@ def _join_unique_non_blank(series: Iterable[Any]) -> str:
     return " | ".join(seen)
 
 
+def literal_product_filter_mask(
+    df: pd.DataFrame,
+    product_filter: str | None,
+    *,
+    base_col: str = "base_name",
+    raw_col: str | None = None,
+) -> pd.Series:
+    """Match operator product filters as literal text, not regex patterns."""
+    if not product_filter:
+        return pd.Series([True] * len(df), index=df.index)
+
+    raw_needle = _collapse_spaces(str(product_filter).strip()).lower()
+    needles = [raw_needle] if raw_needle else []
+    base_needle, _ = strip_pack_multiplier(raw_needle)
+    base_needle = _collapse_spaces(base_needle).lower()
+    if base_needle and base_needle not in needles:
+        needles.append(base_needle)
+
+    mask = pd.Series([False] * len(df), index=df.index)
+    columns = [base_col]
+    if raw_col:
+        columns.append(raw_col)
+    for column in columns:
+        if column not in df.columns:
+            continue
+        values = df[column].fillna("").astype(str).map(_collapse_spaces).str.lower()
+        for needle in needles:
+            mask = mask | values.str.contains(needle, na=False, regex=False)
+    return mask
+
+
 @dataclass(frozen=True)
 class AuditRow:
     base_name: str
@@ -539,8 +570,7 @@ def load_epos_stock_snapshot(
         out = out[out["category_name"].str.lower().isin(requested)].copy()
 
     if product_filter:
-        needle = product_filter.strip().lower()
-        out = out[out["base_name"].str.lower().str.contains(needle, na=False)].copy()
+        out = out[literal_product_filter_mask(out, product_filter, raw_col="raw_name")].copy()
 
     # Group to base_name (base-only, single units)
     grouped = (
@@ -734,7 +764,7 @@ def build_audit_report(
             return "ambiguous_in_qbo"
         return "needs_adjustment"
 
-    merged["status"] = merged.apply(classify, axis=1)
+    merged["status"] = [str(classify(row)) for _, row in merged.iterrows()]
 
     def _catalog_type(row: pd.Series) -> str:
         if row["qbo_item_count_for_base"] <= 0:
@@ -747,7 +777,7 @@ def build_audit_report(
             return "base_with_pack_variants"
         return "exact_name_match"
 
-    merged["catalog_issue_type"] = merged.apply(_catalog_type, axis=1)
+    merged["catalog_issue_type"] = [str(_catalog_type(row)) for _, row in merged.iterrows()]
 
     def _catalog_detail(row: pd.Series) -> str:
         t = str(row.get("catalog_issue_type") or "")
@@ -777,8 +807,8 @@ def build_audit_report(
             return "create inventory item in QuickBooks using standard item creation logic"
         return ""
 
-    merged["catalog_issue_detail"] = merged.apply(_catalog_detail, axis=1)
-    merged["suggested_next_action"] = merged.apply(_suggested_action, axis=1)
+    merged["catalog_issue_detail"] = [str(_catalog_detail(row)) for _, row in merged.iterrows()]
+    merged["suggested_next_action"] = [str(_suggested_action(row)) for _, row in merged.iterrows()]
 
     cols = [
         "base_name",
@@ -1042,8 +1072,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         candidates = report[report["status"] == "needs_adjustment"].copy()
     if args.product_filter:
-        needle = args.product_filter.strip().lower()
-        candidates = candidates[candidates["base_name"].str.lower().str.contains(needle, na=False)].copy()
+        candidates = candidates[literal_product_filter_mask(candidates, args.product_filter)].copy()
 
     if candidates.empty:
         print("[INFO] No applicable rows to adjust (needs_adjustment/ambiguous with --allow-ambiguous).")

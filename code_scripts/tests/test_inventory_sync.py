@@ -1065,6 +1065,112 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertIn("GOLDBERG CAN 50cl*6", row["catalog_issue_detail"])
         self.assertIn("consolidation and cleanup", row["suggested_next_action"])
 
+    def test_product_filter_treats_pack_multiplier_as_literal_text(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,2\n"
+                "OTHER ITEM,ALCOHOLS,7\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="GOLDBERG CAN 50cl*24",
+            )
+
+        self.assertEqual(len(epos), 1)
+        row = epos.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "GOLDBERG CAN 50cl")
+        self.assertEqual(row["epos_single_units"], 48)
+
+    def test_product_filter_with_regex_chars_is_literal_text(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "SPECIAL (CAN)+[TEST]*24,ALCOHOLS,1\n"
+                "SPECIAL CAN TEST,ALCOHOLS,9\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="SPECIAL (CAN)+[TEST]*24",
+            )
+
+        self.assertEqual(len(epos), 1)
+        self.assertEqual(epos.iloc[0]["base_name"], "SPECIAL (CAN)+[TEST]")
+        self.assertEqual(epos.iloc[0]["epos_single_units"], 24)
+
+    def test_catalog_issue_classification_with_one_pack_multiplier_row(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,2\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "99,GOLDBERG CAN 50cl*24,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="GOLDBERG CAN 50cl*24",
+            )
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        self.assertEqual(len(report), 1)
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "GOLDBERG CAN 50cl")
+        self.assertEqual(row["catalog_issue_type"], "only_pack_variant_exists")
+        self.assertIsInstance(row["catalog_issue_type"], str)
+        self.assertIn("GOLDBERG CAN 50cl*24", row["catalog_issue_detail"])
+
+    def test_empty_product_filter_result_keeps_scalar_catalog_columns(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "GOLDBERG CAN 50cl*24,ALCOHOLS,2\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
+                "99,GOLDBERG CAN 50cl*24,Inventory,true,1\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                product_filter="NOT PRESENT * [x]",
+            )
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        self.assertTrue(report.empty)
+        self.assertIn("catalog_issue_type", report.columns)
+        self.assertIn("catalog_issue_detail", report.columns)
+
     def test_catalog_issue_classification_missing_from_qbo(self):
         import tempfile
         from pathlib import Path
