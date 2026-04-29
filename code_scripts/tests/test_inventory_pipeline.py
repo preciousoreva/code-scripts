@@ -206,6 +206,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                 "missing_from_qbo": 1,
                 "multiple_active_base_items": 0,
             },
+            "blocked_catalog_examples": [],
             "max_catalog_fixes": None,
             "max_quantity_adjustments": None,
             "summary_json": "/tmp/report.json",
@@ -215,11 +216,13 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
 
     def test_final_summary_omits_limits_when_unlimited(self):
         msg = inventory_pipeline._format_final_summary(self._summary_payload())
-        self.assertIn("Skipped unsupported: 2", msg)
-        self.assertIn("Only pack variant exists: 1", msg)
-        self.assertIn("Missing from QuickBooks: 1", msg)
+        self.assertIn("Blocked items: 2", msg)
+        self.assertIn("Missing base item in QBO: 1", msg)
+        self.assertIn("Duplicate base items in QBO: 0", msg)
         self.assertNotIn("Catalog fixes limit:", msg)
         self.assertNotIn("Quantity updates limit:", msg)
+        self.assertNotIn("only_pack_variant_exists", msg)
+        self.assertNotIn("multiple_active_base_items", msg)
 
     def test_final_summary_includes_limits_when_explicit(self):
         msg = inventory_pipeline._format_final_summary(
@@ -227,6 +230,48 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         )
         self.assertIn("Catalog fixes limit: 1", msg)
         self.assertIn("Quantity updates limit: 2", msg)
+
+    def test_final_summary_includes_blocked_examples_when_blocked_count_is_small(self):
+        msg = inventory_pipeline._format_final_summary(
+            self._summary_payload(
+                skipped_unsupported=2,
+                blocked_catalog_examples=[
+                    "BACARDI WHITE RUM 750ml — QBO only has pack variant BACARDI WHITE RUM 750ml*12",
+                    "SMIRNOFF ICE DOUBLE BLACK CAN 330ml — multiple active base items in QBO",
+                ],
+            )
+        )
+        self.assertIn("Blocked examples:", msg)
+        self.assertIn("BACARDI WHITE RUM 750ml", msg)
+        self.assertIn("SMIRNOFF ICE DOUBLE BLACK CAN 330ml", msg)
+        self.assertNotIn("only_pack_variant_exists", msg)
+
+    def test_write_summary_reports_includes_blocked_fields_in_csv_and_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            summary = self._summary_payload(
+                skipped_unsupported=2,
+                unsupported_catalog_issues={
+                    "only_pack_variant_exists": 1,
+                    "multiple_active_base_items": 1,
+                },
+                blocked_catalog_examples=[
+                    "BACARDI WHITE RUM 750ml — QBO only has pack variant BACARDI WHITE RUM 750ml*12",
+                ],
+            )
+            json_path, csv_path = inventory_pipeline._write_summary_reports(summary, output_dir=td)
+            payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["blocked_catalog_examples"][0],
+                "BACARDI WHITE RUM 750ml — QBO only has pack variant BACARDI WHITE RUM 750ml*12",
+            )
+
+            csv_rows = pd.read_csv(csv_path).to_dict(orient="records")
+            self.assertEqual(len(csv_rows), 1)
+            row = csv_rows[0]
+            self.assertEqual(int(row["blocked_items"]), 2)
+            self.assertEqual(int(row["missing_base_item_in_qbo"]), 1)
+            self.assertEqual(int(row["duplicate_base_items_in_qbo"]), 1)
+            self.assertIn("BACARDI WHITE RUM 750ml", str(row["blocked_examples"]))
 
     def test_product_filter_with_pack_multiplier_runs_real_audit_path(self):
         with tempfile.TemporaryDirectory() as td:

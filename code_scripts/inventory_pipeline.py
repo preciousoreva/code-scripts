@@ -458,10 +458,13 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
     row = {
         "company_key": payload.get("company_key"),
         "products_checked": payload.get("products_checked"),
-        "already_correct": payload.get("already_correct"),
+        "products_clean": payload.get("already_correct"),
         "catalog_fixes_applied": payload.get("catalog_fixes_applied"),
         "quantity_updates_applied": payload.get("quantity_updates_applied"),
-        "skipped_unsupported": payload.get("skipped_unsupported"),
+        "blocked_items": payload.get("skipped_unsupported"),
+        "missing_base_item_in_qbo": int((payload.get("unsupported_catalog_issues") or {}).get("only_pack_variant_exists", 0) or 0),
+        "duplicate_base_items_in_qbo": int((payload.get("unsupported_catalog_issues") or {}).get("multiple_active_base_items", 0) or 0),
+        "blocked_examples": " | ".join([str(x) for x in (payload.get("blocked_catalog_examples") or [])]),
         "skipped_safely": payload.get("skipped_safely"),
         "still_needs_review": payload.get("still_needs_review"),
         "summary_json": str(json_path),
@@ -485,15 +488,19 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
         f"Inventory sync finished for {summary['display_name']} ({summary['company_key']})",
         f"Scope: {summary['scope'] or 'all products'}",
         f"Products checked: {summary['products_checked']}",
-        f"Already correct: {summary['already_correct']}",
+        f"In sync / Products clean: {summary['already_correct']}",
         f"Catalog fixes applied: {summary['catalog_fixes_applied']}",
         f"Quantity updates applied: {summary['quantity_updates_applied']}",
-        f"Skipped unsupported: {summary['skipped_unsupported']}",
+        f"Blocked items: {summary['skipped_unsupported']}",
+        f"Missing base item in QBO: {int((summary.get('unsupported_catalog_issues') or {}).get('only_pack_variant_exists', 0) or 0)}",
+        f"Duplicate base items in QBO: {int((summary.get('unsupported_catalog_issues') or {}).get('multiple_active_base_items', 0) or 0)}",
         f"Still needs review: {summary['still_needs_review']}",
     ]
-    unsupported_line = _format_unsupported_breakdown(summary.get("unsupported_catalog_issues") or {})
-    if unsupported_line:
-        lines.append(f"Unsupported breakdown: {unsupported_line}")
+    blocked_examples = [str(x) for x in (summary.get("blocked_catalog_examples") or []) if str(x).strip()]
+    if blocked_examples and int(summary.get("skipped_unsupported", 0) or 0) <= 10:
+        lines.append("Blocked examples:")
+        for example in blocked_examples:
+            lines.append(f"- {example}")
     if summary.get("max_catalog_fixes") is not None:
         lines.append(f"Catalog fixes limit: {summary['max_catalog_fixes']}")
     if summary.get("max_quantity_adjustments") is not None:
@@ -506,10 +513,10 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
 
 def _format_unsupported_breakdown(unsupported_counts: dict[str, Any]) -> str:
     labels = {
-        "base_with_pack_variants": "Unsupported pack-variant action",
-        "only_pack_variant_exists": "Only pack variant exists",
-        "missing_from_qbo": "Missing from QuickBooks",
-        "multiple_active_base_items": "Multiple base items",
+        "base_with_pack_variants": "Blocked pack-variant action",
+        "only_pack_variant_exists": "Missing base item in QBO",
+        "missing_from_qbo": "Missing base item in QBO",
+        "multiple_active_base_items": "Duplicate base items in QBO",
     }
     parts: list[str] = []
     for key, raw_value in unsupported_counts.items():
@@ -521,6 +528,33 @@ def _format_unsupported_breakdown(unsupported_counts: dict[str, Any]) -> str:
             continue
         parts.append(f"{labels.get(str(key), str(key))}: {value}")
     return "; ".join(parts)
+
+
+def _blocked_example_reason(row: pd.Series) -> str:
+    issue = str(row.get("catalog_issue_type") or "").strip()
+    if issue == "only_pack_variant_exists":
+        pack = str(row.get("qbo_pack_variant_names_for_base") or "").strip()
+        return f"QBO only has pack variant {pack}" if pack else "QBO only has pack variants"
+    if issue == "multiple_active_base_items":
+        return "multiple active base items in QBO"
+    return str(row.get("catalog_issue_detail") or "").strip() or "requires manual review"
+
+
+def _collect_blocked_catalog_examples(report: pd.DataFrame, *, max_examples: int = 10) -> list[str]:
+    if report.empty or "catalog_issue_type" not in report.columns:
+        return []
+    blocked_types = {"only_pack_variant_exists", "multiple_active_base_items", "missing_from_qbo"}
+    blocked = report[report["catalog_issue_type"].astype(str).isin(blocked_types)]
+    examples: list[str] = []
+    for _, row in blocked.iterrows():
+        if len(examples) >= max_examples:
+            break
+        base_name = str(row.get("base_name") or "").strip()
+        if not base_name:
+            continue
+        reason = _blocked_example_reason(row)
+        examples.append(f"{base_name} — {reason}")
+    return examples
 
 
 def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
@@ -637,6 +671,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         + int(quantity_result["skipped_due_to_cap"])
     )
     still_needs_review = int(counts.get("ambiguous_in_qbo", 0)) + int(counts.get("missing_in_qbo", 0))
+    blocked_examples = _collect_blocked_catalog_examples(final.report, max_examples=10)
 
     summary: dict[str, Any] = {
         "run_type": "inventory_pipeline",
@@ -658,6 +693,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "still_needs_review": int(still_needs_review),
         "final_status_counts": counts,
         "unsupported_catalog_issues": catalog_result["unsupported_counts"],
+        "blocked_catalog_examples": blocked_examples,
         "quantity_adjustment_stats": quantity_result,
         "child_reports": child_reports,
         "finished_at": _now_utc_iso(),
