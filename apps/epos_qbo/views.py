@@ -465,6 +465,235 @@ def _run_activity_status(latest_job: RunJob | None) -> str:
     return "idle"
 
 
+def _run_status_time(job: RunJob | None):
+    if not job:
+        return None
+    return job.finished_at or job.started_at or job.created_at
+
+
+def _artifact_status_time(artifact: RunArtifact | None):
+    if not artifact:
+        return None
+    return artifact.processed_at or artifact.imported_at
+
+
+def _safe_int_stat(stats: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(stats.get(key, default) or 0)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _is_inventory_pipeline_artifact(artifact: RunArtifact) -> bool:
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    if stats.get("report_type") == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return True
+    if artifact.run_job and artifact.run_job.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return True
+    source_name = os.path.basename(str(artifact.source_path or ""))
+    return source_name.startswith("inventory_pipeline_") and source_name.endswith(".json")
+
+
+def _inventory_summary_from_artifact(artifact: RunArtifact | None) -> dict:
+    if artifact is None:
+        return {}
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    summary = dict(stats)
+    path = str(summary.get("summary_json") or artifact.source_path or "").strip()
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("run_type") == RunJob.SCOPE_INVENTORY_PIPELINE:
+            for key, value in payload.items():
+                summary.setdefault(key, value)
+    return summary
+
+
+def _has_non_in_sync_inventory_rows(summary: dict) -> bool:
+    counts = summary.get("final_status_counts") if isinstance(summary.get("final_status_counts"), dict) else {}
+    for status, raw_count in counts.items():
+        if str(status) == "in_sync":
+            continue
+        if _safe_int_stat({str(status): raw_count}, str(status)) > 0:
+            return True
+    return False
+
+
+def _sales_status_for_company(
+    *,
+    latest_job: RunJob | None,
+    latest_artifact: RunArtifact | None,
+    reconcile_statuses_by_job: dict,
+) -> dict:
+    last_run = _run_status_time(latest_job) or _artifact_status_time(latest_artifact)
+    if latest_job is None and latest_artifact is None:
+        return {
+            "label": "No recent sales run",
+            "severity": "unknown",
+            "last_run": None,
+            "subtext": "",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_FAILED:
+        return {
+            "label": "Failed",
+            "severity": "critical",
+            "last_run": last_run,
+            "subtext": latest_job.failure_reason or "Latest sales run failed.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_RUNNING:
+        return {
+            "label": "Running",
+            "severity": "warning",
+            "last_run": last_run,
+            "subtext": "Sales sync is running.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_QUEUED:
+        return {
+            "label": "Queued",
+            "severity": "warning",
+            "last_run": last_run,
+            "subtext": "Sales sync is queued.",
+        }
+
+    statuses = []
+    if latest_job:
+        statuses = reconcile_statuses_by_job.get(str(latest_job.id), [])
+    elif latest_artifact:
+        statuses = [latest_artifact.reconcile_status or ""]
+    reconcile_label = _reconciliation_label_for_job("sales", {"sales": statuses})
+    if reconcile_label == "Match":
+        return {
+            "label": "Reconciled",
+            "severity": "healthy",
+            "last_run": last_run,
+            "subtext": "",
+        }
+    subtext = "Reconciliation mismatch." if reconcile_label == "Mismatch" else "No reconciliation artifact found."
+    return {
+        "label": "Not reconciled",
+        "severity": "warning",
+        "last_run": last_run,
+        "subtext": subtext,
+    }
+
+
+def _inventory_status_for_company(
+    *,
+    latest_job: RunJob | None,
+    latest_artifact: RunArtifact | None,
+) -> dict:
+    last_sync = _run_status_time(latest_job) or _artifact_status_time(latest_artifact)
+    if latest_job is None and latest_artifact is None:
+        return {
+            "label": "Not checked",
+            "severity": "unknown",
+            "last_sync": None,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": "",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_FAILED:
+        return {
+            "label": "Failed",
+            "severity": "critical",
+            "last_sync": last_sync,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": latest_job.failure_reason or "Latest inventory sync failed.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_RUNNING:
+        return {
+            "label": "Running",
+            "severity": "warning",
+            "last_sync": last_sync,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": "Inventory sync is running.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_QUEUED:
+        return {
+            "label": "Queued",
+            "severity": "warning",
+            "last_sync": last_sync,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": "Inventory sync is queued.",
+        }
+
+    summary = _inventory_summary_from_artifact(latest_artifact)
+    products_checked = _safe_int_stat(summary, "products_checked")
+    in_sync = _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct"))
+    blocked = _safe_int_stat(summary, "blocked_items")
+    still_needs_review = _safe_int_stat(summary, "still_needs_review")
+    updates = (
+        _safe_int_stat(summary, "catalog_fixes_applied")
+        + _safe_int_stat(summary, "base_items_created")
+        + _safe_int_stat(summary, "duplicate_base_items_resolved")
+        + _safe_int_stat(summary, "quantity_updates_applied")
+    )
+    needs_review = (
+        blocked > 0
+        or still_needs_review > 0
+        or _has_non_in_sync_inventory_rows(summary)
+        or (products_checked > 0 and in_sync < products_checked)
+    )
+    clean = products_checked > 0 and in_sync == products_checked and blocked == 0 and still_needs_review == 0
+    if needs_review:
+        return {
+            "label": "Needs review",
+            "severity": "warning",
+            "last_sync": last_sync,
+            "products_checked": products_checked,
+            "blocked_items": blocked,
+            "updates_applied": updates,
+            "subtext": "",
+        }
+    if clean:
+        return {
+            "label": "In sync",
+            "severity": "healthy",
+            "last_sync": last_sync,
+            "products_checked": products_checked,
+            "blocked_items": blocked,
+            "updates_applied": updates,
+            "subtext": f"{updates} updates applied" if updates > 0 else "",
+        }
+    return {
+        "label": "Not checked",
+        "severity": "unknown",
+        "last_sync": last_sync,
+        "products_checked": products_checked,
+        "blocked_items": blocked,
+        "updates_applied": updates,
+        "subtext": "No inventory summary found.",
+    }
+
+
+def _company_card_status(sales_status: dict, inventory_status: dict, token_info: dict) -> str:
+    sales_level = str(sales_status.get("severity") or "unknown")
+    inventory_level = str(inventory_status.get("severity") or "unknown")
+    token_level = str(token_info.get("severity") or "unknown")
+    severities = [
+        sales_level,
+        inventory_level,
+        token_level,
+    ]
+    if "critical" in severities:
+        return "critical"
+    if "warning" in severities:
+        return "warning"
+    if sales_level == "unknown" and inventory_level == "unknown":
+        return "unknown"
+    return "healthy"
+
+
 def _company_health_snapshot(
     company: CompanyConfigRecord,
     latest_artifact: RunArtifact | None,
@@ -702,71 +931,79 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
     if prev_target_date is not None:
         prev_target_date_display = prev_target_date.strftime("%b %d")
 
-    latest_artifacts: dict[str, RunArtifact] = {}
-    latest_jobs: dict[str, RunJob] = {}
+    latest_sales_artifacts: dict[str, RunArtifact] = {}
+    latest_inventory_artifacts: dict[str, RunArtifact] = {}
+    sales_job_id_to_company_keys: dict = defaultdict(set)
+    inventory_job_id_to_company_keys: dict = defaultdict(set)
+    sales_reconcile_statuses_by_company_job: dict = defaultdict(list)
 
-    for artifact in RunArtifact.objects.filter(company_key__in=company_keys).order_by(
-        "company_key", "-processed_at", "-imported_at"
-    ):
-        if artifact.company_key not in latest_artifacts:
-            latest_artifacts[artifact.company_key] = artifact
+    overview_artifacts = list(
+        RunArtifact.objects.filter(company_key__in=company_keys)
+        .select_related("run_job")
+        .order_by("company_key", "-processed_at", "-imported_at")
+    )
+    for artifact in overview_artifacts:
+        if artifact.kind == RunArtifact.KIND_SALES_UPLOAD:
+            if artifact.company_key not in latest_sales_artifacts:
+                latest_sales_artifacts[artifact.company_key] = artifact
+            if artifact.run_job_id and artifact.company_key:
+                sales_job_id_to_company_keys[artifact.run_job_id].add(artifact.company_key)
+                sales_reconcile_statuses_by_company_job[
+                    (artifact.company_key, str(artifact.run_job_id))
+                ].append(artifact.reconcile_status or "")
+        elif artifact.kind == RunArtifact.KIND_INVENTORY_AUDIT and _is_inventory_pipeline_artifact(artifact):
+            if artifact.company_key not in latest_inventory_artifacts:
+                latest_inventory_artifacts[artifact.company_key] = artifact
+            if (
+                artifact.run_job_id
+                and artifact.company_key
+                and artifact.run_job
+                and artifact.run_job.scope == RunJob.SCOPE_INVENTORY_PIPELINE
+            ):
+                inventory_job_id_to_company_keys[artifact.run_job_id].add(artifact.company_key)
 
-    # Build "latest run" per company including All Companies runs (same logic as _company_runs_queryset).
-    # Jobs with company_key=company apply to that company; jobs with artifacts for a company also apply.
-    job_id_to_company_keys: dict = defaultdict(set)
-    for run_job_id, ck in RunArtifact.objects.filter(
-        company_key__in=company_keys
-    ).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
-        if run_job_id and ck:
-            job_id_to_company_keys[run_job_id].add(ck)
-    job_ids_with_artifacts = list(job_id_to_company_keys.keys())
-    # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
-    # PRIORITIZE RUNNING/QUEUED JOBS: Query all relevant jobs, then process running/queued first
-    all_relevant_jobs = list(RunJob.objects.filter(
-        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
-    ).order_by("-finished_at", "-started_at", "-created_at"))
-    # First pass: prioritize running/queued jobs
-    for job in all_relevant_jobs:
-        if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
-            continue
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_jobs:
-                latest_jobs[ck] = job
-    # Second pass: fill in completed jobs for companies without active runs
-    for job in all_relevant_jobs:
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_jobs:
-                latest_jobs[ck] = job
+    latest_sales_jobs: dict[str, RunJob] = {}
+    sales_job_ids_with_artifacts = list(sales_job_id_to_company_keys.keys())
+    all_relevant_sales_jobs = list(
+        RunJob.objects.filter(
+            Q(company_key__in=company_keys, scope__in=[RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL])
+            | Q(id__in=sales_job_ids_with_artifacts)
+            | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        ).order_by("-finished_at", "-started_at", "-created_at")
+    )
+    for active_only in (True, False):
+        for job in all_relevant_sales_jobs:
+            if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                continue
+            candidates = []
+            if job.company_key and job.company_key in company_keys:
+                candidates.append(job.company_key)
+            elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+                candidates.extend(company_keys)
+            candidates.extend(sales_job_id_to_company_keys.get(job.id, []))
+            for ck in set(candidates):
+                if ck not in latest_sales_jobs:
+                    latest_sales_jobs[ck] = job
 
-    # Reconciliation warnings for succeeded latest runs (overview company list)
-    succeeded_job_ids = list({j.id for j in latest_jobs.values() if j.status == RunJob.STATUS_SUCCEEDED})
-    artifacts_by_job_overview: dict = defaultdict(list)
-    for run_job_id, status in RunArtifact.objects.filter(
-        run_job_id__in=succeeded_job_ids
-    ).values_list("run_job_id", "reconcile_status"):
-        if run_job_id is not None:
-            artifacts_by_job_overview[str(run_job_id)].append(status or "")
-    reconciliation_warning_by_job_id: dict = {}
-    for jid in succeeded_job_ids:
-        label = _reconciliation_label_for_job(str(jid), artifacts_by_job_overview)
-        if label == "Mismatch":
-            reconciliation_warning_by_job_id[jid] = "Reconciliation mismatch"
-        elif label == "Not reconciled":
-            reconciliation_warning_by_job_id[jid] = "Not reconciled"
+    latest_inventory_jobs: dict[str, RunJob] = {}
+    inventory_job_ids_with_artifacts = list(inventory_job_id_to_company_keys.keys())
+    all_relevant_inventory_jobs = list(
+        RunJob.objects.filter(
+            Q(company_key__in=company_keys, scope=RunJob.SCOPE_INVENTORY_PIPELINE)
+            | Q(id__in=inventory_job_ids_with_artifacts)
+        ).order_by("-finished_at", "-started_at", "-created_at")
+    )
+    for active_only in (True, False):
+        for job in all_relevant_inventory_jobs:
+            if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                continue
+            candidates = []
+            if job.company_key and job.company_key in company_keys:
+                candidates.append(job.company_key)
+            candidates.extend(inventory_job_id_to_company_keys.get(job.id, []))
+            for ck in set(candidates):
+                if ck not in latest_inventory_jobs:
+                    latest_inventory_jobs[ck] = job
 
     ensure_db_initialized()
     token_pairs = [
@@ -780,33 +1017,45 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
     healthy_count = warning_count = critical_count = unknown_count = 0
 
     for company in companies:
-        latest_artifact = latest_artifacts.get(company.company_key)
-        latest_job = latest_jobs.get(company.company_key)
+        latest_sales_artifact = latest_sales_artifacts.get(company.company_key)
+        latest_sales_job = latest_sales_jobs.get(company.company_key)
+        latest_inventory_artifact = latest_inventory_artifacts.get(company.company_key)
+        latest_inventory_job = latest_inventory_jobs.get(company.company_key)
         realm_id = ((company.config_json or {}).get("qbo") or {}).get("realm_id")
         preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
         token_info = _company_token_health(company, tokens=preloaded_tokens)
+        sales_status = _sales_status_for_company(
+            latest_job=latest_sales_job,
+            latest_artifact=latest_sales_artifact,
+            reconcile_statuses_by_job={
+                str(latest_sales_job.id): sales_reconcile_statuses_by_company_job.get(
+                    (company.company_key, str(latest_sales_job.id))
+                    if latest_sales_job
+                    else (company.company_key, "")
+                )
+                or []
+            } if latest_sales_job else {},
+        )
+        inventory_status = _inventory_status_for_company(
+            latest_job=latest_inventory_job,
+            latest_artifact=latest_inventory_artifact,
+        )
         health = _company_health_snapshot(
             company,
-            latest_artifact=latest_artifact,
-            latest_job=latest_job,
+            latest_artifact=latest_sales_artifact,
+            latest_job=latest_sales_job,
             token_info=token_info,
         )
-        status = health["level"]
+        status = _company_card_status(sales_status, inventory_status, token_info)
         summary = health["summary"]
         run_activity = _run_activity_display(health["run_activity"])
         health_reason_labels = _health_reason_labels(health.get("reason_codes"))
-        show_summary = _should_show_company_summary(status, summary, health_reason_labels)
-        latest_job_time = None
-        if latest_job:
-            latest_job_time = latest_job.finished_at or latest_job.started_at or latest_job.created_at
-        latest_artifact_time = None
-        if latest_artifact:
-            latest_artifact_time = latest_artifact.processed_at or latest_artifact.imported_at
-        last_run_time = latest_job_time or latest_artifact_time
-
-        last_run_reconciliation_warning = None
-        if latest_job and latest_job.status == RunJob.STATUS_SUCCEEDED:
-            last_run_reconciliation_warning = reconciliation_warning_by_job_id.get(latest_job.id)
+        show_summary = health["level"] == status and _should_show_company_summary(
+            status,
+            summary,
+            health_reason_labels,
+        )
+        last_run_time = sales_status.get("last_run") or inventory_status.get("last_sync")
 
         if status == "healthy":
             healthy_count += 1
@@ -827,10 +1076,13 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
                 "run_activity": run_activity,
                 "health_reason_labels": health_reason_labels,
                 "token_info": token_info,
-                "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
+                "token_status": token_info,
+                "sales_status": sales_status,
+                "inventory_status": inventory_status,
+                "records_synced": latest_sales_artifact.rows_kept if latest_sales_artifact else 0,
                 "summary": summary,
                 "show_summary": show_summary,
-                "last_run_reconciliation_warning": last_run_reconciliation_warning,
+                "last_run_reconciliation_warning": None,
             }
         )
 

@@ -39,9 +39,163 @@ class OverviewUIContextTests(TestCase):
             "environment": "production",
         }
 
+    def _overview_context(self) -> dict:
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            return views._overview_context()
+
+    def _company_row(self) -> dict:
+        context = self._overview_context()
+        return next(item for item in context["companies"] if item["company_key"] == self.company.company_key)
+
+    def _create_sales_run(self, *, status=RunJob.STATUS_SUCCEEDED, minutes_ago=60, with_artifact=False, reconcile_status="MATCH"):
+        finished_at = self.fixed_now - timedelta(minutes=minutes_ago)
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key=self.company.company_key,
+            status=status,
+            started_at=finished_at - timedelta(minutes=2),
+            finished_at=finished_at,
+        )
+        if with_artifact:
+            RunArtifact.objects.create(
+                run_job=run,
+                company_key=self.company.company_key,
+                kind=RunArtifact.KIND_SALES_UPLOAD,
+                target_date=(self.fixed_now - timedelta(days=1)).date(),
+                processed_at=finished_at,
+                source_path=f"/tmp/sales_{minutes_ago}.json",
+                source_hash=f"sales-{minutes_ago}",
+                reconcile_status=reconcile_status,
+                upload_stats_json={"uploaded": 1, "failed": 0},
+            )
+        return run
+
+    def _create_inventory_run(
+        self,
+        *,
+        status=RunJob.STATUS_SUCCEEDED,
+        minutes_ago=10,
+        products_checked=147,
+        in_sync=147,
+        blocked_items=0,
+        still_needs_review=0,
+        updates=0,
+        final_status_counts=None,
+        with_artifact=True,
+    ):
+        finished_at = self.fixed_now - timedelta(minutes=minutes_ago)
+        run = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key=self.company.company_key,
+            status=status,
+            started_at=finished_at - timedelta(minutes=2),
+            finished_at=finished_at,
+        )
+        if with_artifact:
+            RunArtifact.objects.create(
+                run_job=run,
+                company_key=self.company.company_key,
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                target_date=None,
+                processed_at=finished_at,
+                source_path=f"/tmp/inventory_pipeline_company_a_{minutes_ago}.json",
+                source_hash=f"inventory-{minutes_ago}",
+                rows_total=products_checked,
+                rows_kept=in_sync,
+                rows_non_target=blocked_items,
+                upload_stats_json={
+                    "report_type": "inventory_pipeline",
+                    "products_checked": products_checked,
+                    "in_sync": in_sync,
+                    "blocked_items": blocked_items,
+                    "still_needs_review": still_needs_review,
+                    "catalog_fixes_applied": updates,
+                    "base_items_created": 0,
+                    "duplicate_base_items_resolved": 0,
+                    "quantity_updates_applied": 0,
+                    "final_status_counts": final_status_counts or {"in_sync": in_sync},
+                },
+            )
+        return run
+
+    def test_inventory_pipeline_run_does_not_set_sales_not_reconciled(self):
+        self._create_inventory_run(products_checked=147, in_sync=147, blocked_items=0)
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["sales_status"]["label"], "No recent sales run")
+        self.assertEqual(company_row["inventory_status"]["label"], "In sync")
+        self.assertNotEqual(company_row["sales_status"]["label"], "Not reconciled")
+
+    def test_sales_unreconciled_and_inventory_in_sync_are_separate(self):
+        self._create_sales_run(status=RunJob.STATUS_SUCCEEDED, minutes_ago=20, with_artifact=False)
+        self._create_inventory_run(products_checked=147, in_sync=147, blocked_items=0, minutes_ago=5)
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["sales_status"]["label"], "Not reconciled")
+        self.assertEqual(company_row["inventory_status"]["label"], "In sync")
+        self.assertEqual(company_row["inventory_status"]["products_checked"], 147)
+        self.assertEqual(company_row["inventory_status"]["blocked_items"], 0)
+
+    def test_inventory_blocked_items_show_needs_review(self):
+        self._create_inventory_run(
+            products_checked=147,
+            in_sync=146,
+            blocked_items=1,
+            still_needs_review=1,
+            final_status_counts={"in_sync": 146, "ambiguous_in_qbo": 1},
+        )
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Needs review")
+        self.assertEqual(company_row["inventory_status"]["blocked_items"], 1)
+
+    def test_no_inventory_run_shows_not_checked(self):
+        self._create_sales_run(with_artifact=True, reconcile_status="MATCH")
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["sales_status"]["label"], "Reconciled")
+        self.assertEqual(company_row["inventory_status"]["label"], "Not checked")
+
+    def test_failed_inventory_run_shows_failed(self):
+        self._create_inventory_run(
+            status=RunJob.STATUS_FAILED,
+            with_artifact=False,
+            minutes_ago=4,
+        )
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Failed")
+        self.assertEqual(company_row["inventory_status"]["severity"], "critical")
+
+    def test_clean_inventory_run_with_updates_stays_in_sync_with_update_detail(self):
+        self._create_inventory_run(
+            products_checked=147,
+            in_sync=147,
+            blocked_items=0,
+            still_needs_review=0,
+            updates=5,
+            final_status_counts={"in_sync": 147},
+        )
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["inventory_status"]["label"], "In sync")
+        self.assertEqual(company_row["inventory_status"]["updates_applied"], 5)
+        self.assertEqual(company_row["inventory_status"]["subtext"], "5 updates applied")
+
     def test_company_last_run_falls_back_to_latest_artifact_time(self):
         RunArtifact.objects.create(
             company_key=self.company.company_key,
+            kind=RunArtifact.KIND_SALES_UPLOAD,
             target_date=(self.fixed_now - timedelta(days=1)).date(),
             processed_at=self.fixed_now - timedelta(minutes=10),
             source_path="/tmp/company_a_last_transform.json",
@@ -673,6 +827,64 @@ class OverviewUITemplateTests(TestCase):
         self.assertIn('id="overview-company-filter"', html)
         self.assertIn(f'data-panels-url="{reverse("epos_qbo:overview-panels")}"', html)
         self.assertIn("js/overview.js", html)
+
+    def test_overview_card_renders_separate_sales_inventory_and_token_statuses(self):
+        sales_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_SINGLE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=30),
+            finished_at=self.fixed_now - timedelta(minutes=20),
+        )
+        inventory_run = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            started_at=self.fixed_now - timedelta(minutes=12),
+            finished_at=self.fixed_now - timedelta(minutes=10),
+        )
+        RunArtifact.objects.create(
+            run_job=inventory_run,
+            company_key="company_a",
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            processed_at=self.fixed_now - timedelta(minutes=10),
+            source_path="/tmp/inventory_pipeline_company_a_summary.json",
+            source_hash="overview-inventory-summary",
+            rows_total=147,
+            rows_kept=147,
+            rows_non_target=0,
+            upload_stats_json={
+                "report_type": "inventory_pipeline",
+                "products_checked": 147,
+                "in_sync": 147,
+                "blocked_items": 0,
+                "still_needs_review": 0,
+                "catalog_fixes_applied": 0,
+                "base_items_created": 0,
+                "duplicate_base_items_resolved": 0,
+                "quantity_updates_applied": 0,
+                "final_status_counts": {"in_sync": 147},
+            },
+        )
+        self.assertIsNotNone(sales_run)
+
+        with (
+            mock.patch("apps.epos_qbo.business_date.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
+            mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
+        ):
+            response = self.client.get(reverse("epos_qbo:overview"))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Sales: Not reconciled", html)
+        self.assertIn("Inventory: In sync", html)
+        self.assertIn("Token: Connected", html)
+        self.assertIn("Products checked: 147", html)
+        self.assertIn("Blocked: 0", html)
+        self.assertIn("Access token expires in", html)
+        self.assertNotIn("inventory_pipeline", html)
+        self.assertNotIn("/tmp/inventory_pipeline_company_a_summary.json", html)
 
     def test_overview_does_not_render_run_reliability_panel(self):
         with (

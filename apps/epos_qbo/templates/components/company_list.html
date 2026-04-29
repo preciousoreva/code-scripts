@@ -16,54 +16,61 @@
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden divide-y divide-slate-100 dark:divide-slate-700">
         {% for company in companies %}
             {% with name_initial=company.name|first %}
-            <div class="overview-company-row group p-4 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer {% if company.status == 'warning' or company.status == 'unknown' %}border-l-4 border-l-amber-400 dark:border-l-amber-500 bg-amber-50/10 dark:bg-amber-900/20{% elif company.status == 'critical' %}border-l-4 border-l-red-500 dark:border-l-red-500 bg-red-50/10 dark:bg-red-900/20{% endif %}" data-search="{{ company.name|default:''|lower }} {{ company.company_key|default:''|lower }}">
-                <div class="flex items-center justify-between mb-2">
-                    <div class="flex items-center gap-3">
+            <div class="overview-company-row group p-4 hover:bg-slate-50 dark:hover:bg-slate-700/50 transition-colors cursor-pointer {% if company.status == 'warning' or company.status == 'unknown' %}border-l-4 border-l-amber-400 dark:border-l-amber-500 bg-amber-50/10 dark:bg-amber-900/20{% elif company.status == 'critical' %}border-l-4 border-l-red-500 dark:border-l-red-500 bg-red-50/10 dark:bg-red-900/20{% endif %}" data-search="{{ company.name|default:''|lower }} {{ company.company_key|default:''|lower }} {{ company.sales_status.label|default:''|lower }} {{ company.inventory_status.label|default:''|lower }}">
+                <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-2">
+                    <div class="flex items-start gap-3">
                         <div class="w-8 h-8 rounded bg-slate-100 dark:bg-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 text-xs font-bold">
                             {{ name_initial }}
                         </div>
                         <div>
                             <h4 class="text-sm font-medium text-slate-900 dark:text-slate-100">{{ company.name }}</h4>
-                            <p class="text-xs text-slate-500 dark:text-slate-400">Last run: {% if company.last_run %}{{ company.last_run|date:"M j, Y H:i" }}{% else %}Never run{% endif %}</p>
                             {% if company.run_activity %}
                             <p class="text-xs {% if company.run_activity.color == 'blue' %}text-blue-600 dark:text-blue-400{% else %}text-amber-600 dark:text-amber-400{% endif %} mt-1 flex items-center gap-1">
                                 <iconify-icon icon="{{ company.run_activity.icon }}" width="14"></iconify-icon>
                                 {{ company.run_activity.label }}
                             </p>
                             {% endif %}
-                            {% if company.last_run_reconciliation_warning %}
-                            <p class="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
-                                <iconify-icon icon="solar:danger-triangle-linear" width="14"></iconify-icon>
-                                {{ company.last_run_reconciliation_warning }}
-                            </p>
-                            {% endif %}
                         </div>
                     </div>
 
-                    {% if company.status == 'healthy' %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-800">
-                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                            Healthy
+                    <div class="flex flex-wrap sm:justify-end gap-1.5">
+                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border {% if company.sales_status.severity == 'critical' %}bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-100 dark:border-red-800{% elif company.sales_status.severity == 'warning' or company.sales_status.severity == 'unknown' %}bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-100 dark:border-amber-800{% else %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border-emerald-100 dark:border-emerald-800{% endif %}">
+                            <span class="w-1.5 h-1.5 rounded-full {% if company.sales_status.severity == 'critical' %}bg-red-500{% elif company.sales_status.severity == 'warning' or company.sales_status.severity == 'unknown' %}bg-amber-500{% else %}bg-emerald-500{% endif %}"></span>
+                            Sales: {{ company.sales_status.label }}
                         </span>
-                    {% elif company.status == 'warning' %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-800">
-                            <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                            Warning
+                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border {% if company.inventory_status.severity == 'critical' %}bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-100 dark:border-red-800{% elif company.inventory_status.severity == 'warning' or company.inventory_status.severity == 'unknown' %}bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-100 dark:border-amber-800{% else %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border-emerald-100 dark:border-emerald-800{% endif %}">
+                            <span class="w-1.5 h-1.5 rounded-full {% if company.inventory_status.severity == 'critical' %}bg-red-500{% elif company.inventory_status.severity == 'warning' or company.inventory_status.severity == 'unknown' %}bg-amber-500{% else %}bg-emerald-500{% endif %}"></span>
+                            Inventory: {{ company.inventory_status.label }}
                         </span>
-                    {% elif company.status == 'unknown' %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border border-amber-100 dark:border-amber-800">
-                            <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                            Never Run
+                        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border {% if company.token_info.severity == 'critical' %}bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-100 dark:border-red-800{% elif company.token_info.severity == 'warning' %}bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-100 dark:border-amber-800{% else %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 border-emerald-100 dark:border-emerald-800{% endif %}">
+                            <span class="w-1.5 h-1.5 rounded-full {% if company.token_info.severity == 'critical' %}bg-red-500{% elif company.token_info.severity == 'warning' %}bg-amber-500{% else %}bg-emerald-500{% endif %}"></span>
+                            Token: {{ company.token_info.display_label }}
                         </span>
-                    {% else %}
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-100 dark:border-red-800">
-                            <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-                            Critical
-                        </span>
-                    {% endif %}
+                    </div>
                 </div>
 
-                <div class="grid grid-cols-2 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pl-11 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
+                    <div>
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Sales</span>
+                        <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Last run: {% if company.sales_status.last_run %}{{ company.sales_status.last_run|date:"M j, Y H:i" }}{% else %}No recent sales run{% endif %}</p>
+                        <span class="text-xs font-medium {% if company.sales_status.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company.sales_status.severity == 'warning' or company.sales_status.severity == 'unknown' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">
+                            {{ company.sales_status.label }}
+                        </span>
+                        {% if company.sales_status.subtext %}<p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{{ company.sales_status.subtext }}</p>{% endif %}
+                    </div>
+                    <div>
+                        <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Inventory</span>
+                        <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Last sync: {% if company.inventory_status.last_sync %}{{ company.inventory_status.last_sync|date:"M j, Y H:i" }}{% else %}Not checked{% endif %}</p>
+                        <span class="text-xs font-medium {% if company.inventory_status.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company.inventory_status.severity == 'warning' or company.inventory_status.severity == 'unknown' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">
+                            {{ company.inventory_status.label }}
+                        </span>
+                        <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">Products checked: {{ company.inventory_status.products_checked|default:0 }} · Blocked: {{ company.inventory_status.blocked_items|default:0 }}</p>
+                        {% if company.inventory_status.updates_applied %}
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{{ company.inventory_status.updates_applied }} updates applied</p>
+                        {% elif company.inventory_status.subtext %}
+                            <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{{ company.inventory_status.subtext }}</p>
+                        {% endif %}
+                    </div>
                     <div>
                         <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Token</span>
                         <span class="text-xs font-medium {% if company.token_info.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company.token_info.severity == 'warning' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">
@@ -71,8 +78,10 @@
                         </span>
                         <p class="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{{ company.token_info.display_subtext }}</p>
                     </div>
-                    <div class="flex justify-end items-center">
-                        {% if company.status == 'unknown' and 'NO_ARTIFACT_METADATA' in company.health.reason_codes and perms.epos_qbo.can_trigger_runs %}
+                </div>
+
+                <div class="flex justify-end items-center gap-2 pl-11 mt-3">
+                        {% if company.sales_status.severity == 'unknown' and perms.epos_qbo.can_trigger_runs %}
                         <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="mr-2">
                             {% csrf_token %}
                             <input type="hidden" name="scope" value="single_company">
@@ -86,7 +95,6 @@
                         <a href="{% url 'epos_qbo:company-detail' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600">
                             View Details
                         </a>
-                    </div>
                 </div>
 
                 {% if company.show_summary %}
