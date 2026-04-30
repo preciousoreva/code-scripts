@@ -2082,22 +2082,18 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
 
 def _group_schedule_rows(rows: list[dict]) -> list[dict]:
     active: list[dict] = []
-    completed_one_time: list[dict] = []
     disabled: list[dict] = []
 
     for row in rows:
         schedule: RunSchedule = row["schedule"]
-        if row.get("one_time_completed"):
-            completed_one_time.append(row)
-        elif schedule.enabled:
+        if schedule.enabled:
             active.append(row)
         else:
             disabled.append(row)
 
     return [
-        {"title": "Active Schedules", "rows": active},
-        {"title": "Completed One-time Runs", "rows": completed_one_time},
-        {"title": "Disabled Schedules", "rows": disabled},
+        {"title": "Enabled", "rows": active, "empty_message": "No enabled schedules.", "show_when_empty": True},
+        {"title": "Disabled", "rows": disabled, "empty_message": "No disabled schedules.", "show_when_empty": False},
     ]
 
 
@@ -3016,6 +3012,8 @@ def _artifact_report_links(job: RunJob, artifact: RunArtifact) -> list[dict[str,
             resolved = _resolve_artifact_report_path(artifact, key)
         except Http404:
             # Don't render broken download buttons for missing/invalid paths.
+            continue
+        if resolved.suffix.lower() != ".csv":
             continue
         links.append(
             {
