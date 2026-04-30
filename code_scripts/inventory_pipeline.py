@@ -63,7 +63,7 @@ from code_scripts.inventory_sync import (
 )
 from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path
 from code_scripts.run_lock import GlobalRunLock
-from code_scripts.slack_notify import send_slack_success
+from code_scripts.slack_notify import notify_inventory_pipeline_start, send_slack_success
 from code_scripts.token_manager import verify_realm_match
 
 
@@ -1144,6 +1144,22 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     )
     print("=" * 68)
 
+    webhook = getattr(cfg, "slack_webhook_url", None)
+    if webhook and not args.no_slack:
+        notify_inventory_pipeline_start(
+            company_name=cfg.display_name,
+            company_key=cfg.company_key,
+            categories=categories,
+            product_filter=product_filter,
+            dry_run=bool(args.dry_run),
+            webhook_url=webhook,
+            metadata={
+                "scope": "inventory_pipeline",
+                "run_job_id": os.environ.get("OIAT_RUN_JOB_ID", "").strip(),
+                "run_url": _build_run_detail_url(os.environ.get("OIAT_RUN_JOB_ID", "").strip()),
+            },
+        )
+
     stock_path = _resolve_stock_path(args, cfg)
     qbo_path = _resolve_qbo_snapshot(args, cfg, force_refresh=True)
     qbo_item_rows = load_qbo_inventory_item_rows(str(qbo_path))
@@ -1347,7 +1363,6 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     print(_format_final_summary(summary))
     print("=" * 68)
 
-    webhook = getattr(cfg, "slack_webhook_url", None)
     if webhook and not args.no_slack:
         send_slack_success(_format_slack_summary(summary), webhook)
 
