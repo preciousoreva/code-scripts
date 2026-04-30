@@ -355,7 +355,7 @@ class CompanyRunActivityTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
-        self.assertIn("Sales Synced (last run)", html)
+        self.assertIn("Latest Sales Sync", html)
         self.assertNotIn("Records (24h)", html)
         # Last successful run is this_run (target 1 day ago, total 75000)
         self.assertIn("75,000", html)
@@ -376,6 +376,7 @@ class CompanyRunActivityTests(TestCase):
             source_path="/tmp/company_a_running_filter.json",
             source_hash="hash-company-a-running-filter",
             rows_kept=1,
+            reconcile_status="MATCH",
         )
 
         with self._patch_time_and_tokens():

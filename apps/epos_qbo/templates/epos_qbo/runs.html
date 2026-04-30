@@ -123,6 +123,7 @@
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
             Downloads EPOS stock, fixes supported QBO catalog issues, and syncs quantities.
         </p>
+        {% if inventory_companies %}
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
             {% csrf_token %}
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -130,7 +131,7 @@
                     Company
                     <select name="company_key" required x-model="companyKey" @change="category = ''" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
                         <option value="">Select company</option>
-                        {% for company in companies %}
+                        {% for company in inventory_companies %}
                         <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
                         {% endfor %}
                     </select>
@@ -158,6 +159,11 @@
                 <button type="submit" class="btn btn-primary">Sync Inventory</button>
             </div>
         </form>
+        {% else %}
+        <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/40 px-4 py-3 text-sm text-slate-600 dark:text-slate-300">
+            No companies currently have inventory enabled.
+        </div>
+        {% endif %}
     </section>
     </div>
     {% endif %}

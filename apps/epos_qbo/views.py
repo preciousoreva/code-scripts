@@ -90,7 +90,10 @@ HEALTH_REASON_LABELS = {
     "LATEST_RUN_FAILED": "Latest run failed",
     "UPLOAD_FAILURE": "Upload failures in latest run",
     "RECON_MISMATCH": "Reconciliation mismatch above threshold",
-    "NO_ARTIFACT_METADATA": "No successful sync yet",
+    "INVENTORY_FAILURE": "Latest inventory run failed",
+    "INVENTORY_NEEDS_REVIEW": "Inventory needs review",
+    "INVENTORY_NOT_CHECKED": "Inventory not checked",
+    "NO_ARTIFACT_METADATA": "No successful sales sync recorded",
 }
 # Run detail: message when run succeeded but 0 Sales Receipts uploaded (all skipped). {skipped} placeholder.
 RUN_DETAIL_ALL_SKIPPED_MESSAGE = (
@@ -477,6 +480,29 @@ def _artifact_status_time(artifact: RunArtifact | None):
     return artifact.processed_at or artifact.imported_at
 
 
+def _coerce_config_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _company_inventory_enabled(company: CompanyConfigRecord) -> bool:
+    cfg = company.config_json if isinstance(company.config_json, dict) else {}
+    inventory = cfg.get("inventory") if isinstance(cfg.get("inventory"), dict) else {}
+    return _coerce_config_bool(inventory.get("enable_inventory_items"))
+
+
+def _company_capabilities(company: CompanyConfigRecord) -> dict:
+    return {
+        "sales_sync": True,
+        "inventory": _company_inventory_enabled(company),
+    }
+
+
 def _safe_int_stat(stats: dict, key: str, default: int = 0) -> int:
     try:
         return int(stats.get(key, default) or 0)
@@ -492,6 +518,23 @@ def _is_inventory_pipeline_artifact(artifact: RunArtifact) -> bool:
         return True
     source_name = os.path.basename(str(artifact.source_path or ""))
     return source_name.startswith("inventory_pipeline_") and source_name.endswith(".json")
+
+
+def _is_inventory_artifact(artifact: RunArtifact) -> bool:
+    if artifact.kind == RunArtifact.KIND_INVENTORY_AUDIT:
+        return True
+    if artifact.run_job and artifact.run_job.scope in {
+        RunJob.SCOPE_INVENTORY_PIPELINE,
+        RunJob.SCOPE_INVENTORY_SYNC,
+    }:
+        return True
+    return _is_inventory_pipeline_artifact(artifact)
+
+
+def _is_sales_artifact(artifact: RunArtifact) -> bool:
+    if _is_inventory_artifact(artifact):
+        return False
+    return artifact.kind in {"", RunArtifact.KIND_SALES_UPLOAD, None}
 
 
 def _inventory_summary_from_artifact(artifact: RunArtifact | None) -> dict:
@@ -531,7 +574,7 @@ def _sales_status_for_company(
     last_run = _run_status_time(latest_job) or _artifact_status_time(latest_artifact)
     if latest_job is None and latest_artifact is None:
         return {
-            "label": "No recent sales run",
+            "label": "No successful sales sync recorded",
             "severity": "unknown",
             "last_run": None,
             "subtext": "",
@@ -543,17 +586,17 @@ def _sales_status_for_company(
             "last_run": last_run,
             "subtext": latest_job.failure_reason or "Latest sales run failed.",
         }
-    if latest_job and latest_job.status == RunJob.STATUS_RUNNING:
+    if latest_job and latest_job.status == RunJob.STATUS_RUNNING and latest_artifact is None:
         return {
             "label": "Running",
-            "severity": "warning",
+            "severity": "unknown",
             "last_run": last_run,
             "subtext": "Sales sync is running.",
         }
-    if latest_job and latest_job.status == RunJob.STATUS_QUEUED:
+    if latest_job and latest_job.status == RunJob.STATUS_QUEUED and latest_artifact is None:
         return {
             "label": "Queued",
-            "severity": "warning",
+            "severity": "unknown",
             "last_run": last_run,
             "subtext": "Sales sync is queued.",
         }
@@ -676,20 +719,27 @@ def _inventory_status_for_company(
     }
 
 
-def _company_card_status(sales_status: dict, inventory_status: dict, token_info: dict) -> str:
+def _company_card_status(
+    sales_status: dict,
+    inventory_status: dict,
+    token_info: dict,
+    *,
+    inventory_enabled: bool = True,
+) -> str:
     sales_level = str(sales_status.get("severity") or "unknown")
     inventory_level = str(inventory_status.get("severity") or "unknown")
     token_level = str(token_info.get("severity") or "unknown")
     severities = [
         sales_level,
-        inventory_level,
         token_level,
     ]
+    if inventory_enabled:
+        severities.append(inventory_level)
     if "critical" in severities:
         return "critical"
     if "warning" in severities:
         return "warning"
-    if sales_level == "unknown" and inventory_level == "unknown":
+    if sales_level == "unknown" or (inventory_enabled and inventory_level == "unknown"):
         return "unknown"
     return "healthy"
 
@@ -699,11 +749,16 @@ def _company_health_snapshot(
     latest_artifact: RunArtifact | None,
     latest_job: RunJob | None,
     token_info: dict | None = None,
+    *,
+    inventory_enabled: bool | None = None,
+    inventory_status: dict | None = None,
 ) -> dict:
     """Canonical company health classification used by overview/list/detail views."""
     cfg = company.config_json or {}
     epos = cfg.get("epos") or {}
     token_info = token_info or _company_token_health(company)
+    if inventory_enabled is None:
+        inventory_enabled = _company_inventory_enabled(company)
     run_activity = _run_activity_status(latest_job)
 
     if not epos.get("username_env_key") or not epos.get("password_env_key"):
@@ -724,10 +779,20 @@ def _company_health_snapshot(
     if latest_job and latest_job.status == RunJob.STATUS_FAILED:
         return {
             "level": "critical",
-            "summary": latest_job.failure_reason or "Latest run failed.",
+            "summary": latest_job.failure_reason or "Latest sales sync failed.",
             "reason_codes": ["LATEST_RUN_FAILED"],
             "run_activity": run_activity,
         }
+
+    if inventory_enabled and inventory_status:
+        inventory_level = str(inventory_status.get("severity") or "")
+        if inventory_level == "critical":
+            return {
+                "level": "critical",
+                "summary": inventory_status.get("subtext") or "Latest inventory run failed.",
+                "reason_codes": ["INVENTORY_FAILURE"],
+                "run_activity": run_activity,
+            }
 
     if token_info["severity"] == "warning":
         return {
@@ -754,10 +819,28 @@ def _company_health_snapshot(
                 "reason_codes": ["RECON_MISMATCH"],
                 "run_activity": run_activity,
             }
-    else:
+
+    if inventory_enabled and inventory_status:
+        inventory_level = str(inventory_status.get("severity") or "")
+        if inventory_level == "warning":
+            return {
+                "level": "warning",
+                "summary": inventory_status.get("subtext") or "Inventory needs review.",
+                "reason_codes": ["INVENTORY_NEEDS_REVIEW"],
+                "run_activity": run_activity,
+            }
+        if inventory_level == "unknown":
+            return {
+                "level": "unknown",
+                "summary": inventory_status.get("subtext") or "Inventory not checked.",
+                "reason_codes": ["INVENTORY_NOT_CHECKED"],
+                "run_activity": run_activity,
+            }
+
+    if not latest_artifact:
         return {
             "level": "unknown",
-            "summary": "No successful sync yet.",
+            "summary": "No successful sales sync recorded.",
             "reason_codes": ["NO_ARTIFACT_METADATA"],
             "run_activity": run_activity,
         }
@@ -943,7 +1026,7 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
         .order_by("company_key", "-processed_at", "-imported_at")
     )
     for artifact in overview_artifacts:
-        if artifact.kind == RunArtifact.KIND_SALES_UPLOAD:
+        if _is_sales_artifact(artifact):
             if artifact.company_key not in latest_sales_artifacts:
                 latest_sales_artifacts[artifact.company_key] = artifact
             if artifact.run_job_id and artifact.company_key:
@@ -951,14 +1034,14 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
                 sales_reconcile_statuses_by_company_job[
                     (artifact.company_key, str(artifact.run_job_id))
                 ].append(artifact.reconcile_status or "")
-        elif artifact.kind == RunArtifact.KIND_INVENTORY_AUDIT and _is_inventory_pipeline_artifact(artifact):
+        elif _is_inventory_artifact(artifact):
             if artifact.company_key not in latest_inventory_artifacts:
                 latest_inventory_artifacts[artifact.company_key] = artifact
             if (
                 artifact.run_job_id
                 and artifact.company_key
                 and artifact.run_job
-                and artifact.run_job.scope == RunJob.SCOPE_INVENTORY_PIPELINE
+                and artifact.run_job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}
             ):
                 inventory_job_id_to_company_keys[artifact.run_job_id].add(artifact.company_key)
 
@@ -989,7 +1072,10 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
     inventory_job_ids_with_artifacts = list(inventory_job_id_to_company_keys.keys())
     all_relevant_inventory_jobs = list(
         RunJob.objects.filter(
-            Q(company_key__in=company_keys, scope=RunJob.SCOPE_INVENTORY_PIPELINE)
+            Q(
+                company_key__in=company_keys,
+                scope__in=[RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC],
+            )
             | Q(id__in=inventory_job_ids_with_artifacts)
         ).order_by("-finished_at", "-started_at", "-created_at")
     )
@@ -1004,6 +1090,32 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
             for ck in set(candidates):
                 if ck not in latest_inventory_jobs:
                     latest_inventory_jobs[ck] = job
+
+    latest_activity_jobs: dict[str, RunJob] = {}
+    activity_job_ids_with_artifacts = list(
+        set(sales_job_ids_with_artifacts + inventory_job_ids_with_artifacts)
+    )
+    all_relevant_activity_jobs = list(
+        RunJob.objects.filter(
+            Q(company_key__in=company_keys)
+            | Q(id__in=activity_job_ids_with_artifacts)
+            | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        ).order_by("-finished_at", "-started_at", "-created_at")
+    )
+    for active_only in (True, False):
+        for job in all_relevant_activity_jobs:
+            if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                continue
+            candidates = []
+            if job.company_key and job.company_key in company_keys:
+                candidates.append(job.company_key)
+            elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+                candidates.extend(company_keys)
+            candidates.extend(sales_job_id_to_company_keys.get(job.id, []))
+            candidates.extend(inventory_job_id_to_company_keys.get(job.id, []))
+            for ck in set(candidates):
+                if ck not in latest_activity_jobs:
+                    latest_activity_jobs[ck] = job
 
     ensure_db_initialized()
     token_pairs = [
@@ -1021,6 +1133,9 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
         latest_sales_job = latest_sales_jobs.get(company.company_key)
         latest_inventory_artifact = latest_inventory_artifacts.get(company.company_key)
         latest_inventory_job = latest_inventory_jobs.get(company.company_key)
+        latest_activity_job = latest_activity_jobs.get(company.company_key)
+        capabilities = _company_capabilities(company)
+        inventory_enabled = capabilities["inventory"]
         realm_id = ((company.config_json or {}).get("qbo") or {}).get("realm_id")
         preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
         token_info = _company_token_health(company, tokens=preloaded_tokens)
@@ -1045,17 +1160,29 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
             latest_artifact=latest_sales_artifact,
             latest_job=latest_sales_job,
             token_info=token_info,
+            inventory_enabled=inventory_enabled,
+            inventory_status=inventory_status,
         )
-        status = _company_card_status(sales_status, inventory_status, token_info)
+        status = _company_card_status(
+            sales_status,
+            inventory_status,
+            token_info,
+            inventory_enabled=inventory_enabled,
+        )
         summary = health["summary"]
-        run_activity = _run_activity_display(health["run_activity"])
+        run_activity = _run_activity_display(_run_activity_status(latest_activity_job))
         health_reason_labels = _health_reason_labels(health.get("reason_codes"))
         show_summary = health["level"] == status and _should_show_company_summary(
             status,
             summary,
             health_reason_labels,
         )
-        last_run_time = sales_status.get("last_run") or inventory_status.get("last_sync")
+        latest_activity = _latest_activity_snapshot(
+            latest_activity_job=latest_activity_job,
+            latest_sales_artifact=latest_sales_artifact,
+            latest_inventory_artifact=latest_inventory_artifact,
+        )
+        last_run_time = latest_activity["at"]
 
         if status == "healthy":
             healthy_count += 1
@@ -1071,6 +1198,9 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
                 "name": company.display_name,
                 "company_key": company.company_key,
                 "last_run": last_run_time,
+                "latest_activity_job": latest_activity_job,
+                "latest_activity_label": latest_activity["label"],
+                "latest_activity_display": latest_activity["display"],
                 "status": status,
                 "health": health,
                 "run_activity": run_activity,
@@ -1078,7 +1208,14 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
                 "token_info": token_info,
                 "token_status": token_info,
                 "sales_status": sales_status,
+                "latest_sales_job": latest_sales_job,
+                "latest_sales_artifact": latest_sales_artifact,
+                "latest_sales_sync_display": _sales_sync_display(latest_sales_artifact),
+                "inventory_enabled": inventory_enabled,
+                "capabilities": capabilities,
                 "inventory_status": inventory_status,
+                "latest_inventory_job": latest_inventory_job,
+                "latest_inventory_artifact": latest_inventory_artifact,
                 "records_synced": latest_sales_artifact.rows_kept if latest_sales_artifact else 0,
                 "summary": summary,
                 "show_summary": show_summary,
@@ -1721,11 +1858,20 @@ def schedules_page(request):
     )
     companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
     company_map = {company.company_key: company.display_name for company in companies}
+    company_options = [
+        {
+            "company_key": company.company_key,
+            "display_name": company.display_name,
+            "inventory_enabled": _company_inventory_enabled(company),
+        }
+        for company in companies
+    ]
     context = {
         "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
         "schedule_rows": _schedule_rows(schedules, company_map),
         "recent_events": recent_events,
         "companies": companies,
+        "company_options": company_options,
         "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
         "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
         "single_scope": RunJob.SCOPE_SINGLE,
@@ -1938,7 +2084,8 @@ def runs_list(request):
         for job in jobs
     ]
     form = RunTriggerForm(initial={"scope": RunJob.SCOPE_ALL, "date_mode": "yesterday"})
-    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    inventory_companies = [company for company in companies if _company_inventory_enabled(company)]
     
     # Get active run IDs for polling
     active_runs = RunJob.objects.filter(
@@ -1947,11 +2094,12 @@ def runs_list(request):
     
     active_run_ids_list = [str(id) for id in active_runs]
 
-    categories_by_company = load_inventory_categories_by_company(companies)
+    categories_by_company = load_inventory_categories_by_company(inventory_companies)
     context = {
         "run_rows": run_rows,
         "form": form,
         "companies": companies,
+        "inventory_companies": inventory_companies,
         "default_parallel": default_parallel,
         "default_stagger_seconds": default_stagger_seconds,
         "active_run_ids": active_run_ids_list,
@@ -2361,7 +2509,7 @@ def company_advanced(request, company_key):
                 "trading_day_enabled": (cfg.get("trading_day") or {}).get("enabled", False),
                 "trading_day_start_hour": (cfg.get("trading_day") or {}).get("start_hour", 5),
                 "trading_day_start_minute": (cfg.get("trading_day") or {}).get("start_minute", 0),
-                "inventory_enabled": (cfg.get("inventory") or {}).get("enable_inventory_items", False),
+                "inventory_enabled": _company_inventory_enabled(record),
                 "allow_negative_inventory": (cfg.get("inventory") or {}).get("allow_negative_inventory", False),
                 "inventory_start_date": (cfg.get("inventory") or {}).get("inventory_start_date", "today"),
                 "default_qty_on_hand": (cfg.get("inventory") or {}).get("default_qty_on_hand", 0),
@@ -2416,7 +2564,7 @@ def _parse_config_for_display(config_json: dict | None) -> dict:
     transform = config.get("transform") or {}
     inventory = config.get("inventory") or {}
     return {
-        "inventory_enabled": inventory.get("enable_inventory_items", False),
+        "inventory_enabled": _coerce_config_bool(inventory.get("enable_inventory_items")),
         "tax_rate": qbo.get("tax_rate"),
         "deposit_account": qbo.get("deposit_account", "Undeposited Funds"),
         "group_by": ", ".join(transform.get("group_by", ["date", "tender"])),
@@ -2538,6 +2686,110 @@ def _format_last_run_time(last_activity_at) -> str:
     return last_activity_at.strftime("%b %d, %Y")
 
 
+def _receipt_word(count: int) -> str:
+    return "receipt" if count == 1 else "receipts"
+
+
+def _sales_sync_display(artifact: RunArtifact | None) -> str:
+    if artifact is None:
+        return "No successful sales sync recorded"
+    uploaded = _artifact_uploaded_count(artifact)
+    skipped = _artifact_upload_stat(artifact, "skipped") or 0
+    if uploaded == 0 and skipped > 0:
+        return f"0 uploaded — {skipped} skipped (already in QBO)"
+    date_part = (
+        f" — {artifact.target_date.strftime('%b')} {artifact.target_date.day}, {artifact.target_date.year}"
+        if artifact.target_date
+        else ""
+    )
+    return f"{uploaded} {_receipt_word(uploaded)}{date_part}"
+
+
+def _inventory_activity_label(job: RunJob | None, artifact: RunArtifact | None) -> str:
+    summary = _inventory_summary_from_artifact(artifact)
+    apply_stats = summary.get("apply") if isinstance(summary.get("apply"), dict) else {}
+    apply_mode = str(apply_stats.get("mode") or "").strip().lower()
+    posted = _safe_int_stat(apply_stats, "posted") if apply_stats else 0
+    updates = (
+        _safe_int_stat(summary, "catalog_fixes_applied")
+        + _safe_int_stat(summary, "base_items_created")
+        + _safe_int_stat(summary, "duplicate_base_items_resolved")
+        + _safe_int_stat(summary, "quantity_updates_applied")
+    )
+    if apply_mode == "apply" or posted > 0 or updates > 0:
+        return "Inventory sync"
+    return "Inventory audit"
+
+
+def _activity_label_for(job: RunJob | None, artifact: RunArtifact | None = None) -> str:
+    if job and job.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL}:
+        return "Sales sync"
+    if job and job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+        return _inventory_activity_label(job, artifact)
+    if artifact:
+        if _is_inventory_artifact(artifact):
+            return _inventory_activity_label(job, artifact)
+        return "Sales sync"
+    return "Activity"
+
+
+def _latest_activity_snapshot(
+    *,
+    latest_activity_job: RunJob | None,
+    latest_sales_artifact: RunArtifact | None,
+    latest_inventory_artifact: RunArtifact | None,
+) -> dict:
+    candidates: list[tuple[datetime, str, RunJob | None, RunArtifact | None]] = []
+    if latest_activity_job:
+        activity_artifact = None
+        if latest_activity_job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+            activity_artifact = latest_inventory_artifact
+        elif latest_activity_job.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL}:
+            activity_artifact = latest_sales_artifact
+        activity_time = _run_activity_time(latest_activity_job)
+        if activity_time:
+            candidates.append(
+                (
+                    activity_time,
+                    _activity_label_for(latest_activity_job, activity_artifact),
+                    latest_activity_job,
+                    activity_artifact,
+                )
+            )
+    for artifact in (latest_sales_artifact, latest_inventory_artifact):
+        artifact_time = _artifact_activity_time(artifact)
+        if artifact and artifact_time:
+            candidates.append(
+                (
+                    artifact_time,
+                    _activity_label_for(None, artifact),
+                    artifact.run_job,
+                    artifact,
+                )
+            )
+
+    if not candidates:
+        return {
+            "at": None,
+            "label": "",
+            "display": "Last activity: None recorded",
+            "relative": "None recorded",
+            "job": None,
+            "artifact": None,
+        }
+
+    at, label, job, artifact = max(candidates, key=lambda item: item[0])
+    relative = _format_last_run_time(at)
+    return {
+        "at": at,
+        "label": label,
+        "display": f"Last activity: {label} {relative}",
+        "relative": relative,
+        "job": job,
+        "artifact": artifact,
+    }
+
+
 def _company_runs_queryset(company_key: str):
     run_ids_from_artifacts = RunArtifact.objects.filter(
         company_key=company_key,
@@ -2632,7 +2884,7 @@ def _get_company_issues_for_list(
         issues.append({
             "severity": "amber",
             "icon": "solar:question-circle-linear",
-            "message": "Company has never been synced",
+            "message": "No successful sales sync recorded",
             "action": "trigger_sync",
         })
     if latest_run and latest_run.started_at:
@@ -2641,7 +2893,7 @@ def _get_company_issues_for_list(
             issues.append({
                 "severity": "amber",
                 "icon": "solar:clock-circle-linear",
-                "message": f"No sync in {int(hours_since)} hours",
+                "message": f"No sales sync in {int(hours_since)} hours",
                 "action": "trigger_sync",
             })
     return issues
@@ -2672,60 +2924,80 @@ def _enrich_company_data(
 ) -> dict:
     """Build enriched company dict for list/detail templates. Uses same status logic as Overview.
     When preloaded is provided (e.g. from companies_list batch), use it to avoid N+1 queries."""
-    if preloaded is not None:
-        latest_artifact = preloaded.get("latest_artifact")
-        artifacts_today = preloaded.get("artifacts_today") or []
-        token_info = preloaded.get("token_info") or _get_token_info_for_display(company)
-        latest_successful_artifact = preloaded.get("latest_successful_artifact")
-    else:
-        latest_artifact = (
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .order_by("-processed_at", "-imported_at")
-            .first()
-        )
-        bounds = get_dashboard_date_bounds()
-        today_start_utc = bounds["today_start_utc"]
-        now_utc = bounds["now_utc"]
-        artifacts_today = list(
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .filter(
-                Q(processed_at__gte=today_start_utc, processed_at__lt=now_utc)
-                | Q(
-                    processed_at__isnull=True,
-                    imported_at__gte=today_start_utc,
-                    imported_at__lt=now_utc,
-                )
+    if preloaded is None:
+        preloaded_maps = _batch_preload_companies_data([company])
+        ck = company.company_key
+        preloaded = {
+            "latest_activity_job": preloaded_maps["latest_activity_jobs"].get(ck) or latest_run,
+            "latest_sales_job": preloaded_maps["latest_sales_jobs"].get(ck),
+            "latest_inventory_job": preloaded_maps["latest_inventory_jobs"].get(ck),
+            "latest_sales_artifact": preloaded_maps["latest_sales_artifacts"].get(ck),
+            "latest_inventory_artifact": preloaded_maps["latest_inventory_artifacts"].get(ck),
+            "artifacts_today": preloaded_maps["artifacts_today_by_key"].get(ck, []),
+            "latest_successful_sales_artifact": preloaded_maps[
+                "latest_successful_sales_artifacts"
+            ].get(ck),
+            "token_info": preloaded_maps["token_info_by_key"].get(ck),
+            "sales_reconcile_statuses_by_company_job": preloaded_maps[
+                "sales_reconcile_statuses_by_company_job"
+            ],
+        }
+
+    latest_activity_job = preloaded.get("latest_activity_job") or latest_run
+    latest_sales_job = preloaded.get("latest_sales_job")
+    latest_inventory_job = preloaded.get("latest_inventory_job")
+    latest_sales_artifact = preloaded.get("latest_sales_artifact")
+    latest_inventory_artifact = preloaded.get("latest_inventory_artifact")
+    latest_artifact = latest_sales_artifact
+    artifacts_today = preloaded.get("artifacts_today") or []
+    token_info = preloaded.get("token_info") or _get_token_info_for_display(company)
+    latest_successful_artifact = preloaded.get("latest_successful_sales_artifact")
+    sales_reconcile_statuses_by_company_job = preloaded.get("sales_reconcile_statuses_by_company_job") or {}
+
+    capabilities = _company_capabilities(company)
+    inventory_enabled = capabilities["inventory"]
+    sales_status = _sales_status_for_company(
+        latest_job=latest_sales_job,
+        latest_artifact=latest_sales_artifact,
+        reconcile_statuses_by_job={
+            str(latest_sales_job.id): sales_reconcile_statuses_by_company_job.get(
+                (company.company_key, str(latest_sales_job.id))
             )
-            .select_related("run_job")
-            .order_by("-processed_at", "-imported_at")
-        )
-        token_info = _get_token_info_for_display(company)
-        latest_successful_artifact = (
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
-            .select_related("run_job")
-            .order_by("-processed_at", "-imported_at", "-id")
-            .first()
-        )
+            or []
+        } if latest_sales_job else {},
+    )
+    inventory_status = _inventory_status_for_company(
+        latest_job=latest_inventory_job,
+        latest_artifact=latest_inventory_artifact,
+    )
 
     health = _company_health_snapshot(
         company,
-        latest_artifact=latest_artifact,
-        latest_job=latest_run,
+        latest_artifact=latest_sales_artifact,
+        latest_job=latest_sales_job,
         token_info=token_info,
+        inventory_enabled=inventory_enabled,
+        inventory_status=inventory_status,
     )
-    status_str = health["level"]
+    status_str = _company_card_status(
+        sales_status,
+        inventory_status,
+        token_info,
+        inventory_enabled=inventory_enabled,
+    )
     status = _status_display_from_canonical(
         status_str,
-        latest_run,
-        latest_artifact,
+        latest_sales_job,
+        latest_sales_artifact,
     )
-    run_activity = _run_activity_display(health["run_activity"])
+    run_activity = _run_activity_display(_run_activity_status(latest_activity_job))
     health_reason_labels = _health_reason_labels(health.get("reason_codes"))
-    issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
+    issues = _get_company_issues_for_list(company, latest_sales_job, latest_sales_artifact, token_info)
     config_display = _parse_config_for_display(company.config_json)
     artifacts_by_day: dict[object, list[RunArtifact]] = {}
     for artifact in artifacts_today:
+        if not _is_sales_artifact(artifact):
+            continue
         bucket = _artifact_day_bucket(artifact)
         if bucket is None:
             continue
@@ -2736,12 +3008,12 @@ def _enrich_company_data(
         if selected is None:
             continue
         records_24h += _artifact_uploaded_count(selected)
-    latest_run_time = _run_activity_time(latest_run)
-    latest_artifact_time = _artifact_activity_time(latest_artifact)
-    if latest_run_time and latest_artifact_time:
-        last_activity_at = max(latest_run_time, latest_artifact_time)
-    else:
-        last_activity_at = latest_run_time or latest_artifact_time
+    latest_activity = _latest_activity_snapshot(
+        latest_activity_job=latest_activity_job,
+        latest_sales_artifact=latest_sales_artifact,
+        latest_inventory_artifact=latest_inventory_artifact,
+    )
+    last_activity_at = latest_activity["at"]
 
     if latest_successful_artifact:
         records_latest_sync = _artifact_uploaded_count(latest_successful_artifact)
@@ -2769,27 +3041,31 @@ def _enrich_company_data(
         "health": health,
         "health_reason_labels": health_reason_labels,
         "run_activity": run_activity,
-        "latest_run": latest_run,
+        "latest_run": latest_activity_job,
+        "latest_activity_job": latest_activity_job,
+        "latest_activity_label": latest_activity["label"],
+        "latest_activity_display": latest_activity["display"],
         "latest_artifact": latest_artifact,
+        "latest_sales_job": latest_sales_job,
+        "latest_sales_artifact": latest_sales_artifact,
+        "latest_inventory_job": latest_inventory_job,
+        "latest_inventory_artifact": latest_inventory_artifact,
         "token_info": token_info,
         "issues": issues,
         "issues_highest_severity": issues_highest_severity,
         "config_display": config_display,
+        "capabilities": capabilities,
+        "inventory_enabled": inventory_enabled,
+        "sales_status": sales_status,
+        "inventory_status": inventory_status,
         "records_24h": records_24h,
         "last_activity_at": last_activity_at,
         "last_run_display": _format_last_run_time(last_activity_at),
+        "latest_sales_sync_display": _sales_sync_display(latest_successful_artifact),
         "records_latest_sync": records_latest_sync,
         "latest_sync_target_date": latest_sync_target_date,
         "upload_skipped_latest_sync": upload_skipped_latest_sync,
-        "latest_inventory_audit": (
-            RunArtifact.objects.filter(
-                company_key=company.company_key,
-                kind=RunArtifact.KIND_INVENTORY_AUDIT,
-            )
-            .select_related("run_job")
-            .order_by("-processed_at", "-imported_at")
-            .first()
-        ),
+        "latest_inventory_audit": latest_inventory_artifact if inventory_enabled else None,
     }
 
 
@@ -2833,58 +3109,101 @@ def _calculate_companies_summary(companies_data: list) -> dict:
     return {"total": total, "healthy": healthy, "warning": warning, "critical": critical, "unknown": unknown}
 
 
-def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | None], dict[str, RunArtifact | None], dict[str, list], dict[str, RunArtifact | None], dict[str, dict]]:
-    """Batch-fetch latest run, latest artifact, artifacts_today, latest_successful_artifact, and token_info per company_key.
-    Latest run per company includes All Companies runs that have an artifact for that company (same logic as overview)."""
+def _batch_preload_companies_data(companies: list) -> dict:
+    """Batch-fetch explicit activity, sales, inventory, and token state per company."""
     company_keys = [c.company_key for c in companies]
     if not company_keys:
-        return {}, {}, {}, {}, {}
+        return {
+            "latest_activity_jobs": {},
+            "latest_sales_jobs": {},
+            "latest_inventory_jobs": {},
+            "latest_sales_artifacts": {},
+            "latest_inventory_artifacts": {},
+            "artifacts_today_by_key": {},
+            "latest_successful_sales_artifacts": {},
+            "token_info_by_key": {},
+            "sales_reconcile_statuses_by_company_job": {},
+        }
 
-    # Latest run per company (include All Companies runs that produced an artifact for this company)
-    # Same logic as Overview page: include All Companies runs and prioritize running/queued jobs
-    job_id_to_company_keys: dict = defaultdict(set)
-    for run_job_id, ck in RunArtifact.objects.filter(company_key__in=company_keys).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
-        if run_job_id and ck:
-            job_id_to_company_keys[run_job_id].add(ck)
-    job_ids_with_artifacts = list(job_id_to_company_keys.keys())
-    # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
-    # Include All Companies runs (same as Overview)
-    all_relevant_jobs = list(RunJob.objects.filter(
-        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
-    ).order_by("-finished_at", "-started_at", "-created_at"))
-    latest_runs_map: dict[str, RunJob | None] = {}
-    # First pass: prioritize running/queued jobs (same as Overview)
-    for job in all_relevant_jobs:
-        if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
-            continue
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_runs_map:
-                latest_runs_map[ck] = job
-    # Second pass: fill in completed jobs for companies without active runs
-    for job in all_relevant_jobs:
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_runs_map:
-                latest_runs_map[ck] = job
+    sales_job_id_to_company_keys: dict = defaultdict(set)
+    inventory_job_id_to_company_keys: dict = defaultdict(set)
+    sales_reconcile_statuses_by_company_job: dict = defaultdict(list)
+    latest_sales_artifacts: dict[str, RunArtifact | None] = {}
+    latest_inventory_artifacts: dict[str, RunArtifact | None] = {}
 
-    # Latest artifact per company
-    latest_artifacts_map: dict[str, RunArtifact | None] = {}
-    for art in RunArtifact.objects.filter(company_key__in=company_keys).order_by("company_key", "-processed_at", "-imported_at"):
-        if art.company_key not in latest_artifacts_map:
-            latest_artifacts_map[art.company_key] = art
+    artifacts_all = list(
+        RunArtifact.objects.filter(company_key__in=company_keys)
+        .select_related("run_job")
+        .order_by("company_key", "-processed_at", "-imported_at")
+    )
+    for art in artifacts_all:
+        if _is_sales_artifact(art):
+            if art.company_key not in latest_sales_artifacts:
+                latest_sales_artifacts[art.company_key] = art
+            if art.run_job_id and art.company_key:
+                sales_job_id_to_company_keys[art.run_job_id].add(art.company_key)
+                sales_reconcile_statuses_by_company_job[
+                    (art.company_key, str(art.run_job_id))
+                ].append(art.reconcile_status or "")
+        elif _is_inventory_artifact(art):
+            if art.company_key not in latest_inventory_artifacts:
+                latest_inventory_artifacts[art.company_key] = art
+            if art.run_job_id and art.company_key:
+                inventory_job_id_to_company_keys[art.run_job_id].add(art.company_key)
+
+    def latest_jobs_for_scope(
+        *,
+        scopes: list[str] | None,
+        job_id_to_company_keys: dict,
+        include_all_companies: bool,
+    ) -> dict[str, RunJob | None]:
+        job_ids_with_artifacts = list(job_id_to_company_keys.keys())
+        query = Q(id__in=job_ids_with_artifacts)
+        if scopes:
+            query |= Q(company_key__in=company_keys, scope__in=scopes)
+            if include_all_companies and RunJob.SCOPE_ALL in scopes:
+                query |= Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        else:
+            query |= Q(company_key__in=company_keys)
+            if include_all_companies:
+                query |= Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        jobs = list(RunJob.objects.filter(query).order_by("-finished_at", "-started_at", "-created_at"))
+        latest_map: dict[str, RunJob | None] = {}
+        for active_only in (True, False):
+            for job in jobs:
+                if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                    continue
+                candidates = []
+                if job.company_key and job.company_key in company_keys:
+                    candidates.append(job.company_key)
+                elif include_all_companies and job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+                    candidates.extend(company_keys)
+                candidates.extend(job_id_to_company_keys.get(job.id, []))
+                for ck in set(candidates):
+                    if ck not in latest_map:
+                        latest_map[ck] = job
+        return latest_map
+
+    latest_sales_jobs = latest_jobs_for_scope(
+        scopes=[RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL],
+        job_id_to_company_keys=sales_job_id_to_company_keys,
+        include_all_companies=True,
+    )
+    latest_inventory_jobs = latest_jobs_for_scope(
+        scopes=[RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC],
+        job_id_to_company_keys=inventory_job_id_to_company_keys,
+        include_all_companies=False,
+    )
+    activity_job_to_company_keys: dict = defaultdict(set)
+    for job_id, keys in sales_job_id_to_company_keys.items():
+        activity_job_to_company_keys[job_id].update(keys)
+    for job_id, keys in inventory_job_id_to_company_keys.items():
+        activity_job_to_company_keys[job_id].update(keys)
+    latest_activity_jobs = latest_jobs_for_scope(
+        scopes=None,
+        job_id_to_company_keys=activity_job_to_company_keys,
+        include_all_companies=True,
+    )
 
     bounds = get_dashboard_date_bounds()
     today_start_utc = bounds["today_start_utc"]
@@ -2906,16 +3225,15 @@ def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | N
     for art in artifacts_today_all:
         artifacts_today_by_key.setdefault(art.company_key, []).append(art)
 
-    # Latest successful artifact per company
-    latest_successful_map: dict[str, RunArtifact | None] = {}
+    latest_successful_sales_artifacts: dict[str, RunArtifact | None] = {}
     for art in (
         RunArtifact.objects.filter(company_key__in=company_keys)
-        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .filter(Q(run_job__status=RunJob.STATUS_SUCCEEDED) | Q(run_job__isnull=True))
         .select_related("run_job")
         .order_by("company_key", "-processed_at", "-imported_at", "-id")
     ):
-        if art.company_key not in latest_successful_map:
-            latest_successful_map[art.company_key] = art
+        if _is_sales_artifact(art) and art.company_key not in latest_successful_sales_artifacts:
+            latest_successful_sales_artifacts[art.company_key] = art
 
     ensure_db_initialized()
     token_pairs = [
@@ -2931,7 +3249,17 @@ def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | N
         preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
         token_info_by_key[company.company_key] = _company_token_health(company, tokens=preloaded_tokens)
 
-    return latest_runs_map, latest_artifacts_map, artifacts_today_by_key, latest_successful_map, token_info_by_key
+    return {
+        "latest_activity_jobs": latest_activity_jobs,
+        "latest_sales_jobs": latest_sales_jobs,
+        "latest_inventory_jobs": latest_inventory_jobs,
+        "latest_sales_artifacts": latest_sales_artifacts,
+        "latest_inventory_artifacts": latest_inventory_artifacts,
+        "artifacts_today_by_key": artifacts_today_by_key,
+        "latest_successful_sales_artifacts": latest_successful_sales_artifacts,
+        "token_info_by_key": token_info_by_key,
+        "sales_reconcile_statuses_by_company_job": sales_reconcile_statuses_by_company_job,
+    }
 
 
 @login_required
@@ -2953,18 +3281,28 @@ def companies_list(request):
     if not companies:
         companies_data = []
     else:
-        latest_runs_map, latest_artifacts_map, artifacts_today_by_key, latest_successful_map, token_info_by_key = _batch_preload_companies_data(companies)
+        preloaded_maps = _batch_preload_companies_data(companies)
         companies_data = []
         for company in companies:
+            ck = company.company_key
             preloaded = {
-                "latest_artifact": latest_artifacts_map.get(company.company_key),
-                "artifacts_today": artifacts_today_by_key.get(company.company_key, []),
-                "latest_successful_artifact": latest_successful_map.get(company.company_key),
-                "token_info": token_info_by_key.get(company.company_key),
+                "latest_activity_job": preloaded_maps["latest_activity_jobs"].get(ck),
+                "latest_sales_job": preloaded_maps["latest_sales_jobs"].get(ck),
+                "latest_inventory_job": preloaded_maps["latest_inventory_jobs"].get(ck),
+                "latest_sales_artifact": preloaded_maps["latest_sales_artifacts"].get(ck),
+                "latest_inventory_artifact": preloaded_maps["latest_inventory_artifacts"].get(ck),
+                "artifacts_today": preloaded_maps["artifacts_today_by_key"].get(ck, []),
+                "latest_successful_sales_artifact": preloaded_maps[
+                    "latest_successful_sales_artifacts"
+                ].get(ck),
+                "token_info": preloaded_maps["token_info_by_key"].get(ck),
+                "sales_reconcile_statuses_by_company_job": preloaded_maps[
+                    "sales_reconcile_statuses_by_company_job"
+                ],
             }
             company_data = _enrich_company_data(
                 company,
-                latest_runs_map.get(company.company_key),
+                preloaded_maps["latest_activity_jobs"].get(ck),
                 preloaded=preloaded,
             )
             companies_data.append(company_data)
@@ -3011,13 +3349,16 @@ def company_detail(request, company_key):
     latest_run = recent_runs[0] if recent_runs else None
     company_data = _enrich_company_data(company, latest_run)
     # Sales from last successful run (not 7D aggregate)
-    latest_successful_artifact = (
+    latest_successful_artifact = None
+    for artifact in (
         RunArtifact.objects.filter(company_key=company_key)
-        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .filter(Q(run_job__status=RunJob.STATUS_SUCCEEDED) | Q(run_job__isnull=True))
         .select_related("run_job")
         .order_by("-processed_at", "-imported_at", "-id")
-        .first()
-    )
+    ):
+        if _is_sales_artifact(artifact):
+            latest_successful_artifact = artifact
+            break
     if latest_successful_artifact:
         amount = extract_amount_hybrid(latest_successful_artifact, prefer_reconcile=True)
         company_data["sales_last_run_display"] = _metrics_format_currency(amount)
