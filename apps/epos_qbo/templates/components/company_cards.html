@@ -25,7 +25,7 @@
                 <div class="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-400">
                     <span class="flex items-center gap-1.5">
                         <iconify-icon icon="solar:clock-circle-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
-                        {{ company_data.last_run_display }}
+                        {{ company_data.latest_activity_display }}
                     </span>
                     {% if company_data.run_activity %}
                     <span class="flex items-center gap-1.5 {% if company_data.run_activity.color == 'blue' %}text-blue-600 dark:text-blue-400{% else %}text-amber-600 dark:text-amber-400{% endif %}">
@@ -35,8 +35,14 @@
                     {% endif %}
                     <span class="flex items-center gap-1.5">
                         <iconify-icon icon="solar:document-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
-                        <span title="Sales Receipts uploaded in the most recent successful sync; date is the business date of the data’s.">{% if company_data.latest_sync_target_date %}{{ company_data.records_latest_sync|default:0 }} Sales Receipts from latest sync ({{ company_data.latest_sync_target_date|date:"M j, Y" }}){% elif company_data.records_latest_sync %}{{ company_data.records_latest_sync }} Sales Receipts from latest sync{% else %}No sync yet{% endif %}{% if company_data.records_latest_sync == 0 and company_data.upload_skipped_latest_sync > 0 %} — {{ company_data.upload_skipped_latest_sync }} skipped (already in QBO){% endif %}</span>
+                        <span title="Sales Receipts uploaded in the most recent successful sales sync.">Sales: {{ company_data.latest_sales_sync_display }}</span>
                     </span>
+                    {% if company_data.inventory_enabled %}
+                    <span class="flex items-center gap-1.5">
+                        <iconify-icon icon="solar:box-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
+                        Inventory: <span class="{% if company_data.inventory_status.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company_data.inventory_status.severity == 'warning' or company_data.inventory_status.severity == 'unknown' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">{{ company_data.inventory_status.label }}</span>
+                    </span>
+                    {% endif %}
                     <span class="flex items-center gap-1.5">
                         <iconify-icon icon="solar:key-minimalistic-linear" width="16" class="text-slate-400 dark:text-slate-500"></iconify-icon>
                         Token: <span class="{% if company_data.token_info.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company_data.token_info.severity == 'warning' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">{{ company_data.token_info.display_label }}</span>
@@ -104,8 +110,8 @@
                 <div class="flex items-start gap-2 p-3 bg-white dark:bg-slate-800 rounded-lg border {% if issue.severity == 'red' %}border-red-200 dark:border-red-800{% elif issue.severity == 'amber' %}border-amber-200 dark:border-amber-800{% else %}border-slate-200 dark:border-slate-600{% endif %}">
                     <iconify-icon icon="{{ issue.icon }}" class="{% if issue.severity == 'red' %}text-red-500 dark:text-red-400{% elif issue.severity == 'amber' %}text-amber-500 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %} mt-0.5 flex-shrink-0" width="16"></iconify-icon>
                     <div class="flex-1 min-w-0"><p class="text-sm text-slate-700 dark:text-slate-300">{{ issue.message }}</p></div>
-                    {% if issue.action == 'view_run' and company_data.latest_run %}
-                    <a href="{% url 'epos_qbo:run-detail' job_id=company_data.latest_run.id %}" class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium whitespace-nowrap">View →</a>
+                    {% if issue.action == 'view_run' and company_data.latest_sales_job %}
+                    <a href="{% url 'epos_qbo:run-detail' job_id=company_data.latest_sales_job.id %}" class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium whitespace-nowrap">View →</a>
                     {% endif %}
                 </div>
                 {% endfor %}
@@ -140,12 +146,28 @@
             </div>
         </div>
 
-        {% if company_data.latest_inventory_audit %}
+        <div class="p-6 border-t border-slate-100 dark:border-slate-700">
+            <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3 flex items-center gap-2">
+                <iconify-icon icon="solar:document-linear" width="16"></iconify-icon>
+                Sales Sync
+            </h4>
+            <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-slate-700 dark:text-slate-200 font-medium">{{ company_data.latest_sales_sync_display }}</span>
+                    <span class="text-xs font-medium {% if company_data.sales_status.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company_data.sales_status.severity == 'warning' or company_data.sales_status.severity == 'unknown' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">{{ company_data.sales_status.label }}</span>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Latest sales sync: {% if company_data.sales_status.last_run %}{{ company_data.sales_status.last_run|date:"M d, Y g:i A" }}{% else %}No successful sales sync recorded{% endif %}</p>
+                {% if company_data.sales_status.subtext %}<p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ company_data.sales_status.subtext }}</p>{% endif %}
+            </div>
+        </div>
+
+        {% if company_data.inventory_enabled %}
         <div class="p-6 border-t border-slate-100 dark:border-slate-700">
             <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3 flex items-center gap-2">
                 <iconify-icon icon="solar:box-linear" width="16"></iconify-icon>
-                Latest Inventory
+                Latest Inventory Audit
             </h4>
+            {% if company_data.latest_inventory_audit %}
             <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
                     <span class="text-xs text-slate-500 dark:text-slate-400">{{ company_data.latest_inventory_audit.processed_at|date:"M d, Y g:i A"|default:"—" }}</span>
@@ -168,37 +190,44 @@
                 {% endif %}
                 {% endwith %}
             </div>
+            {% else %}
+            <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm text-slate-500 dark:text-slate-400">
+                No inventory audit recorded.
+            </div>
+            {% endif %}
         </div>
         {% endif %}
 
-        {% if company_data.latest_run %}
+        {% if company_data.latest_activity_job %}
         <div class="p-6 border-t border-slate-100 dark:border-slate-700">
             <div class="flex items-center justify-between mb-3">
                 <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
                     <iconify-icon icon="solar:history-linear" width="16"></iconify-icon>
-                    Latest Run
+                    Latest Activity
                 </h4>
                 <a href="{% url 'epos_qbo:runs' %}?company={{ company_data.company.company_key }}" class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium">View All Runs →</a>
             </div>
             <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
                 <div class="flex items-center justify-between mb-2">
-                    <span class="text-slate-600 dark:text-slate-300">Run #{{ company_data.latest_run.id|slice:":8" }}</span>
+                    <span class="text-slate-600 dark:text-slate-300">{{ company_data.latest_activity_label }} · {{ company_data.latest_activity_job.friendly_id }}</span>
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium
-                        {% if company_data.latest_run.status == 'succeeded' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400
-                        {% elif company_data.latest_run.status == 'failed' %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400
-                        {% elif company_data.latest_run.status == 'running' %}bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400
+                        {% if company_data.latest_activity_job.status == 'succeeded' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400
+                        {% elif company_data.latest_activity_job.status == 'failed' %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400
+                        {% elif company_data.latest_activity_job.status == 'running' %}bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400
                         {% else %}bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-300{% endif %}">
-                        {{ company_data.latest_run.get_status_display }}
+                        {{ company_data.latest_activity_job.get_status_display }}
                     </span>
                 </div>
                 <div class="text-xs text-slate-500 dark:text-slate-400">
-                    {{ company_data.latest_run.started_at|date:"M d, Y g:i A" }}
-                    {% if company_data.latest_run.target_date %} • Target: {{ company_data.latest_run.target_date|date:"Y-m-d" }}{% endif %}
+                    {{ company_data.latest_activity_job.started_at|date:"M d, Y g:i A" }}
+                    {% if company_data.latest_activity_job.target_date %} • Target: {{ company_data.latest_activity_job.target_date|date:"Y-m-d" }}{% endif %}
                 </div>
-                {% if company_data.latest_run.status == 'succeeded' %}
+                {% if company_data.latest_activity_job.status == 'succeeded' %}
+                {% if company_data.latest_activity_job.scope == 'single_company' or company_data.latest_activity_job.scope == 'all_companies' %}
                 <div class="text-xs text-slate-600 dark:text-slate-300 mt-1">
                     {{ company_data.records_latest_sync|default:0 }} Sales Receipts uploaded{% if company_data.upload_skipped_latest_sync|default:0 > 0 %}, {{ company_data.upload_skipped_latest_sync }} skipped (already in QBO){% endif %}
                 </div>
+                {% endif %}
                 {% endif %}
             </div>
         </div>

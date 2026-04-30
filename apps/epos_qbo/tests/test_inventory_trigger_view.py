@@ -20,7 +20,11 @@ class InventoryTriggerViewTests(TestCase):
         CompanyConfigRecord.objects.create(
             company_key="company_a",
             display_name="Company A",
-            config_json={"company_key": "company_a", "display_name": "Company A"},
+            config_json={
+                "company_key": "company_a",
+                "display_name": "Company A",
+                "inventory": {"enable_inventory_items": True},
+            },
         )
 
     def test_requires_login(self):
@@ -146,6 +150,18 @@ class InventoryTriggerViewTests(TestCase):
         self.assertNotIn("Max quantity adjustments per run", html)
         self.assertNotIn("Catalog Cleanup", html)
         self.assertNotIn("Inventory Audit", html)
+
+    def test_runs_page_hides_inventory_trigger_when_no_company_enabled(self):
+        CompanyConfigRecord.objects.update(
+            config_json={"company_key": "company_a", "display_name": "Company A"}
+        )
+        self.client.login(username="op", password="pw")
+        response = self.client.get(reverse("epos_qbo:runs"))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertNotIn(f'action="{reverse("epos_qbo:run-trigger-inventory")}"', html)
+        self.assertIn("No companies currently have inventory enabled.", html)
 
     def test_run_detail_shows_inventory_pipeline_report_artifact(self):
         self.client.login(username="op", password="pw")

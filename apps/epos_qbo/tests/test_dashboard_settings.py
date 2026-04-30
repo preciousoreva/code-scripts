@@ -112,7 +112,7 @@ class DashboardSettingsTests(TestCase):
         ):
             enriched = views._enrich_company_data(self.company, run)
         issue_messages = [item["message"] for item in enriched["issues"]]
-        self.assertIn("No sync in 3 hours", issue_messages)
+        self.assertIn("No sales sync in 3 hours", issue_messages)
 
     @override_settings(OIAT_DASHBOARD_RECON_DIFF_WARNING="2.5")
     def test_reconcile_mismatch_threshold_respects_setting(self):
@@ -167,7 +167,7 @@ class DashboardSettingsTests(TestCase):
         ):
             status, summary = views._status_for_company(self.company, latest_artifact=None, latest_job=None)
         self.assertEqual(status, "unknown")
-        self.assertEqual(summary, "No successful sync yet.")
+        self.assertEqual(summary, "No successful sales sync recorded.")
 
     @override_settings(
         OIAT_BUSINESS_TIMEZONE="Africa/Lagos",

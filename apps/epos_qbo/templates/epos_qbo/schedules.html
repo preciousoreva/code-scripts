@@ -52,8 +52,8 @@
                 <label class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Company</label>
                 <select name="company_key" class="mt-1 w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm">
                     <option value="">Select company</option>
-                    {% for company in companies %}
-                    <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
+                    {% for company in company_options %}
+                    <option value="{{ company.company_key }}" :disabled="createScope === '{{ inventory_scope }}' && '{{ company.inventory_enabled|yesno:"true,false" }}' !== 'true'">{{ company.display_name }} ({{ company.company_key }}){% if not company.inventory_enabled %} · inventory disabled{% endif %}</option>
                     {% endfor %}
                 </select>
             </div>
@@ -299,8 +299,8 @@
                                     <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company</label>
                                     <select name="company_key" class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
                                         <option value="">—</option>
-                                        {% for company in companies %}
-                                        <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
+                                        {% for company in company_options %}
+                                        <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %} :disabled="scope === '{{ inventory_scope }}' && '{{ company.inventory_enabled|yesno:"true,false" }}' !== 'true'">{{ company.display_name }} ({{ company.company_key }}){% if not company.inventory_enabled %} · inventory disabled{% endif %}</option>
                                         {% endfor %}
                                     </select>
                                 </div>

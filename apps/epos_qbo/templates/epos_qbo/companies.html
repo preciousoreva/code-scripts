@@ -105,7 +105,7 @@
                     hx-get="{% url 'epos_qbo:companies-list' %}" hx-trigger="change" hx-target="#company-list" hx-swap="innerHTML"
                     hx-include="[name='search'], [name='filter']">
                 <option value="name" {% if sort_by == 'name' %}selected{% endif %}>Sort: Name</option>
-                <option value="last_run" {% if sort_by == 'last_run' %}selected{% endif %}>Sort: Last Run</option>
+                <option value="last_run" {% if sort_by == 'last_run' %}selected{% endif %}>Sort: Last Activity</option>
                 <option value="status" {% if sort_by == 'status' %}selected{% endif %}>Sort: Status</option>
             </select>
         </div>
