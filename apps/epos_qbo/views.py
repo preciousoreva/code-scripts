@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from math import ceil
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib import messages
@@ -1639,6 +1640,146 @@ def _schedule_default_timezone_name() -> str:
     )
 
 
+def _safe_zoneinfo(name: str | None) -> ZoneInfo:
+    raw = (name or "").strip()
+    if not raw:
+        return ZoneInfo("UTC")
+    try:
+        return ZoneInfo(raw)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _format_dt_fallback_utc(value: datetime) -> str:
+    dt = value
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.utc)
+    dt_utc = dt.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _human_day_label(*, local_dt: datetime, now_local: datetime) -> str:
+    d = local_dt.date()
+    today = now_local.date()
+    if d == today:
+        return "Today"
+    if d == today + timedelta(days=1):
+        return "Tomorrow"
+    if d == today - timedelta(days=1):
+        return "Yesterday"
+    if abs((d - today).days) <= 6:
+        return local_dt.strftime("%A")
+    return local_dt.strftime("%b %d, %Y")
+
+
+def _format_local_datetime_label(
+    value: datetime | None,
+    *,
+    tz_name: str,
+    now_utc: datetime,
+    include_tz_suffix: bool = True,
+    prefer_tz_abbrev: bool = True,
+) -> str:
+    """Format a datetime in the schedule's timezone for operator display."""
+    if value is None:
+        return "—"
+    try:
+        dt = value
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        tz = _safe_zoneinfo(tz_name)
+        local_dt = dt.astimezone(tz)
+        now_local = now_utc.astimezone(tz)
+        day = _human_day_label(local_dt=local_dt, now_local=now_local)
+        time_part = local_dt.strftime("%H:%M")
+        tz_abbrev = local_dt.strftime("%Z").strip()
+        tz_suffix = ""
+        if include_tz_suffix:
+            if prefer_tz_abbrev and tz_abbrev:
+                tz_suffix = f" {tz_abbrev}"
+            else:
+                tz_suffix = f" {tz_name}".strip() if tz_name else " UTC"
+        return f"{day} at {time_part}{tz_suffix}".strip()
+    except Exception:
+        return _format_dt_fallback_utc(value)
+
+
+def _format_schedule_next_run(schedule: RunSchedule, *, now_utc: datetime) -> str:
+    if not schedule.enabled:
+        return "—"
+    if schedule.is_one_time and schedule.completed_at is not None:
+        return "—"
+    if schedule.next_fire_at is None:
+        return "—"
+    return _format_local_datetime_label(
+        schedule.next_fire_at,
+        tz_name=schedule.timezone_name,
+        now_utc=now_utc,
+        include_tz_suffix=True,
+        prefer_tz_abbrev=True,
+    )
+
+
+def _format_one_time_timing(schedule: RunSchedule, *, now_utc: datetime) -> tuple[str, str, str]:
+    """Return (primary, secondary, detail) for one-time schedule timing column."""
+    tz_name = schedule.timezone_name or "UTC"
+    if schedule.completed_at is not None:
+        completed = _format_local_datetime_label(
+            schedule.completed_at,
+            tz_name=tz_name,
+            now_utc=now_utc,
+            include_tz_suffix=False,
+        )
+        primary = f"Completed {completed.lower()}"
+        return primary, f"{tz_name} · Ran once", ""
+    if not schedule.enabled:
+        when = _format_local_datetime_label(
+            schedule.run_once_at,
+            tz_name=tz_name,
+            now_utc=now_utc,
+            include_tz_suffix=False,
+        )
+        return "Disabled one-time run", f"{tz_name} · Scheduled for {when}", ""
+    when = _format_local_datetime_label(
+        schedule.run_once_at or schedule.next_fire_at,
+        tz_name=tz_name,
+        now_utc=now_utc,
+        include_tz_suffix=False,
+    )
+    return when, f"{tz_name} · Run once", ""
+
+
+def _format_recurring_timing(schedule: RunSchedule) -> tuple[str, str, str]:
+    primary = _friendly_cron_label(schedule)
+    secondary = schedule.timezone_name or "UTC"
+    detail = f"Cron: {schedule.cron_expr}" if schedule.cron_expr else "Cron: —"
+    return primary, secondary, detail
+
+
+def _local_input_date_time(
+    value: datetime | None,
+    *,
+    tz_name: str,
+) -> tuple[str, str]:
+    """Return (YYYY-MM-DD, HH:MM) in schedule timezone for form input values."""
+    if value is None:
+        return "", ""
+    try:
+        dt = value
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        tz = _safe_zoneinfo(tz_name)
+        local_dt = dt.astimezone(tz)
+        return local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M")
+    except Exception:
+        # Fallback to UTC representation (still safe for form inputs)
+        dt = value
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        utc_dt = dt.astimezone(timezone.utc)
+        return utc_dt.strftime("%Y-%m-%d"), utc_dt.strftime("%H:%M")
+
+
 def _schedule_create_initial() -> dict:
     return {
         "enabled": True,
@@ -1836,9 +1977,24 @@ def _schedule_last_result(schedule: RunSchedule) -> dict:
 
 def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) -> list[dict]:
     rows: list[dict] = []
+    now_utc = timezone.now()
     for schedule in schedules:
         result = _schedule_last_result(schedule)
         one_time_completed = schedule.is_one_time and schedule.completed_at is not None
+        if schedule.is_one_time:
+            timing_primary, timing_secondary, timing_detail = _format_one_time_timing(
+                schedule,
+                now_utc=now_utc,
+            )
+        else:
+            timing_primary, timing_secondary, timing_detail = _format_recurring_timing(schedule)
+        run_once_date_value = ""
+        run_once_time_value = ""
+        if schedule.is_one_time:
+            run_once_date_value, run_once_time_value = _local_input_date_time(
+                schedule.run_once_at,
+                tz_name=schedule.timezone_name,
+            )
         rows.append(
             {
                 "schedule": schedule,
@@ -1846,13 +2002,18 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
                 "subtitle": _schedule_subtitle(schedule, company_map),
                 "workflow": _schedule_workflow(schedule),
                 "company_target": _schedule_company_target(schedule),
-                "friendly_cron": _friendly_cron_label(schedule),
+                "timing_primary": timing_primary,
+                "timing_secondary": timing_secondary,
+                "timing_detail": timing_detail,
+                "next_run_label": _format_schedule_next_run(schedule, now_utc=now_utc),
                 "last_result_label": result["label"],
                 "last_run_at": result["last_run_at"],
                 "current_status_label": result["current"],
                 "one_time_completed": one_time_completed,
                 "category": _first_inventory_category(schedule),
                 "product_filter": _inventory_product_filter(schedule),
+                "run_once_date_value": run_once_date_value,
+                "run_once_time_value": run_once_time_value,
             }
         )
     return rows
@@ -1889,6 +2050,7 @@ def _operator_schedule_form_error_message(form: RunScheduleForm) -> str:
 @require_GET
 def schedules_page(request):
     _ensure_company_records()
+    now_utc = timezone.now()
     schedules = list(RunSchedule.objects.order_by("-is_system_managed", "name", "created_at"))
     recent_events = list(
         RunScheduleEvent.objects.select_related("schedule", "run_job", "run_job__scheduled_by")
@@ -1918,6 +2080,11 @@ def schedules_page(request):
         if len(inventory_company_options) == 1
         else ""
     )
+    default_tz_name = _schedule_default_timezone_name()
+    default_tz = _safe_zoneinfo(default_tz_name)
+    now_default_local = now_utc.astimezone(default_tz)
+    now_default_time = now_default_local.strftime("%H:%M")
+    now_default_abbrev = now_default_local.strftime("%Z").strip()
     context = {
         "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
         "schedule_rows": _schedule_rows(schedules, company_map),
@@ -1926,6 +2093,8 @@ def schedules_page(request):
         "company_options": company_options,
         "inventory_company_options": inventory_company_options,
         "inventory_company_default_key": inventory_company_default_key,
+        "default_schedule_timezone_name": default_tz_name,
+        "default_schedule_timezone_now_label": f"{now_default_time} {now_default_abbrev}".strip(),
         "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
         "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
         "single_scope": RunJob.SCOPE_SINGLE,
