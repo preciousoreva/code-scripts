@@ -289,24 +289,18 @@
                 </thead>
                 <tbody x-data="{ openEditId: null }" @close-edit="openEditId = null" class="text-slate-900 dark:text-slate-200">
                     {% for section in schedule_sections %}
-                    {% if section.rows %}
-                    <tr class="bg-slate-900/5 text-slate-500 border-y border-slate-200/80 dark:text-slate-400 dark:border-slate-700">
-                        <td colspan="5" class="px-4 py-1.5">
-                            <span class="text-[11px] font-semibold uppercase tracking-wider">{{ section.title }}</span>
-                        </td>
+                    {% if section.rows or section.show_when_empty %}
+                    <tr class="bg-slate-50 dark:bg-slate-700/40 border-y border-slate-200 dark:border-slate-700">
+                        <td colspan="5" class="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{{ section.title }}</td>
                     </tr>
+                    {% if section.rows %}
                         {% for row in section.rows %}
                         {% with schedule=row.schedule %}
-                        <tr class="border-b border-slate-100 dark:border-slate-700 {% if row.one_time_completed %}bg-slate-50/40 dark:bg-slate-900/20{% endif %}">
+                        <tr class="border-b border-slate-100 dark:border-slate-700">
                             <td class="px-4 py-3 align-top">
                                 <div class="font-medium text-slate-900 dark:text-slate-100 break-words">{{ row.display_name }}</div>
                                 <div class="text-xs font-normal leading-snug text-slate-500 dark:text-slate-400 mt-1 break-words">
                                     {{ row.subtitle|escape }}
-                                </div>
-                                <div class="flex flex-wrap gap-1.5 mt-2">
-                                    {% if schedule.is_one_time %}
-                                    <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700">One-time</span>
-                                    {% endif %}
                                 </div>
                                 {% if row.last_run_at %}
                                 <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">Last run: {{ row.last_run_at|date:"Y-m-d H:i" }} · {{ row.last_result_label }}</div>
@@ -316,9 +310,7 @@
                             </td>
                             <td class="px-4 py-3 align-top">
                                 <div class="flex flex-col items-start gap-1.5">
-                                    {% if row.one_time_completed %}
-                                    <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700/70 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600">Completed</span>
-                                    {% elif schedule.enabled %}
+                                    {% if schedule.enabled %}
                                     <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Enabled</span>
                                     {% else %}
                                     <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">Disabled</span>
@@ -508,6 +500,11 @@
                         {% endif %}
                         {% endwith %}
                         {% endfor %}
+                    {% else %}
+                    <tr>
+                        <td colspan="5" class="px-4 py-4 text-sm text-slate-500 dark:text-slate-400">{{ section.empty_message }}</td>
+                    </tr>
+                    {% endif %}
                     {% endif %}
                     {% endfor %}
                 </tbody>

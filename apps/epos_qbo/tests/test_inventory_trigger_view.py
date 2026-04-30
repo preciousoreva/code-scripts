@@ -189,7 +189,7 @@ class InventoryTriggerViewTests(TestCase):
             catalog_cleanup = base / "inventory_catalog_cleanup_company_a_120000.csv"
             catalog_cleanup.write_text("base_name,planned_action\nWidget,noop\n", encoding="utf-8")
 
-            RunArtifact.objects.create(
+            artifact = RunArtifact.objects.create(
                 kind=RunArtifact.KIND_INVENTORY_AUDIT,
                 run_job=job,
                 company_key="company_a",
@@ -228,10 +228,23 @@ class InventoryTriggerViewTests(TestCase):
             self.assertIn("catalog", html)
             self.assertIn("blocked", html)
             self.assertIn("Summary CSV", html)
-            self.assertIn("Summary JSON", html)
+            self.assertNotIn("Summary JSON", html)
             self.assertIn("Final Audit", html)
             self.assertIn("Initial Audit", html)
             self.assertIn("Catalog Cleanup", html)
+            self.assertIn('<select x-model="selectedReport"', html)
+            summary_csv_url = reverse(
+                "epos_qbo:run-artifact-report",
+                kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+            )
+            summary_json_url = reverse(
+                "epos_qbo:run-artifact-report",
+                kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_json"},
+            )
+            self.assertIn(f'<option value="{summary_csv_url}">Summary CSV</option>', html)
+            self.assertNotIn(summary_json_url, html)
+            self.assertIn('x-model="selectedReport"', html)
+            self.assertIn(':href="selectedReport"', html)
             self.assertNotIn("Run succeeded but no artifacts were linked", html)
             self.assertNotIn("Reconciliation did not run or failed", html)
 
@@ -343,11 +356,12 @@ class InventoryTriggerViewTests(TestCase):
         self.assertEqual(detail.status_code, 200)
         html = detail.content.decode("utf-8")
         self.assertIn("Summary CSV", html)
-        self.assertIn("Summary JSON", html)
+        self.assertNotIn("Summary JSON", html)
         self.assertIn("Final Audit", html)
         self.assertIn("Initial Audit", html)
         self.assertIn("Catalog Cleanup", html)
         self.assertIn("Post Catalog Audit", html)
+        self.assertIn('<select x-model="selectedReport"', html)
         self.assertEqual(download.status_code, 200)
         self.assertEqual(b"".join(download.streaming_content), b"sku,status\nABC,in_sync\n")
 

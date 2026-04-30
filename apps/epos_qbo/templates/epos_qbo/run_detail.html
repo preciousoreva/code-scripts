@@ -118,17 +118,35 @@
                         </td>
                         <td class="px-3 py-2 align-top">
                             {% if artifact.report_links %}
-                            <div class="flex flex-wrap gap-1.5 max-w-xs">
-                                {% for report in artifact.report_links %}
-                                <a href="{{ report.url }}"
+                            {% if artifact.report_links|length == 1 %}
+                            {% with report=artifact.report_links.0 %}
+                            <a href="{{ report.url }}"
+                               download
+                               title="{{ report.path }}"
+                               class="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                <iconify-icon icon="solar:download-minimalistic-linear" width="14" aria-hidden="true"></iconify-icon>
+                                {{ report.label }}
+                            </a>
+                            {% endwith %}
+                            {% else %}
+                            <div x-data="{ selectedReport: '{{ artifact.report_links.0.url }}' }" class="flex items-center gap-2 min-w-[18rem]">
+                                <select x-model="selectedReport"
+                                        aria-label="Select report"
+                                        class="h-8 min-w-0 flex-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 text-xs text-slate-700 dark:text-slate-200">
+                                    {% for report in artifact.report_links %}
+                                    <option value="{{ report.url }}">{{ report.label }}</option>
+                                    {% endfor %}
+                                </select>
+                                <a href="{{ artifact.report_links.0.url }}"
+                                   :href="selectedReport"
                                    download
-                                   title="{{ report.path }}"
-                                   class="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                   class="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                                   :class="selectedReport ? '' : 'pointer-events-none opacity-50'">
                                     <iconify-icon icon="solar:download-minimalistic-linear" width="14" aria-hidden="true"></iconify-icon>
-                                    {{ report.label }}
+                                    Download
                                 </a>
-                                {% endfor %}
                             </div>
+                            {% endif %}
                             {% else %}
                             <span class="text-slate-400 dark:text-slate-500">—</span>
                             {% endif %}
