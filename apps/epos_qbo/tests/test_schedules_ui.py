@@ -61,9 +61,55 @@ class SchedulesUiTests(TestCase):
         self.assertContains(response, "Sales Sync")
         self.assertContains(response, "Inventory Sync")
         self.assertContains(response, "One-time")
-        self.assertContains(response, "Recurring")
+        # Recurring is implied by Timing; avoid redundant "Recurring" pills in configured rows.
+        # (The Create/Edit forms still include "Recurring" as an option label.)
+        RunSchedule.objects.create(
+            name="Daily Sales Sync",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            next_fire_at=self.fixed_now + timedelta(hours=1),
+        )
+        response = self.client.get(reverse("epos_qbo:schedules"))
+        self.assertNotContains(response, ">Recurring</span>")
         self.assertNotContains(response, "Sales - all companies")
         self.assertNotContains(response, "Sales - single company")
+
+    def test_inventory_company_picker_only_lists_inventory_enabled_companies(self):
+        CompanyConfigRecord.objects.create(
+            company_key="company_b",
+            display_name="GOLDPLATES FEASTHOUSE LTD.",
+            config_json={"inventory": {"enable_inventory_items": False}},
+            is_active=True,
+        )
+        response = self.client.get(reverse("epos_qbo:schedules"))
+        self.assertEqual(response.status_code, 200)
+        # Inventory-only company dropdown should not advertise inventory-disabled companies.
+        self.assertNotContains(response, "inventory disabled")
+
+    def test_invalid_inventory_all_companies_shows_operator_friendly_message(self):
+        payload = self._create_payload()
+        payload.update(
+            {
+                "name": "Invalid inventory all companies",
+                "schedule_type": RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+                "workflow": "inventory",
+                "company_target": "all",
+                "company_key": "",
+                "cron_expr": "",
+                "run_once_date": "2026-04-30",
+                "run_once_time": "20:05",
+                "timezone_name": "Africa/Lagos",
+            }
+        )
+        response = self.client.post(reverse("epos_qbo:schedule-create"), payload, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Inventory Sync currently supports one inventory-enabled company")
+        # Ensure the top banner doesn't leak raw field names (form markup will contain them).
+        self.assertNotContains(response, "Invalid schedule payload:")
+        self.assertNotContains(response, "company_target:")
 
     def test_create_update_toggle_delete_schedule(self):
         response = self.client.post(reverse("epos_qbo:schedule-create"), self._create_payload())
