@@ -290,8 +290,8 @@
                 <tbody x-data="{ openEditId: null }" @close-edit="openEditId = null" class="text-slate-900 dark:text-slate-200">
                     {% for section in schedule_sections %}
                     {% if section.rows or section.show_when_empty %}
-                    <tr class="bg-slate-50 dark:bg-slate-700/40 border-y border-slate-200 dark:border-slate-700">
-                        <td colspan="5" class="px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{{ section.title }}</td>
+                    <tr class="border-y border-slate-200 dark:border-slate-700">
+                        <td colspan="5" class="bg-slate-50 dark:bg-slate-800 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{{ section.title }}</td>
                     </tr>
                     {% if section.rows %}
                         {% for row in section.rows %}

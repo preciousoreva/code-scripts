@@ -236,8 +236,9 @@ class SchedulesUiTests(TestCase):
         self.assertNotIn("Completed One-time Runs", html)
         self.assertNotIn("bg-slate-300", html)
         self.assertNotIn("bg-gray-300", html)
-        self.assertIn("bg-slate-50 dark:bg-slate-700/40 border-y", html)
-        self.assertEqual(html.count("bg-slate-50 dark:bg-slate-700/40 border-y"), 2)
+        section_header_class = 'colspan="5" class="bg-slate-50 dark:bg-slate-800'
+        self.assertIn(section_header_class, html)
+        self.assertEqual(html.count(section_header_class), 2)
 
     def test_schedules_page_displays_one_time_completed_schedule(self):
         completed_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)
