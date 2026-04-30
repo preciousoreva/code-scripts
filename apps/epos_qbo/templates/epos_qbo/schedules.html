@@ -278,7 +278,7 @@
                     <col class="w-[18%]">
                     <col class="w-[10%]">
                 </colgroup>
-                <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
+                <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-600">
                     <tr>
                         <th class="text-left px-4 py-3 font-medium">Workflow</th>
                         <th class="text-left px-4 py-3 font-medium">Status</th>
@@ -290,7 +290,7 @@
                 <tbody x-data="{ openEditId: null }" @close-edit="openEditId = null" class="text-slate-900 dark:text-slate-200">
                     {% for section in schedule_sections %}
                     {% if section.rows or section.show_when_empty %}
-                    <tr class="border-t-2 border-b border-slate-200 dark:border-slate-600">
+                    <tr class="border-y-2 border-slate-200 dark:border-slate-600">
                         <td colspan="5" class="bg-slate-50 dark:bg-slate-700/50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">{{ section.title }}</td>
                     </tr>
                     {% if section.rows %}
