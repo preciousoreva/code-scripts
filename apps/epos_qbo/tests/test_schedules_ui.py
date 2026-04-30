@@ -26,6 +26,7 @@ class SchedulesUiTests(TestCase):
                 "display_name": "AKPONORA VENTURES LTD.",
                 "qbo": {"realm_id": "123"},
                 "epos": {"username_env_key": "EPOS_USERNAME_A", "password_env_key": "EPOS_PASSWORD_A"},
+                "inventory": {"enable_inventory_items": True},
             },
         )
 
@@ -33,7 +34,9 @@ class SchedulesUiTests(TestCase):
         return {
             "name": "Daily all companies",
             "enabled": "on",
-            "scope": RunJob.SCOPE_ALL,
+            "schedule_type": RunSchedule.SCHEDULE_TYPE_RECURRING,
+            "workflow": "sales",
+            "company_target": "all",
             "company_key": "",
             "cron_expr": "*/5 * * * *",
             "timezone_name": "UTC",
@@ -54,6 +57,13 @@ class SchedulesUiTests(TestCase):
         self.assertContains(response, "Online means the scheduler worker is polling for due schedules")
         self.assertContains(response, "It does not mean every schedule is enabled or successful")
         self.assertContains(response, "Offline means scheduled runs will not be picked up")
+        self.assertContains(response, "Run type")
+        self.assertContains(response, "Sales Sync")
+        self.assertContains(response, "Inventory Sync")
+        self.assertContains(response, "One-time")
+        self.assertContains(response, "Recurring")
+        self.assertNotContains(response, "Sales - all companies")
+        self.assertNotContains(response, "Sales - single company")
 
     def test_create_update_toggle_delete_schedule(self):
         response = self.client.post(reverse("epos_qbo:schedule-create"), self._create_payload())
@@ -102,7 +112,9 @@ class SchedulesUiTests(TestCase):
             {
                 "name": "Weekly Inventory Sync",
                 "enabled": "",
-                "scope": RunJob.SCOPE_INVENTORY_PIPELINE,
+                "schedule_type": RunSchedule.SCHEDULE_TYPE_RECURRING,
+                "workflow": "inventory",
+                "company_target": "one",
                 "company_key": "company_a",
                 "cron_expr": "0 20 * * 0",
                 "timezone_name": "Africa/Lagos",
@@ -169,6 +181,31 @@ class SchedulesUiTests(TestCase):
         self.assertNotContains(response, "Cron / TZ")
         self.assertContains(response, "Recent Schedule Activity")
         self.assertNotContains(response, "Recent Scheduled Events")
+
+    def test_schedules_page_displays_one_time_completed_schedule(self):
+        completed_at = self.fixed_now - timedelta(minutes=10)
+        RunSchedule.objects.create(
+            name="Sunday Inventory Sync",
+            enabled=False,
+            schedule_type=RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key=self.company.company_key,
+            cron_expr="",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            run_once_at=self.fixed_now,
+            completed_at=completed_at,
+            last_fired_at=completed_at,
+            last_result=RunSchedule.LAST_RESULT_QUEUED,
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Sunday Inventory Sync")
+        self.assertContains(response, "One-time")
+        self.assertContains(response, "Completed")
+        self.assertContains(response, "Queued once at")
 
     def test_last_result_uses_latest_terminal_event_not_queued(self):
         schedule = RunSchedule.objects.create(

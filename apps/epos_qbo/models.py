@@ -542,6 +542,13 @@ class RunLock(models.Model):
 
 
 class RunSchedule(models.Model):
+    SCHEDULE_TYPE_RECURRING = "recurring"
+    SCHEDULE_TYPE_ONE_TIME = "one_time"
+    SCHEDULE_TYPE_CHOICES = [
+        (SCHEDULE_TYPE_RECURRING, "Recurring"),
+        (SCHEDULE_TYPE_ONE_TIME, "One-time"),
+    ]
+
     TARGET_DATE_MODE_TRADING_DATE = "trading_date"
     TARGET_DATE_MODE_CHOICES = [
         (TARGET_DATE_MODE_TRADING_DATE, "Target Trading Date"),
@@ -567,10 +574,17 @@ class RunSchedule(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=120)
     enabled = models.BooleanField(default=True)
+    schedule_type = models.CharField(
+        max_length=16,
+        choices=SCHEDULE_TYPE_CHOICES,
+        default=SCHEDULE_TYPE_RECURRING,
+    )
     scope = models.CharField(max_length=32, choices=RunJob.SCOPE_CHOICES, default=RunJob.SCOPE_ALL)
     company_key = models.SlugField(max_length=64, null=True, blank=True)
-    cron_expr = models.CharField(max_length=120)
+    cron_expr = models.CharField(max_length=120, blank=True)
     timezone_name = models.CharField(max_length=64, default="UTC")
+    run_once_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
     inventory_options_json = models.JSONField(default=dict, blank=True)
     target_date_mode = models.CharField(
         max_length=32,
@@ -614,7 +628,13 @@ class RunSchedule(models.Model):
         ]
 
     def __str__(self) -> str:
+        if self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            return f"{self.name} (one-time)"
         return f"{self.name} ({self.cron_expr})"
+
+    @property
+    def is_one_time(self) -> bool:
+        return self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME
 
     @property
     def last_fired_relative(self) -> str:
@@ -622,10 +642,17 @@ class RunSchedule(models.Model):
 
     def clean(self) -> None:
         errors: dict[str, str] = {}
-        try:
-            validate_cron_expr(self.cron_expr)
-        except ValidationError:
-            errors["cron_expr"] = "Enter a valid cron expression."
+        if self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            if self.run_once_at is None:
+                errors["run_once_at"] = "Run once time is required for one-time schedules."
+            self.cron_expr = (self.cron_expr or "").strip()
+        else:
+            try:
+                validate_cron_expr(self.cron_expr)
+            except ValidationError:
+                errors["cron_expr"] = "Enter a valid cron expression."
+            self.run_once_at = None
+            self.completed_at = None
         try:
             validate_timezone_name(self.timezone_name)
         except ValidationError:
@@ -647,6 +674,14 @@ class RunSchedule(models.Model):
             raise ValidationError(errors)
 
     def compute_next_fire_at(self, *, from_dt: datetime | None = None) -> datetime:
+        if self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            if self.run_once_at is None:
+                raise ValidationError("Run once time is required for one-time schedules.")
+            run_once_at = self.run_once_at
+            if timezone.is_naive(run_once_at):
+                run_once_at = timezone.make_aware(run_once_at, dt_timezone.utc)
+            return run_once_at.astimezone(dt_timezone.utc)
+
         validate_cron_expr(self.cron_expr)
         validate_timezone_name(self.timezone_name)
 
@@ -672,6 +707,7 @@ class RunScheduleEvent(models.Model):
     TYPE_SKIPPED_OVERLAP = "skipped_overlap"
     TYPE_SKIPPED_INVALID = "skipped_invalid"
     TYPE_ERROR = "error"
+    TYPE_ONE_TIME_COMPLETED = "one_time_completed"
     TYPE_FALLBACK_ENABLED = "fallback_enabled"
     TYPE_FALLBACK_DISABLED = "fallback_disabled"
     TYPE_RUN_SUCCEEDED = "run_succeeded"
@@ -681,6 +717,7 @@ class RunScheduleEvent(models.Model):
         (TYPE_SKIPPED_OVERLAP, "Skipped Overlap"),
         (TYPE_SKIPPED_INVALID, "Skipped Invalid"),
         (TYPE_ERROR, "Error"),
+        (TYPE_ONE_TIME_COMPLETED, "One-time Completed"),
         (TYPE_FALLBACK_ENABLED, "Fallback Enabled"),
         (TYPE_FALLBACK_DISABLED, "Fallback Disabled"),
         (TYPE_RUN_SUCCEEDED, "Run Succeeded"),
@@ -742,6 +779,7 @@ class RunScheduleEvent(models.Model):
             self.TYPE_SKIPPED_OVERLAP: "Run skipped",
             self.TYPE_SKIPPED_INVALID: "Run skipped",
             self.TYPE_ERROR: "Run failed",
+            self.TYPE_ONE_TIME_COMPLETED: "One-time completed",
             self.TYPE_FALLBACK_ENABLED: "Schedule enabled",
             self.TYPE_FALLBACK_DISABLED: "Schedule disabled",
         }
@@ -755,6 +793,7 @@ class RunScheduleEvent(models.Model):
             self.TYPE_RUN_FAILED: "Run failed",
             self.TYPE_SKIPPED_OVERLAP: "Skipped because another run is active",
             self.TYPE_ERROR: "Run failed",
+            self.TYPE_ONE_TIME_COMPLETED: "Queued once and disabled",
             self.TYPE_FALLBACK_ENABLED: "Schedule enabled",
             self.TYPE_FALLBACK_DISABLED: "Schedule is disabled",
         }
