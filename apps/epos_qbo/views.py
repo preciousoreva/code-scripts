@@ -22,6 +22,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
+from oiat_portal.paths import OPS_REPORTS_DIR
 from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
 
 from .forms import (
@@ -129,6 +130,40 @@ RUN_ARTIFACT_REPORT_ORDER = [
     "source",
 ]
 RUN_ARTIFACT_REPORT_SUFFIXES = {".csv", ".json"}
+
+
+def _unique_existing_resolved_dirs(paths: list[Path]) -> list[Path]:
+    roots: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _trusted_report_roots() -> list[Path]:
+    roots = [
+        Path(settings.BASE_DIR),
+        OPS_REPORTS_DIR,
+    ]
+    state_root = os.getenv("STATE_ROOT") or os.getenv("OIAT_STATE_ROOT")
+    if state_root:
+        roots.append(Path(state_root) / "code_scripts" / "reports")
+    roots.append(Path("/data/code_scripts/reports"))
+    return _unique_existing_resolved_dirs(roots)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _health_reason_labels(reason_codes: list[str] | None) -> list[str]:
@@ -3005,19 +3040,17 @@ def _resolve_artifact_report_path(artifact: RunArtifact, report_key: str) -> Pat
     if not raw_path or "\x00" in raw_path:
         raise Http404("Report not found.")
 
-    base_dir = Path(settings.BASE_DIR).resolve()
+    base_dir = Path(settings.BASE_DIR).resolve(strict=False)
     candidate = Path(os.path.expandvars(raw_path)).expanduser()
     resolved = (
         candidate.resolve(strict=False)
         if candidate.is_absolute()
         else (base_dir / candidate).resolve(strict=False)
     )
-    try:
-        resolved.relative_to(base_dir)
-    except ValueError as exc:
-        raise Http404("Report not found.") from exc
 
     if resolved.suffix.lower() not in RUN_ARTIFACT_REPORT_SUFFIXES:
+        raise Http404("Report not found.")
+    if not any(_path_is_relative_to(resolved, root) for root in _trusted_report_roots()):
         raise Http404("Report not found.")
     if not resolved.exists() or not resolved.is_file():
         raise Http404("Report not found.")

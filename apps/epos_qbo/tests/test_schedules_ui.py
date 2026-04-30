@@ -234,6 +234,8 @@ class SchedulesUiTests(TestCase):
         self.assertNotIn("Completed One-time Runs", html)
         self.assertNotIn("bg-slate-300", html)
         self.assertNotIn("bg-gray-300", html)
+        self.assertIn("bg-slate-900/5 text-slate-500 border-y", html)
+        self.assertNotIn("bg-slate-50 text-slate-600 border-y", html)
 
     def test_schedules_page_displays_one_time_completed_schedule(self):
         completed_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)

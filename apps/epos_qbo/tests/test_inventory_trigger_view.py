@@ -276,6 +276,160 @@ class InventoryTriggerViewTests(TestCase):
             self.assertEqual(b"".join(response.streaming_content), b"sku,status\nABC,in_sync\n")
             self.assertIn("inventory_pipeline_company_a_120000.csv", response.headers["Content-Disposition"])
 
+    def test_operational_report_root_paths_render_and_download(self):
+        self.client.login(username="op", password="pw")
+        with TemporaryDirectory() as td:
+            ops_reports_root = Path(td) / "code_scripts" / "reports"
+            pipeline_dir = ops_reports_root / "inventory_pipeline" / "2026-04-30"
+            sync_dir = ops_reports_root / "inventory_sync" / "2026-04-30"
+            cleanup_dir = ops_reports_root / "inventory_catalog_cleanup" / "2026-04-30"
+            pipeline_dir.mkdir(parents=True)
+            sync_dir.mkdir(parents=True)
+            cleanup_dir.mkdir(parents=True)
+            summary_json = pipeline_dir / "inventory_pipeline_company_a_191504.json"
+            summary_csv = pipeline_dir / "inventory_pipeline_company_a_191504.csv"
+            final_audit = sync_dir / "inventory_audit_company_a_final_191504.csv"
+            initial_audit = sync_dir / "inventory_audit_company_a_initial_180545.csv"
+            catalog_cleanup = cleanup_dir / "inventory_catalog_cleanup_company_a_pipeline_180558.csv"
+            post_catalog = sync_dir / "inventory_audit_company_a_post_catalog_184100.csv"
+            summary_json.write_text("{}", encoding="utf-8")
+            summary_csv.write_text("sku,status\nABC,in_sync\n", encoding="utf-8")
+            final_audit.write_text("base_name,status\nABC,in_sync\n", encoding="utf-8")
+            initial_audit.write_text("base_name,status\nABC,needs_review\n", encoding="utf-8")
+            catalog_cleanup.write_text("base_name,planned_action\nABC,noop\n", encoding="utf-8")
+            post_catalog.write_text("base_name,status\nABC,in_sync\n", encoding="utf-8")
+            job = RunJob.objects.create(
+                scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+                company_key="company_a",
+                status=RunJob.STATUS_SUCCEEDED,
+                exit_code=0,
+            )
+            artifact = RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(summary_json),
+                source_hash="g" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={
+                    "report_type": "inventory_pipeline",
+                    "products_checked": 3345,
+                    "in_sync": 3206,
+                    "blocked_items": 139,
+                    "summary_json": str(summary_json),
+                    "summary_csv": str(summary_csv),
+                    "child_reports": {
+                        "final_audit": str(final_audit),
+                        "initial_audit": str(initial_audit),
+                        "catalog_cleanup": str(catalog_cleanup),
+                        "post_catalog_audit": str(post_catalog),
+                    },
+                },
+            )
+
+            with mock.patch(
+                "apps.epos_qbo.views._trusted_report_roots",
+                return_value=[ops_reports_root.resolve()],
+            ):
+                detail = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
+                download = self.client.get(
+                    reverse(
+                        "epos_qbo:run-artifact-report",
+                        kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                    )
+                )
+
+        self.assertEqual(detail.status_code, 200)
+        html = detail.content.decode("utf-8")
+        self.assertIn("Summary CSV", html)
+        self.assertIn("Summary JSON", html)
+        self.assertIn("Final Audit", html)
+        self.assertIn("Initial Audit", html)
+        self.assertIn("Catalog Cleanup", html)
+        self.assertIn("Post Catalog Audit", html)
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b"".join(download.streaming_content), b"sku,status\nABC,in_sync\n")
+
+    def test_report_download_rejects_existing_file_outside_trusted_roots(self):
+        self.client.login(username="op", password="pw")
+        with TemporaryDirectory() as trusted_td, TemporaryDirectory() as outside_td:
+            trusted_root = Path(trusted_td) / "reports"
+            trusted_root.mkdir()
+            outside_file = Path(outside_td) / "summary.csv"
+            outside_file.write_text("ok\n", encoding="utf-8")
+            job = RunJob.objects.create(
+                scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+                company_key="company_a",
+                status=RunJob.STATUS_SUCCEEDED,
+                exit_code=0,
+            )
+            artifact = RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(outside_file),
+                source_hash="h" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={"report_type": "inventory_pipeline", "summary_csv": str(outside_file)},
+            )
+
+            with mock.patch(
+                "apps.epos_qbo.views._trusted_report_roots",
+                return_value=[trusted_root.resolve()],
+            ), suppress_expected_request_logs():
+                response = self.client.get(
+                    reverse(
+                        "epos_qbo:run-artifact-report",
+                        kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_missing_report_file_does_not_render_button(self):
+        self.client.login(username="op", password="pw")
+        with TemporaryDirectory() as td:
+            trusted_root = Path(td) / "reports"
+            trusted_root.mkdir()
+            missing_csv = trusted_root / "missing_summary.csv"
+            job = RunJob.objects.create(
+                scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+                company_key="company_a",
+                status=RunJob.STATUS_SUCCEEDED,
+                exit_code=0,
+            )
+            artifact = RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(missing_csv.with_suffix(".json")),
+                source_hash="i" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={"report_type": "inventory_pipeline", "summary_csv": str(missing_csv)},
+            )
+
+            with mock.patch(
+                "apps.epos_qbo.views._trusted_report_roots",
+                return_value=[trusted_root.resolve()],
+            ):
+                detail = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
+                with suppress_expected_request_logs():
+                    download = self.client.get(
+                        reverse(
+                            "epos_qbo:run-artifact-report",
+                            kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                        )
+                    )
+
+        self.assertEqual(detail.status_code, 200)
+        html = detail.content.decode("utf-8")
+        self.assertNotIn("Summary CSV", html)
+        self.assertIn("<span class=\"text-slate-400 dark:text-slate-500\">—</span>", html)
+        self.assertEqual(download.status_code, 404)
+
     def test_report_download_rejects_unknown_or_missing_report(self):
         self.client.login(username="op", password="pw")
         job = RunJob.objects.create(
