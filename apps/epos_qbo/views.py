@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from math import ceil
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -15,7 +16,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.db import DatabaseError
 from django.db.models import Q
-from django.http import Http404, HttpResponseForbidden, JsonResponse
+from django.http import FileResponse, Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -109,6 +110,25 @@ EXIT_CODE_REFERENCE = [
     {"code": "126", "message": "Subprocess command invoked but not executable."},
     {"code": "127", "message": "Subprocess command/dependency not found."},
 ]
+RUN_ARTIFACT_REPORT_LABELS = {
+    "source": "Inventory Report",
+    "summary_csv": "Summary CSV",
+    "summary_json": "Summary JSON",
+    "final_audit": "Final Audit",
+    "initial_audit": "Initial Audit",
+    "catalog_cleanup": "Catalog Cleanup",
+    "post_catalog_audit": "Post Catalog Audit",
+}
+RUN_ARTIFACT_REPORT_ORDER = [
+    "summary_csv",
+    "summary_json",
+    "final_audit",
+    "initial_audit",
+    "catalog_cleanup",
+    "post_catalog_audit",
+    "source",
+]
+RUN_ARTIFACT_REPORT_SUFFIXES = {".csv", ".json"}
 
 
 def _health_reason_labels(reason_codes: list[str] | None) -> list[str]:
@@ -1986,8 +2006,6 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
             status_subtext = "Ran once · Disabled automatically"
         elif not schedule.enabled and schedule.is_one_time:
             status_subtext = "One-time run not completed"
-        elif not schedule.enabled and schedule.is_system_managed:
-            status_subtext = "System-managed"
         if schedule.is_one_time:
             timing_primary, timing_secondary, timing_detail = _format_one_time_timing(
                 schedule,
@@ -2562,12 +2580,14 @@ def run_detail(request, job_id):
         company_display_name = record.display_name if record else ""
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
     artifacts_list = list(artifacts)
+    for artifact in artifacts_list:
+        artifact.report_links = _artifact_report_links(job, artifact)
     active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
     run_upload_summary_message = _run_detail_upload_summary_message(artifacts_list)
     context = {
         "job": job,
         "target_label": job.get_target_label(company_display_name=company_display_name),
-        "artifacts": artifacts,
+        "artifacts": artifacts_list,
         "active_run_ids": active_run_ids_list,
         "active_run_ids_json": json.dumps(active_run_ids_list),
         "exit_code_info": _exit_code_info(job.exit_code),
@@ -2588,6 +2608,20 @@ def run_detail(request, job_id):
         )
     )
     return render(request, "epos_qbo/run_detail.html", context)
+
+
+@login_required
+@require_GET
+def run_artifact_report(request, job_id, artifact_id: int, report_key: str):
+    job = get_object_or_404(RunJob, id=job_id)
+    artifact = get_object_or_404(RunArtifact, id=artifact_id, run_job=job)
+    report_path = _resolve_artifact_report_path(artifact, report_key)
+    filename = report_path.name or RUN_ARTIFACT_REPORT_LABELS.get(report_key, "report")
+    try:
+        handle = report_path.open("rb")
+    except OSError as exc:
+        raise Http404("Report not found.") from exc
+    return FileResponse(handle, as_attachment=True, filename=filename)
 
 
 @login_required
@@ -2920,6 +2954,74 @@ def _run_detail_upload_summary_message(artifacts_list: list[RunArtifact]) -> str
     if total_uploaded == 0 and total_skipped > 0:
         return RUN_DETAIL_ALL_SKIPPED_MESSAGE.format(skipped=total_skipped)
     return None
+
+
+def _artifact_report_path_value(artifact: RunArtifact, report_key: str) -> str:
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    if report_key == "source":
+        return str(artifact.source_path or "").strip()
+    if report_key in {"summary_json", "summary_csv"}:
+        return str(stats.get(report_key) or "").strip()
+    if report_key in {"final_audit", "initial_audit", "catalog_cleanup", "post_catalog_audit"}:
+        child_reports = stats.get("child_reports") if isinstance(stats.get("child_reports"), dict) else {}
+        return str(child_reports.get(report_key) or "").strip()
+    return ""
+
+
+def _artifact_report_links(job: RunJob, artifact: RunArtifact) -> list[dict[str, str]]:
+    if not _is_inventory_artifact(artifact):
+        return []
+
+    links: list[dict[str, str]] = []
+    for key in RUN_ARTIFACT_REPORT_ORDER:
+        raw_path = _artifact_report_path_value(artifact, key)
+        if not raw_path:
+            continue
+        try:
+            resolved = _resolve_artifact_report_path(artifact, key)
+        except Http404:
+            # Don't render broken download buttons for missing/invalid paths.
+            continue
+        links.append(
+            {
+                "key": key,
+                "label": RUN_ARTIFACT_REPORT_LABELS[key],
+                "path": raw_path,
+                "filename": resolved.name or RUN_ARTIFACT_REPORT_LABELS[key],
+                "url": reverse(
+                    "epos_qbo:run-artifact-report",
+                    kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": key},
+                ),
+            }
+        )
+    return links
+
+
+def _resolve_artifact_report_path(artifact: RunArtifact, report_key: str) -> Path:
+    if report_key not in RUN_ARTIFACT_REPORT_LABELS:
+        raise Http404("Unknown report.")
+
+    raw_path = _artifact_report_path_value(artifact, report_key)
+    if not raw_path or "\x00" in raw_path:
+        raise Http404("Report not found.")
+
+    base_dir = Path(settings.BASE_DIR).resolve()
+    candidate = Path(os.path.expandvars(raw_path)).expanduser()
+    resolved = (
+        candidate.resolve(strict=False)
+        if candidate.is_absolute()
+        else (base_dir / candidate).resolve(strict=False)
+    )
+    try:
+        resolved.relative_to(base_dir)
+    except ValueError as exc:
+        raise Http404("Report not found.") from exc
+
+    if resolved.suffix.lower() not in RUN_ARTIFACT_REPORT_SUFFIXES:
+        raise Http404("Report not found.")
+    if not resolved.exists() or not resolved.is_file():
+        raise Http404("Report not found.")
+    return resolved
 
 
 def _select_day_artifact_for_uploaded_count(artifacts: list[RunArtifact]) -> RunArtifact | None:

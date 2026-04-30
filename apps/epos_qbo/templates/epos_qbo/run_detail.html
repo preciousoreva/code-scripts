@@ -76,6 +76,7 @@
                         <th class="text-left px-3 py-2">Target Date</th>
                         <th class="text-left px-3 py-2">Processed</th>
                         <th class="text-left px-3 py-2">Metrics</th>
+                        <th class="text-left px-3 py-2">Reports</th>
                         <th class="text-left px-3 py-2">Metadata Source</th>
                     </tr>
                 </thead>
@@ -87,15 +88,23 @@
                         <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
                         <td class="px-3 py-2">
                             {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
-                            <div class="grid grid-cols-2 lg:grid-cols-4 gap-x-4 gap-y-1 text-xs">
-                                <div><span class="text-slate-500 dark:text-slate-400">Products checked:</span> <span class="font-medium">{{ artifact.upload_stats_json.products_checked|default:"0" }}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">In sync:</span> <span class="font-medium">{% if artifact.upload_stats_json.in_sync != None %}{{ artifact.upload_stats_json.in_sync }}{% elif artifact.upload_stats_json.already_correct != None %}{{ artifact.upload_stats_json.already_correct }}{% else %}0{% endif %}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">Catalog fixes:</span> <span class="font-medium">{{ artifact.upload_stats_json.catalog_fixes_applied|default:"0" }}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">Base items created:</span> <span class="font-medium">{{ artifact.upload_stats_json.base_items_created|default:"0" }}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">Duplicate bases resolved:</span> <span class="font-medium">{{ artifact.upload_stats_json.duplicate_base_items_resolved|default:"0" }}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">Quantity updates:</span> <span class="font-medium">{{ artifact.upload_stats_json.quantity_updates_applied|default:"0" }}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">Blocked items:</span> <span class="font-medium">{{ artifact.upload_stats_json.blocked_items|default:"0" }}</span></div>
-                                <div><span class="text-slate-500 dark:text-slate-400">Report type:</span> <span class="font-medium">Inventory</span></div>
+                            <div class="space-y-1.5 text-xs min-w-[28rem]">
+                                <div class="flex flex-wrap gap-x-2 gap-y-1">
+                                    <span><span class="text-slate-500 dark:text-slate-400">Products:</span> <span class="font-medium">{{ artifact.upload_stats_json.products_checked|default:"0" }}</span> checked</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{% if artifact.upload_stats_json.in_sync != None %}{{ artifact.upload_stats_json.in_sync }}{% elif artifact.upload_stats_json.already_correct != None %}{{ artifact.upload_stats_json.already_correct }}{% else %}0{% endif %}</span> in sync</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.blocked_items|default:"0" }}</span> blocked</span>
+                                </div>
+                                <div class="flex flex-wrap gap-x-2 gap-y-1">
+                                    <span><span class="text-slate-500 dark:text-slate-400">Updates:</span> <span class="font-medium">{{ artifact.upload_stats_json.quantity_updates_applied|default:"0" }}</span> quantity</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.catalog_fixes_applied|default:"0" }}</span> catalog</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.base_items_created|default:"0" }}</span> base items</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.duplicate_base_items_resolved|default:"0" }}</span> duplicate bases</span>
+                                </div>
                             </div>
                             {% else %}
                             <div class="grid grid-cols-2 lg:grid-cols-5 gap-x-4 gap-y-1 text-xs">
@@ -105,6 +114,23 @@
                                 <div><span class="text-slate-500 dark:text-slate-400">QBO skipped:</span> <span class="font-medium">{{ artifact.upload_stats_json.skipped|default:"-" }}</span></div>
                                 <div><span class="text-slate-500 dark:text-slate-400">QBO failed:</span> <span class="font-medium">{{ artifact.upload_stats_json.failed|default:"-" }}</span></div>
                             </div>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 py-2 align-top">
+                            {% if artifact.report_links %}
+                            <div class="flex flex-wrap gap-1.5 max-w-xs">
+                                {% for report in artifact.report_links %}
+                                <a href="{{ report.url }}"
+                                   download
+                                   title="{{ report.path }}"
+                                   class="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                    <iconify-icon icon="solar:download-minimalistic-linear" width="14" aria-hidden="true"></iconify-icon>
+                                    {{ report.label }}
+                                </a>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <span class="text-slate-400 dark:text-slate-500">—</span>
                             {% endif %}
                         </td>
                         <td class="px-3 py-2">
@@ -121,7 +147,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="5" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
+                        <td colspan="6" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
                     </tr>
                     {% endfor %}
                 </tbody>
