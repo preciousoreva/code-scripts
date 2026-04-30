@@ -88,6 +88,7 @@ def _create_event(
         payload_json.setdefault("schedule_id", str(schedule.id))
         payload_json.setdefault("schedule_name", schedule.name)
         payload_json.setdefault("schedule_scope", schedule.scope)
+        payload_json.setdefault("schedule_type", schedule.schedule_type)
     return RunScheduleEvent.objects.create(
         schedule=schedule,
         run_job=run_job,
@@ -283,6 +284,26 @@ def enqueue_run_for_schedule(
                 message="Schedule is invalid: company is required.",
             )
             return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+        if schedule.is_one_time and schedule.completed_at is not None:
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
+            schedule.last_error = "One-time schedule has already completed."
+            schedule.save(update_fields=["last_result", "last_error", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                message="One-time schedule has already completed.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+        if schedule.is_one_time and schedule.run_once_at is None:
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
+            schedule.last_error = "Run once time is required for this schedule."
+            schedule.save(update_fields=["last_result", "last_error", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                message="Schedule is invalid: run once time is required.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
         if _active_scheduled_run_exists(schedule):
             schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_OVERLAP
             schedule.last_error = ""
@@ -311,7 +332,13 @@ def enqueue_run_for_schedule(
         schedule.last_result = RunSchedule.LAST_RESULT_QUEUED
         schedule.last_error = ""
         schedule.last_fired_at = current
-        schedule.save(update_fields=["last_result", "last_error", "last_fired_at", "updated_at"])
+        update_fields = ["last_result", "last_error", "last_fired_at", "updated_at"]
+        if schedule.is_one_time:
+            schedule.enabled = False
+            schedule.completed_at = current
+            schedule.next_fire_at = None
+            update_fields.extend(["enabled", "completed_at", "next_fire_at"])
+        schedule.save(update_fields=update_fields)
 
         _create_event(
             schedule=schedule,
@@ -325,6 +352,14 @@ def enqueue_run_for_schedule(
                 "inventory_options": job.inventory_options_json,
             },
         )
+        if schedule.is_one_time:
+            _create_event(
+                schedule=schedule,
+                run_job=job,
+                event_type=RunScheduleEvent.TYPE_ONE_TIME_COMPLETED,
+                message="One-time schedule queued once and was disabled.",
+                payload={"completed_at": current.isoformat()},
+            )
         return job, RunScheduleEvent.TYPE_QUEUED
 
 
@@ -339,6 +374,19 @@ def _process_due_schedule(schedule: RunSchedule, *, now: datetime) -> tuple[RunJ
             message="Schedule is invalid: company is required.",
         )
         return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+
+    if schedule.is_one_time:
+        if schedule.run_once_at is None:
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
+            schedule.last_error = "Run once time is required for this schedule."
+            schedule.save(update_fields=["last_result", "last_error", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                message="Schedule is invalid: run once time is required.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+        return enqueue_run_for_schedule(schedule, now=now, source="worker")
 
     try:
         next_fire_at = schedule.compute_next_fire_at(from_dt=now)

@@ -55,6 +55,80 @@ class ScheduleWorkerTests(TestCase):
         self.assertEqual(event.payload_json.get("schedule_id"), str(schedule.id))
 
     @mock.patch("apps.epos_qbo.services.schedule_worker.dispatch_next_queued_job")
+    def test_due_one_time_schedule_queues_once_and_disables(self, _mock_dispatch):
+        schedule = RunSchedule.objects.create(
+            name="Sunday Inventory Sync",
+            enabled=True,
+            schedule_type=RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            cron_expr="",
+            timezone_name="Africa/Lagos",
+            inventory_options_json={"product_filter": "TROPHY"},
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            run_once_at=self.fixed_now - timedelta(minutes=1),
+            next_fire_at=self.fixed_now - timedelta(minutes=1),
+        )
+
+        with mock.patch.dict("os.environ", {"OIAT_SCHEDULER_ENABLE_ENV_FALLBACK": "0"}, clear=False):
+            stats = schedule_worker.process_schedule_cycle(now=self.fixed_now)
+
+        self.assertEqual(stats["due"], 1)
+        self.assertEqual(stats["queued"], 1)
+        self.assertEqual(RunJob.objects.filter(scheduled_by=schedule).count(), 1)
+        job = RunJob.objects.get(scheduled_by=schedule)
+        self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
+        self.assertEqual(job.inventory_options_json, {"product_filter": "TROPHY"})
+        schedule.refresh_from_db()
+        self.assertFalse(schedule.enabled)
+        self.assertEqual(schedule.completed_at, self.fixed_now)
+        self.assertIsNone(schedule.next_fire_at)
+        self.assertEqual(schedule.last_result, RunSchedule.LAST_RESULT_QUEUED)
+        self.assertTrue(
+            RunScheduleEvent.objects.filter(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_ONE_TIME_COMPLETED,
+            ).exists()
+        )
+
+        with mock.patch.dict("os.environ", {"OIAT_SCHEDULER_ENABLE_ENV_FALLBACK": "0"}, clear=False):
+            second_stats = schedule_worker.process_schedule_cycle(now=self.fixed_now + timedelta(minutes=1))
+
+        self.assertEqual(second_stats["due"], 0)
+        self.assertEqual(RunJob.objects.filter(scheduled_by=schedule).count(), 1)
+
+    @mock.patch("apps.epos_qbo.services.schedule_worker.dispatch_next_queued_job")
+    def test_invalid_one_time_schedule_missing_run_once_at_records_invalid(self, _mock_dispatch):
+        schedule = RunSchedule.objects.create(
+            name="Invalid one-time",
+            enabled=True,
+            schedule_type=RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="",
+            timezone_name="UTC",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            run_once_at=None,
+            next_fire_at=self.fixed_now - timedelta(minutes=1),
+        )
+
+        with mock.patch.dict("os.environ", {"OIAT_SCHEDULER_ENABLE_ENV_FALLBACK": "0"}, clear=False):
+            stats = schedule_worker.process_schedule_cycle(now=self.fixed_now)
+
+        self.assertEqual(stats["due"], 1)
+        self.assertEqual(stats["queued"], 0)
+        self.assertEqual(stats["skipped_invalid"], 1)
+        schedule.refresh_from_db()
+        self.assertTrue(schedule.enabled)
+        self.assertEqual(schedule.last_result, RunSchedule.LAST_RESULT_SKIPPED_INVALID)
+        self.assertIn("Run once time is required", schedule.last_error)
+        self.assertTrue(
+            RunScheduleEvent.objects.filter(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+            ).exists()
+        )
+
+    @mock.patch("apps.epos_qbo.services.schedule_worker.dispatch_next_queued_job")
     @mock.patch("apps.epos_qbo.services.schedule_worker.get_target_trading_date", return_value=date(2026, 2, 19))
     def test_due_schedule_skips_overlap(self, _mock_target_date, _mock_dispatch):
         schedule = RunSchedule.objects.create(

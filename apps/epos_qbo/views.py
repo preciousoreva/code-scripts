@@ -1642,6 +1642,9 @@ def _schedule_default_timezone_name() -> str:
 def _schedule_create_initial() -> dict:
     return {
         "enabled": True,
+        "schedule_type": RunSchedule.SCHEDULE_TYPE_RECURRING,
+        "workflow": RunScheduleForm.WORKFLOW_SALES,
+        "company_target": RunScheduleForm.COMPANY_TARGET_ALL,
         "scope": RunJob.SCOPE_ALL,
         "cron_expr": "0 18 * * *",
         "timezone_name": _schedule_default_timezone_name(),
@@ -1688,12 +1691,12 @@ def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> st
     if schedule.name == "Legacy Env Fallback" and schedule.is_system_managed:
         return "Legacy environment configuration"
     if schedule.scope == RunJob.SCOPE_ALL:
-        return "All companies"
+        return "Sales Sync · All eligible companies"
     if schedule.scope == RunJob.SCOPE_SINGLE:
         company = _company_display(company_map, schedule.company_key)
-        return f"Company: {company}" if company else "Company"
+        return f"Sales Sync · {company}" if company else "Sales Sync · One company"
     if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
-        parts = []
+        parts = ["Inventory Sync"]
         company = _company_display(company_map, schedule.company_key)
         if company:
             parts.append(company)
@@ -1709,7 +1712,29 @@ def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> st
     return schedule.get_scope_display()
 
 
+def _schedule_workflow(schedule: RunSchedule) -> str:
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return RunScheduleForm.WORKFLOW_INVENTORY
+    return RunScheduleForm.WORKFLOW_SALES
+
+
+def _schedule_company_target(schedule: RunSchedule) -> str:
+    if schedule.scope == RunJob.SCOPE_ALL:
+        return RunScheduleForm.COMPANY_TARGET_ALL
+    return RunScheduleForm.COMPANY_TARGET_ONE
+
+
+def _schedule_workflow_label(schedule: RunSchedule) -> str:
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return "Inventory Sync"
+    return "Sales Sync"
+
+
 def _friendly_cron_label(schedule: RunSchedule) -> str:
+    if schedule.is_one_time:
+        if schedule.completed_at:
+            return "Completed"
+        return "One-time run"
     parts = (schedule.cron_expr or "").split()
     if len(parts) != 5:
         return "Custom schedule"
@@ -1813,15 +1838,21 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
     rows: list[dict] = []
     for schedule in schedules:
         result = _schedule_last_result(schedule)
+        one_time_completed = schedule.is_one_time and schedule.completed_at is not None
         rows.append(
             {
                 "schedule": schedule,
                 "display_name": _operator_schedule_name(schedule),
                 "subtitle": _schedule_subtitle(schedule, company_map),
+                "run_type_label": schedule.get_schedule_type_display(),
+                "workflow": _schedule_workflow(schedule),
+                "workflow_label": _schedule_workflow_label(schedule),
+                "company_target": _schedule_company_target(schedule),
                 "friendly_cron": _friendly_cron_label(schedule),
                 "last_result_label": result["label"],
                 "last_run_at": result["last_run_at"],
                 "current_status_label": result["current"],
+                "one_time_completed": one_time_completed,
                 "category": _first_inventory_category(schedule),
                 "product_filter": _inventory_product_filter(schedule),
             }
@@ -1877,6 +1908,12 @@ def schedules_page(request):
         "single_scope": RunJob.SCOPE_SINGLE,
         "all_scope": RunJob.SCOPE_ALL,
         "inventory_scope": RunJob.SCOPE_INVENTORY_PIPELINE,
+        "schedule_type_recurring": RunSchedule.SCHEDULE_TYPE_RECURRING,
+        "schedule_type_one_time": RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+        "workflow_sales": RunScheduleForm.WORKFLOW_SALES,
+        "workflow_inventory": RunScheduleForm.WORKFLOW_INVENTORY,
+        "company_target_all": RunScheduleForm.COMPANY_TARGET_ALL,
+        "company_target_one": RunScheduleForm.COMPANY_TARGET_ONE,
         "scheduler_status": get_scheduler_status(),
     }
     context.update(_nav_context())
@@ -1916,6 +1953,8 @@ def schedule_create(request):
     schedule: RunSchedule = form.save(commit=False)
     schedule.created_by = request.user
     schedule.updated_by = request.user
+    if not schedule.is_one_time:
+        schedule.completed_at = None
     if schedule.enabled:
         try:
             schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
@@ -1938,6 +1977,9 @@ def schedule_update(request, schedule_id):
         messages.error(request, "System-managed schedules cannot be edited.")
         return redirect("epos_qbo:schedules")
 
+    was_one_time_completed = schedule.is_one_time and schedule.completed_at is not None
+    previous_run_once_at = schedule.run_once_at
+
     form = RunScheduleForm(request.POST, instance=schedule)
     if not form.is_valid():
         messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
@@ -1945,6 +1987,21 @@ def schedule_update(request, schedule_id):
 
     schedule = form.save(commit=False)
     schedule.updated_by = request.user
+    if was_one_time_completed and schedule.is_one_time and schedule.enabled:
+        # Prevent accidental re-queue of a completed one-time schedule unless the operator
+        # explicitly moves the run time forward.
+        if schedule.run_once_at is None:
+            messages.error(request, "Completed one-time schedules cannot be re-enabled without a new run time.")
+            return redirect("epos_qbo:schedules")
+        if previous_run_once_at == schedule.run_once_at:
+            messages.error(request, "Completed one-time schedules cannot be re-enabled. Edit the run time first.")
+            return redirect("epos_qbo:schedules")
+        if schedule.run_once_at <= timezone.now():
+            messages.error(request, "One-time schedules must be scheduled in the future when re-enabled.")
+            return redirect("epos_qbo:schedules")
+        schedule.completed_at = None
+    if not schedule.is_one_time:
+        schedule.completed_at = None
     if schedule.enabled:
         try:
             schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
@@ -1970,6 +2027,9 @@ def schedule_toggle(request, schedule_id):
     schedule.enabled = not schedule.enabled
     schedule.updated_by = request.user
     if schedule.enabled:
+        if schedule.is_one_time and schedule.completed_at is not None:
+            messages.error(request, "Completed one-time schedules cannot be re-enabled. Edit the run time first.")
+            return redirect("epos_qbo:schedules")
         try:
             schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
         except Exception as exc:
