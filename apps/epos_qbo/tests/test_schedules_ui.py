@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from unittest import mock
 
 from django.contrib.auth.models import Permission, User
@@ -229,7 +229,7 @@ class SchedulesUiTests(TestCase):
         self.assertNotContains(response, "Recent Scheduled Events")
 
     def test_schedules_page_displays_one_time_completed_schedule(self):
-        completed_at = self.fixed_now - timedelta(minutes=10)
+        completed_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)
         RunSchedule.objects.create(
             name="Sunday Inventory Sync",
             enabled=False,
@@ -239,19 +239,76 @@ class SchedulesUiTests(TestCase):
             cron_expr="",
             timezone_name="Africa/Lagos",
             target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
-            run_once_at=self.fixed_now,
+            run_once_at=timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc),
             completed_at=completed_at,
             last_fired_at=completed_at,
             last_result=RunSchedule.LAST_RESULT_QUEUED,
         )
 
-        response = self.client.get(reverse("epos_qbo:schedules"))
+        with mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now):
+            response = self.client.get(reverse("epos_qbo:schedules"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Sunday Inventory Sync")
         self.assertContains(response, "One-time")
         self.assertContains(response, "Completed")
-        self.assertContains(response, "Queued once at")
+        self.assertContains(response, "Completed today at 19:05")
+        self.assertContains(response, "Ran once")
+
+    def test_recurring_next_run_displays_in_schedule_timezone(self):
+        # 18:00 UTC == 19:00 Africa/Lagos (WAT)
+        next_fire_at = timezone.make_aware(datetime(2026, 2, 20, 18, 0, 0), dt_timezone.utc)
+        RunSchedule.objects.create(
+            name="Daily Sales Sync",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            next_fire_at=next_fire_at,
+        )
+        with mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now):
+            response = self.client.get(reverse("epos_qbo:schedules"))
+        self.assertContains(response, "Today at 19:00")
+        self.assertNotContains(response, "Today at 18:00")
+
+    def test_one_time_upcoming_displays_local_operator_time_not_utc(self):
+        # Operator picked 19:05 Africa/Lagos -> stored as 18:05 UTC
+        run_once_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)
+        RunSchedule.objects.create(
+            name="Inventory Sync",
+            enabled=True,
+            schedule_type=RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key=self.company.company_key,
+            cron_expr="",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            run_once_at=run_once_at,
+            next_fire_at=run_once_at,
+        )
+        with mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now):
+            response = self.client.get(reverse("epos_qbo:schedules"))
+        self.assertContains(response, "Today at 19:05")
+        self.assertNotContains(response, "18:05")
+
+    def test_one_time_disabled_not_completed_displays_scheduled_for_local_time(self):
+        run_once_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)
+        RunSchedule.objects.create(
+            name="Inventory Sync",
+            enabled=False,
+            schedule_type=RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key=self.company.company_key,
+            cron_expr="",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            run_once_at=run_once_at,
+        )
+        with mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now):
+            response = self.client.get(reverse("epos_qbo:schedules"))
+        self.assertContains(response, "Disabled one-time run")
+        self.assertContains(response, "Scheduled for Today at 19:05")
 
     def test_last_result_uses_latest_terminal_event_not_queued(self):
         schedule = RunSchedule.objects.create(
