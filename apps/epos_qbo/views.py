@@ -1844,9 +1844,7 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
                 "schedule": schedule,
                 "display_name": _operator_schedule_name(schedule),
                 "subtitle": _schedule_subtitle(schedule, company_map),
-                "run_type_label": schedule.get_schedule_type_display(),
                 "workflow": _schedule_workflow(schedule),
-                "workflow_label": _schedule_workflow_label(schedule),
                 "company_target": _schedule_company_target(schedule),
                 "friendly_cron": _friendly_cron_label(schedule),
                 "last_result_label": result["label"],
@@ -1867,6 +1865,23 @@ def _form_error_text(form: RunScheduleForm) -> str:
         joined = ", ".join([str(err) for err in errors])
         parts.append(f"{label}: {joined}")
     return "; ".join(parts)
+
+
+def _operator_schedule_form_error_message(form: RunScheduleForm) -> str:
+    """Operator-friendly schedule form error banner message.
+
+    Avoid raw field names like `company_target` / `workflow` in the top alert.
+    """
+    flat_errors = " ".join([" ".join([str(e) for e in errs]) for errs in form.errors.values()]).strip()
+    if "Inventory all-companies schedules are not supported yet." in flat_errors:
+        return (
+            "Inventory Sync currently supports one inventory-enabled company. "
+            'Select "One company" and choose a company.'
+        )
+    # Default: show only error text, without field names
+    if not flat_errors:
+        return "Invalid schedule. Please review the fields and try again."
+    return f"Invalid schedule. {flat_errors}"
 
 
 @login_required
@@ -1897,12 +1912,20 @@ def schedules_page(request):
         }
         for company in companies
     ]
+    inventory_company_options = [c for c in company_options if c.get("inventory_enabled")]
+    inventory_company_default_key = (
+        str(inventory_company_options[0]["company_key"])
+        if len(inventory_company_options) == 1
+        else ""
+    )
     context = {
         "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
         "schedule_rows": _schedule_rows(schedules, company_map),
         "recent_events": recent_events,
         "companies": companies,
         "company_options": company_options,
+        "inventory_company_options": inventory_company_options,
+        "inventory_company_default_key": inventory_company_default_key,
         "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
         "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
         "single_scope": RunJob.SCOPE_SINGLE,
@@ -1947,7 +1970,7 @@ def schedule_status_api(request):
 def schedule_create(request):
     form = RunScheduleForm(request.POST)
     if not form.is_valid():
-        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        messages.error(request, _operator_schedule_form_error_message(form))
         return redirect("epos_qbo:schedules")
 
     schedule: RunSchedule = form.save(commit=False)
@@ -1982,7 +2005,7 @@ def schedule_update(request, schedule_id):
 
     form = RunScheduleForm(request.POST, instance=schedule)
     if not form.is_valid():
-        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        messages.error(request, _operator_schedule_form_error_message(form))
         return redirect("epos_qbo:schedules")
 
     schedule = form.save(commit=False)
