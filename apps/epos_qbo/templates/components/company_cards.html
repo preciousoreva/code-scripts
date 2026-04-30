@@ -165,7 +165,7 @@
         <div class="p-6 border-t border-slate-100 dark:border-slate-700">
             <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3 flex items-center gap-2">
                 <iconify-icon icon="solar:box-linear" width="16"></iconify-icon>
-                Latest Inventory Audit
+                Inventory Sync
             </h4>
             {% if company_data.latest_inventory_audit %}
             <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
@@ -176,14 +176,14 @@
                     {% endwith %}
                 </div>
                 {% with stats=company_data.latest_inventory_audit.upload_stats_json %}
-                <div class="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap gap-x-4 gap-y-1">
-                    <span>Groups: {{ stats.total_groups|default:0 }}</span>
-                    <span>In sync: {{ stats.status_counts.in_sync|default:0 }}</span>
-                    <span>Needs adj.: {{ stats.status_counts.needs_adjustment|default:0 }}</span>
-                    <span>Ambiguous: {{ stats.status_counts.ambiguous_in_qbo|default:0 }}</span>
-                    <span>Missing: {{ stats.status_counts.missing_in_qbo|default:0 }}</span>
-                    {% if stats.apply.posted %}<span>Posted: {{ stats.apply.posted }}</span>{% endif %}
-                    {% if stats.apply.skipped %}<span>Skipped: {{ stats.apply.skipped }}</span>{% endif %}
+                <div class="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap gap-2">
+                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Groups: {{ stats.total_groups|default:0 }}</span>
+                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">In sync: {{ stats.status_counts.in_sync|default:0 }}</span>
+                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Needs adj.: {{ stats.status_counts.needs_adjustment|default:0 }}</span>
+                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Ambiguous: {{ stats.status_counts.ambiguous_in_qbo|default:0 }}</span>
+                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Missing: {{ stats.status_counts.missing_in_qbo|default:0 }}</span>
+                    {% if stats.apply.posted %}<span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Posted: {{ stats.apply.posted }}</span>{% endif %}
+                    {% if stats.apply.skipped %}<span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Skipped: {{ stats.apply.skipped }}</span>{% endif %}
                 </div>
                 {% if stats.apply.error %}
                 <p class="text-xs text-red-600 dark:text-red-400 mt-1 truncate" title="{{ stats.apply.error }}">Error: {{ stats.apply.error }}</p>
@@ -192,7 +192,7 @@
             </div>
             {% else %}
             <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm text-slate-500 dark:text-slate-400">
-                No inventory audit recorded.
+                No inventory sync activity recorded.
             </div>
             {% endif %}
         </div>

@@ -65,7 +65,7 @@
                     {% if company.inventory_enabled %}
                     <div>
                         <span class="block text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500 font-medium">Inventory</span>
-                        <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Latest inventory audit: {% if company.inventory_status.last_sync %}{{ company.inventory_status.last_sync|date:"M j, Y H:i" }}{% else %}Not checked{% endif %}</p>
+                        <p class="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Inventory sync: {% if company.inventory_status.last_sync %}{{ company.inventory_status.last_sync|date:"M j, Y H:i" }}{% else %}Not checked{% endif %}</p>
                         <span class="text-xs font-medium {% if company.inventory_status.severity == 'critical' %}text-red-600 dark:text-red-400{% elif company.inventory_status.severity == 'warning' or company.inventory_status.severity == 'unknown' %}text-amber-600 dark:text-amber-400{% else %}text-emerald-600 dark:text-emerald-400{% endif %}">
                             {{ company.inventory_status.label }}
                         </span>

@@ -209,7 +209,7 @@ class OverviewUIContextTests(TestCase):
         self.assertFalse(company_row["inventory_enabled"])
         self.assertEqual(company_row["status"], "healthy")
         self.assertNotIn("Inventory: Not checked", html)
-        self.assertNotIn("Latest inventory audit", html)
+        self.assertNotIn("Inventory sync:", html)
 
     def test_inventory_disabled_omits_operational_inventory_from_company_card(self):
         self._set_inventory_enabled(False)
@@ -234,7 +234,7 @@ class OverviewUIContextTests(TestCase):
 
         self.assertFalse(company_data["inventory_enabled"])
         self.assertNotIn("Inventory: Not checked", html)
-        self.assertNotIn("Latest Inventory Audit", html)
+        self.assertNotIn("Inventory Sync", html)
 
     def test_inventory_enabled_not_checked_renders_inventory_marker(self):
         self._set_inventory_enabled(True)
@@ -254,7 +254,7 @@ class OverviewUIContextTests(TestCase):
 
         self.assertTrue(company_row["inventory_enabled"])
         self.assertIn("Inventory: Not checked", html)
-        self.assertIn("Latest inventory audit", html)
+        self.assertIn("Inventory sync:", html)
 
     def test_latest_inventory_activity_keeps_sales_copy_precise(self):
         self._set_inventory_enabled(True)
