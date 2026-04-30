@@ -868,6 +868,13 @@ def _format_operator_number(value: Any) -> str:
     return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
+def _format_operator_int_commas(value: Any) -> str:
+    number = _numeric(value, 0.0)
+    if abs(number - int(number)) <= 0.0000001:
+        return f"{int(number):,}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
 def _scope_part(scope: str, key: str) -> str:
     prefix = f"{key}="
     for part in str(scope or "").split(";"):
@@ -915,9 +922,74 @@ def _negative_epos_note(summary: dict[str, Any]) -> str:
     rows = int(summary.get("epos_negative_rows_clamped", 0) or 0)
     if rows <= 0:
         return ""
-    row_word = "row" if rows == 1 else "rows"
-    units = _format_operator_number(summary.get("epos_negative_units_clamped", 0.0))
-    return f"Note: {rows} negative EPOS {row_word} ignored ({units} units)"
+    units = _format_operator_int_commas(summary.get("epos_negative_units_clamped", 0.0))
+    return (
+        f"Negative EPOS stock: {rows} row(s) treated as 0 for sync safety ({units} units)."
+    )
+
+
+def _short_report_path(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    p = Path(text)
+    parts = list(p.parts)
+    if "reports" in parts:
+        idx = parts.index("reports")
+        tail = "/".join(parts[idx:])
+        return tail or p.name
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return p.name
+
+
+def _append_report_paths(lines: list[str], summary: dict[str, Any]) -> None:
+    bullets: list[str] = []
+    summary_csv = _short_report_path(str(summary.get("summary_csv") or ""))
+    if summary_csv:
+        bullets.append(f"• Summary CSV: `{summary_csv}`")
+    child_reports = summary.get("child_reports") if isinstance(summary.get("child_reports"), dict) else {}
+    final_audit = _short_report_path(str(child_reports.get("final_audit") or ""))
+    if final_audit:
+        bullets.append(f"• Final audit CSV: `{final_audit}`")
+    initial_audit = _short_report_path(str(child_reports.get("initial_audit") or ""))
+    if initial_audit:
+        bullets.append(f"• Initial audit CSV: `{initial_audit}`")
+    catalog_cleanup = _short_report_path(str(child_reports.get("catalog_cleanup") or ""))
+    if catalog_cleanup:
+        bullets.append(f"• Catalog cleanup CSV: `{catalog_cleanup}`")
+    if not bullets:
+        return
+    lines.append("")
+    lines.append("Reports:")
+    lines.extend(bullets)
+
+
+def _blocked_review_examples(summary: dict[str, Any], *, max_examples: int = 5) -> list[str]:
+    out: list[str] = []
+    details = [d for d in (summary.get("product_details") or []) if isinstance(d, dict)]
+    for d in details:
+        status = str(d.get("final_status") or "")
+        if status == "in_sync":
+            continue
+        base = str(d.get("base_name") or "").strip()
+        if not base:
+            continue
+        reason = _short_block_reason(str(d.get("blocked_reason") or status))
+        out.append(f"{base} — {reason}")
+        if len(out) >= max_examples:
+            return out
+    examples = [str(x).strip() for x in (summary.get("blocked_catalog_examples") or []) if str(x).strip()]
+    for line in examples:
+        if len(out) >= max_examples:
+            break
+        if "—" in line:
+            base, reason = [p.strip() for p in line.split("—", 1)]
+            if base:
+                out.append(f"{base} — {_short_block_reason(reason)}")
+        else:
+            out.append(f"{_slack_scope_title(summary)} — {_short_block_reason(line)}")
+    return out
 
 
 def _short_block_reason(raw: str) -> str:
@@ -1025,24 +1097,35 @@ def _format_slack_summary(summary: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     if blocked:
-        lines = [f"⚠️ Inventory needs review — {title}", ""]
+        lines = [f"⚠️ *Inventory Sync needs review* — {summary.get('display_name', '').strip() or title}", ""]
+        scope_label = _slack_scope_title(summary)
+        if scope_label:
+            lines.append(f"• Scope: {scope_label}")
         detail = _first_product_detail(summary)
         if is_product and detail:
-            lines.append(f"EPOS: {_format_operator_number(detail.get('epos_expected_qty', 0))}")
-            lines.append(f"QBO: {_format_operator_number(detail.get('qbo_final_qty', 0))}")
-            lines.append(f"Difference: {_format_operator_number(detail.get('delta', 0))}")
+            lines.append(f"• EPOS: {_format_operator_number(detail.get('epos_expected_qty', 0))}")
+            lines.append(f"• QBO: {_format_operator_number(detail.get('qbo_final_qty', 0))}")
+            lines.append(f"• Difference: {_format_operator_number(detail.get('delta', 0))}")
             lines.append("")
         else:
-            lines.append(f"In sync: {summary['in_sync']}/{summary['products_checked']}")
-        lines.append(f"Blocked: {summary['blocked_items']}")
-        item, reason = _first_blocked_item(summary)
-        if item and not (is_product and item == title):
-            lines.extend(["", item, f"Reason: {reason}"])
-        elif reason:
-            lines.extend(["", f"Reason: {reason}"])
+            lines.append(f"• In sync: {_format_operator_int_commas(summary['in_sync'])} / {_format_operator_int_commas(summary['products_checked'])}")
+        lines.append(f"• Blocked: {_format_operator_int_commas(summary['blocked_items'])}")
         note = _negative_epos_note(summary)
         if note:
-            lines.extend(["", note])
+            lines.extend(["", f"• {note}"])
+        examples = _blocked_review_examples(summary, max_examples=5)
+        if examples and not is_product:
+            lines.append("")
+            lines.append("Needs review example:" if len(examples) == 1 else "Needs review examples:")
+            for ex in examples[:5]:
+                lines.append(f"• {ex}")
+            if int(summary.get("blocked_items", 0) or 0) > len(examples):
+                lines.append("• See report for full list.")
+        else:
+            item, reason = _first_blocked_item(summary)
+            if reason:
+                lines.extend(["", f"Reason: {reason}"])
+        _append_report_paths(lines, summary)
         lines.append("")
         _append_run_or_report(lines, summary)
         return "\n".join(lines)
@@ -1050,22 +1133,24 @@ def _format_slack_summary(summary: dict[str, Any]) -> str:
     lines = [f"✅ Inventory synced — {title}", ""]
     if is_product:
         detail = _first_product_detail(summary)
-        lines.append(f"EPOS: {_format_operator_number(detail.get('epos_expected_qty', 0))}")
-        lines.append(f"QBO: {_format_operator_number(detail.get('qbo_final_qty', 0))}")
-        lines.append(f"Difference: {_format_operator_number(detail.get('delta', 0))}")
+        lines.append(f"• EPOS: {_format_operator_number(detail.get('epos_expected_qty', 0))}")
+        lines.append(f"• QBO: {_format_operator_number(detail.get('qbo_final_qty', 0))}")
+        lines.append(f"• Difference: {_format_operator_number(detail.get('delta', 0))}")
         lines.append("")
-        lines.append(f"Updated in QBO: {'Yes' if int(summary.get('quantity_updates_applied', 0) or 0) > 0 else 'No'}")
-        lines.append(f"Catalog fixes: {_compact_catalog_fix_count(summary)}")
-        lines.append(f"Blocked: {summary['blocked_items']}")
+        lines.append(f"• Updated in QBO: {'Yes' if int(summary.get('quantity_updates_applied', 0) or 0) > 0 else 'No'}")
+        lines.append(f"• Catalog fixes: {_format_operator_int_commas(_compact_catalog_fix_count(summary))}")
+        lines.append(f"• Blocked: {_format_operator_int_commas(summary['blocked_items'])}")
     else:
-        lines.append(f"In sync: {summary['in_sync']}/{summary['products_checked']}")
-        lines.append(f"Catalog fixes: {_compact_catalog_fix_count(summary)}")
-        lines.append(f"Quantity updates: {summary['quantity_updates_applied']}")
-        lines.append(f"Blocked: {summary['blocked_items']}")
+        lines.append(f"• Scope: {_slack_scope_title(summary)}")
+        lines.append(f"• In sync: {_format_operator_int_commas(summary['in_sync'])} / {_format_operator_int_commas(summary['products_checked'])}")
+        lines.append(f"• Catalog fixes: {_format_operator_int_commas(_compact_catalog_fix_count(summary))}")
+        lines.append(f"• Quantity updates: {_format_operator_int_commas(summary['quantity_updates_applied'])}")
+        lines.append(f"• Blocked: {_format_operator_int_commas(summary['blocked_items'])}")
 
     note = _negative_epos_note(summary)
     if note:
-        lines.extend(["", note])
+        lines.extend(["", f"• {note}"])
+    _append_report_paths(lines, summary)
     lines.append("")
     _append_run_or_report(lines, summary)
     return "\n".join(lines)

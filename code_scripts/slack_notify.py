@@ -684,20 +684,20 @@ def notify_inventory_pipeline_start(
 
     parts = [
         f"🚀 *{safe_company_name} → Inventory Sync started*",
-        f"Time: {datetime.now().isoformat(timespec='seconds')}",
-        f"Company: {safe_company_name} (`{safe_company_key}`)" if safe_company_key else f"Company: {safe_company_name}",
-        *scope_bits,
-        f"Mode: {mode_label}",
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}",
+        f"• Company: {safe_company_name} (`{safe_company_key}`)" if safe_company_key else f"• Company: {safe_company_name}",
+        *[f"• {bit}" for bit in scope_bits],
+        f"• Mode: {mode_label}",
     ]
 
     summary = dict(metadata or {})
     run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
     run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
     if run_url and run_job_id:
-        parts.append(f"Run: {_slack_run_link(url=run_url, scope='inventory_pipeline', run_job_id=run_job_id)}")
+        parts.append(f"• Run: {_slack_run_link(url=run_url, scope='inventory_pipeline', run_job_id=run_job_id)}")
 
-    # Keep it concise, single-line bullets.
-    message = " • ".join([p for p in parts if str(p).strip()])
+    # Slack display: header line + newline bullets for readability.
+    message = "\n".join([p for p in parts if str(p).strip()])
     send_slack_success(message, webhook_url)
 
 

@@ -1981,6 +1981,13 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
     for schedule in schedules:
         result = _schedule_last_result(schedule)
         one_time_completed = schedule.is_one_time and schedule.completed_at is not None
+        status_subtext = ""
+        if one_time_completed:
+            status_subtext = "Ran once · Disabled automatically"
+        elif not schedule.enabled and schedule.is_one_time:
+            status_subtext = "One-time run not completed"
+        elif not schedule.enabled and schedule.is_system_managed:
+            status_subtext = "System-managed"
         if schedule.is_one_time:
             timing_primary, timing_secondary, timing_detail = _format_one_time_timing(
                 schedule,
@@ -2010,6 +2017,7 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
                 "last_run_at": result["last_run_at"],
                 "current_status_label": result["current"],
                 "one_time_completed": one_time_completed,
+                "status_subtext": status_subtext,
                 "category": _first_inventory_category(schedule),
                 "product_filter": _inventory_product_filter(schedule),
                 "run_once_date_value": run_once_date_value,
@@ -2017,6 +2025,27 @@ def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) ->
             }
         )
     return rows
+
+
+def _group_schedule_rows(rows: list[dict]) -> list[dict]:
+    active: list[dict] = []
+    completed_one_time: list[dict] = []
+    disabled: list[dict] = []
+
+    for row in rows:
+        schedule: RunSchedule = row["schedule"]
+        if row.get("one_time_completed"):
+            completed_one_time.append(row)
+        elif schedule.enabled:
+            active.append(row)
+        else:
+            disabled.append(row)
+
+    return [
+        {"title": "Active Schedules", "rows": active},
+        {"title": "Completed One-time Runs", "rows": completed_one_time},
+        {"title": "Disabled Schedules", "rows": disabled},
+    ]
 
 
 def _form_error_text(form: RunScheduleForm) -> str:
@@ -2085,9 +2114,11 @@ def schedules_page(request):
     now_default_local = now_utc.astimezone(default_tz)
     now_default_time = now_default_local.strftime("%H:%M")
     now_default_abbrev = now_default_local.strftime("%Z").strip()
+    schedule_rows = _schedule_rows(schedules, company_map)
     context = {
         "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
-        "schedule_rows": _schedule_rows(schedules, company_map),
+        "schedule_rows": schedule_rows,
+        "schedule_sections": _group_schedule_rows(schedule_rows),
         "recent_events": recent_events,
         "companies": companies,
         "company_options": company_options,

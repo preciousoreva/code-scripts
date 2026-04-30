@@ -8,7 +8,7 @@ from code_scripts import slack_notify
 
 
 class InventoryPipelineSlackStartTests(unittest.TestCase):
-    def test_notify_inventory_pipeline_start_sends_compact_message(self):
+    def test_notify_inventory_pipeline_start_sends_newline_bullets(self):
         with mock.patch.object(slack_notify, "send_slack_success") as send_mock, mock.patch.dict(
             os.environ,
             {
@@ -30,12 +30,12 @@ class InventoryPipelineSlackStartTests(unittest.TestCase):
 
         self.assertEqual(send_mock.call_count, 1)
         message = send_mock.call_args.args[0]
-        self.assertIn("Inventory Sync started", message)
-        self.assertIn("AKPONORA VENTURES LTD.", message)
-        self.assertIn("(`company_a`)", message)
-        self.assertIn("Category: ALCOHOLS & SPIRITS", message)
-        self.assertIn("Mode: Preview only", message)
-        self.assertIn("<https://portal.example/epos-qbo/runs/", message)
+        self.assertIn("🚀 *AKPONORA VENTURES LTD. → Inventory Sync started*", message)
+        self.assertIn("\n• Time:", message)
+        self.assertIn("\n• Company: AKPONORA VENTURES LTD. (`company_a`)", message)
+        self.assertIn("\n• Category: ALCOHOLS & SPIRITS", message)
+        self.assertIn("\n• Mode: Preview only", message)
+        self.assertIn("\n• Run: <https://portal.example/epos-qbo/runs/", message)
         self.assertIn("|Inventory Run INV-", message)
 
     def test_notify_inventory_pipeline_start_is_noop_without_webhook(self):
