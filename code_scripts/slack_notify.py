@@ -647,6 +647,60 @@ def notify_pipeline_start(
     send_slack_success(message, webhook_url)
 
 
+def notify_inventory_pipeline_start(
+    *,
+    company_name: str,
+    company_key: str,
+    categories: list[str] | None = None,
+    product_filter: str | None = None,
+    dry_run: bool = False,
+    webhook_url: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Send a Slack start notification for the unified Inventory pipeline.
+
+    Notification-only helper: best-effort and no-op when webhook is missing.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping inventory pipeline start notification.")
+        return
+
+    safe_company_name = str(company_name or "").strip() or str(company_key or "").strip() or "Company"
+    safe_company_key = str(company_key or "").strip()
+
+    categories = [str(c).strip() for c in (categories or []) if str(c).strip()]
+    product_filter = str(product_filter or "").strip() or None
+
+    scope_bits: list[str] = []
+    if categories:
+        scope_bits.append(f"Category: {', '.join(categories)}")
+    if product_filter:
+        scope_bits.append(f"Product: {product_filter}")
+    if not scope_bits:
+        scope_bits.append("Scope: All products")
+
+    # Inventory pipeline applies safe catalog/quantity operations by default; avoid "checked only".
+    mode_label = "Preview only" if dry_run else "Sync pipeline"
+
+    parts = [
+        f"🚀 *{safe_company_name} → Inventory Sync started*",
+        f"Time: {datetime.now().isoformat(timespec='seconds')}",
+        f"Company: {safe_company_name} (`{safe_company_key}`)" if safe_company_key else f"Company: {safe_company_name}",
+        *scope_bits,
+        f"Mode: {mode_label}",
+    ]
+
+    summary = dict(metadata or {})
+    run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
+    run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
+    if run_url and run_job_id:
+        parts.append(f"Run: {_slack_run_link(url=run_url, scope='inventory_pipeline', run_job_id=run_job_id)}")
+
+    # Keep it concise, single-line bullets.
+    message = " • ".join([p for p in parts if str(p).strip()])
+    send_slack_success(message, webhook_url)
+
+
 def extract_error_reason(error: str) -> str:
     """
     Extract a concise, user-friendly reason from an error message.
