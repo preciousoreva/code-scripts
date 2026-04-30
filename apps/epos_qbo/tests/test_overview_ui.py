@@ -268,6 +268,49 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(company_row["latest_sales_sync_display"], "No successful sales sync recorded")
         self.assertEqual(company_row["status"], "unknown")
 
+    def test_inventory_card_uses_operator_copy_for_mode_and_stats(self):
+        run = self._create_inventory_run(products_checked=5, in_sync=2, blocked_items=0)
+        artifact = RunArtifact.objects.get(run_job=run)
+        stats = artifact.upload_stats_json
+        stats.update(
+            {
+                "total_groups": 5,
+                "status_counts": {
+                    "in_sync": 2,
+                    "needs_adjustment": 1,
+                    "ambiguous_in_qbo": 1,
+                    "missing_in_qbo": 1,
+                },
+                "apply": {"mode": "audit_only", "posted": 0, "skipped": 0},
+            }
+        )
+        artifact.upload_stats_json = stats
+        artifact.save(update_fields=["upload_stats_json"])
+        company_data = views._enrich_company_data(
+            self.company,
+            run,
+            preloaded={
+                "latest_activity_job": run,
+                "latest_inventory_job": run,
+                "latest_inventory_artifact": artifact,
+                "artifacts_today": [artifact],
+                "token_info": {"severity": "healthy", "display_label": "Connected", "display_subtext": ""},
+                "sales_reconcile_statuses_by_company_job": {},
+            },
+        )
+
+        html = render_to_string("components/company_cards.html", {"companies_data": [company_data]})
+
+        self.assertIn("Checked only", html)
+        self.assertNotIn("audit_only", html)
+        self.assertIn("Product groups", html)
+        self.assertIn("Already in sync", html)
+        self.assertIn("Need updates", html)
+        self.assertIn("Multiple QBO matches", html)
+        self.assertIn("Missing in QBO", html)
+        self.assertNotIn("Needs adj.", html)
+        self.assertNotIn("Ambiguous:", html)
+
     def test_latest_sales_artifact_receipt_copy_uses_sales_artifact(self):
         self._create_sales_run(with_artifact=True, reconcile_status="MATCH")
         artifact = RunArtifact.objects.get(kind=RunArtifact.KIND_SALES_UPLOAD)

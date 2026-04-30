@@ -169,21 +169,23 @@
             </h4>
             {% if company_data.latest_inventory_audit %}
             <div class="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 text-sm">
-                <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <div class="flex flex-wrap items-center justify-between gap-2 px-2">
                     <span class="text-xs text-slate-500 dark:text-slate-400">{{ company_data.latest_inventory_audit.processed_at|date:"M d, Y g:i A"|default:"—" }}</span>
                     {% with stats=company_data.latest_inventory_audit.upload_stats_json %}
-                    <span class="text-xs px-2 py-0.5 rounded-full {% if stats.apply.error %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400{% elif stats.apply.mode == 'apply' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400{% elif stats.apply.mode == 'dry_run' %}bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400{% else %}bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-300{% endif %}">{{ stats.apply.mode|default:"audit_only" }}</span>
+                    <span title="{% if stats.apply.error %}Inventory sync issue: {{ stats.apply.error }}{% elif stats.apply.mode == 'apply' %}Inventory updates were applied to QBO.{% elif stats.apply.mode == 'dry_run' %}Preview only; no QBO inventory updates were posted.{% else %}Checked only; no QBO inventory updates were posted.{% endif %}" class="text-xs px-2 py-0.5 rounded-full {% if stats.apply.error %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400{% elif stats.apply.mode == 'apply' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400{% elif stats.apply.mode == 'dry_run' %}bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400{% else %}bg-slate-100 dark:bg-slate-600 text-slate-700 dark:text-slate-300{% endif %}">
+                        {% if stats.apply.error %}Sync issue{% elif stats.apply.mode == 'apply' %}Applied updates{% elif stats.apply.mode == 'dry_run' %}Preview only{% else %}Checked only{% endif %}
+                    </span>
                     {% endwith %}
                 </div>
                 {% with stats=company_data.latest_inventory_audit.upload_stats_json %}
-                <div class="text-xs text-slate-600 dark:text-slate-300 flex flex-wrap gap-2">
-                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Groups: {{ stats.total_groups|default:0 }}</span>
-                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">In sync: {{ stats.status_counts.in_sync|default:0 }}</span>
-                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Needs adj.: {{ stats.status_counts.needs_adjustment|default:0 }}</span>
-                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Ambiguous: {{ stats.status_counts.ambiguous_in_qbo|default:0 }}</span>
-                    <span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Missing: {{ stats.status_counts.missing_in_qbo|default:0 }}</span>
-                    {% if stats.apply.posted %}<span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Posted: {{ stats.apply.posted }}</span>{% endif %}
-                    {% if stats.apply.skipped %}<span class="px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50">Skipped: {{ stats.apply.skipped }}</span>{% endif %}
+                <div class="mt-2 text-xs text-slate-600 dark:text-slate-300 flex flex-wrap gap-2">
+                    <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Product groups</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.total_groups|default:0 }}</span></span>
+                    <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Already in sync</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.status_counts.in_sync|default:0 }}</span></span>
+                    <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Need updates</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.status_counts.needs_adjustment|default:0 }}</span></span>
+                    <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Multiple QBO matches</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.status_counts.ambiguous_in_qbo|default:0 }}</span></span>
+                    <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Missing in QBO</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.status_counts.missing_in_qbo|default:0 }}</span></span>
+                    {% if stats.apply.posted %}<span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Updates posted</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.apply.posted }}</span></span>{% endif %}
+                    {% if stats.apply.skipped %}<span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100/70 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-600/50"><span class="text-slate-500 dark:text-slate-400">Updates skipped</span><span class="font-medium text-slate-700 dark:text-slate-200">{{ stats.apply.skipped }}</span></span>{% endif %}
                 </div>
                 {% if stats.apply.error %}
                 <p class="text-xs text-red-600 dark:text-red-400 mt-1 truncate" title="{{ stats.apply.error }}">Error: {{ stats.apply.error }}</p>
