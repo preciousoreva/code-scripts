@@ -12,6 +12,11 @@ urlpatterns = [
     path("runs/trigger", views.trigger_run, name="run-trigger"),
     path("runs/trigger-inventory", views.trigger_inventory_run, name="run-trigger-inventory"),
     path("runs/<uuid:job_id>/", views.run_detail, name="run-detail"),
+    path(
+        "runs/<uuid:job_id>/artifacts/<int:artifact_id>/report/<slug:report_key>/",
+        views.run_artifact_report,
+        name="run-artifact-report",
+    ),
     path("runs/<uuid:job_id>/logs", views.run_logs, name="run-logs"),
     path("api/runs/active", views.run_active_ids, name="run-active-ids"),
     path("api/runs/status", views.run_status_check, name="run-status-check"),

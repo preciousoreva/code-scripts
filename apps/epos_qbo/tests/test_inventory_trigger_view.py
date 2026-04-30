@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from django.contrib.auth.models import Permission, User
@@ -171,39 +173,204 @@ class InventoryTriggerViewTests(TestCase):
             status=RunJob.STATUS_SUCCEEDED,
             exit_code=0,
         )
-        RunArtifact.objects.create(
+        # Reports must be under settings.BASE_DIR to be eligible for download links.
+        from django.conf import settings
+
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            base = Path(td)
+            summary_json = base / "inventory_pipeline_company_a_120000.json"
+            summary_json.write_text("{}", encoding="utf-8")
+            summary_csv = base / "inventory_pipeline_company_a_120000.csv"
+            summary_csv.write_text("sku,status\nABC,in_sync\n", encoding="utf-8")
+            final_audit = base / "inventory_audit_company_a_final_120000.csv"
+            final_audit.write_text("base_name,status\nWidget,in_sync\n", encoding="utf-8")
+            initial_audit = base / "inventory_audit_company_a_initial_120000.csv"
+            initial_audit.write_text("base_name,status\nWidget,in_sync\n", encoding="utf-8")
+            catalog_cleanup = base / "inventory_catalog_cleanup_company_a_120000.csv"
+            catalog_cleanup.write_text("base_name,planned_action\nWidget,noop\n", encoding="utf-8")
+
+            RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(summary_json),
+                source_hash="a" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                rows_total=1,
+                rows_kept=1,
+                upload_stats_json={
+                    "report_type": "inventory_pipeline",
+                    "products_checked": 147,
+                    "in_sync": 147,
+                    "catalog_fixes_applied": 0,
+                    "base_items_created": 0,
+                    "duplicate_base_items_resolved": 0,
+                    "quantity_updates_applied": 0,
+                    "blocked_items": 0,
+                    "summary_json": str(summary_json),
+                    "summary_csv": str(summary_csv),
+                    "child_reports": {
+                        "final_audit": str(final_audit),
+                        "initial_audit": str(initial_audit),
+                        "catalog_cleanup": str(catalog_cleanup),
+                    },
+                },
+            )
+
+            response = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
+
+            self.assertEqual(response.status_code, 200)
+            html = response.content.decode("utf-8")
+            self.assertIn("Inventory report", html)
+            self.assertIn("Products:", html)
+            self.assertIn("147", html)
+            self.assertIn("catalog", html)
+            self.assertIn("blocked", html)
+            self.assertIn("Summary CSV", html)
+            self.assertIn("Summary JSON", html)
+            self.assertIn("Final Audit", html)
+            self.assertIn("Initial Audit", html)
+            self.assertIn("Catalog Cleanup", html)
+            self.assertNotIn("Run succeeded but no artifacts were linked", html)
+            self.assertNotIn("Reconciliation did not run or failed", html)
+
+    def test_authenticated_user_can_download_inventory_report_file(self):
+        self.client.login(username="op", password="pw")
+        from django.conf import settings
+
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            summary_csv = Path(td) / "inventory_pipeline_company_a_120000.csv"
+            summary_csv.write_text("sku,status\nABC,in_sync\n", encoding="utf-8")
+            summary_json = Path(td) / "inventory_pipeline_company_a_120000.json"
+            summary_json.write_text("{}", encoding="utf-8")
+            job = RunJob.objects.create(
+                scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+                company_key="company_a",
+                status=RunJob.STATUS_SUCCEEDED,
+                exit_code=0,
+            )
+            artifact = RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(summary_json),
+                source_hash="c" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={
+                    "report_type": "inventory_pipeline",
+                    "summary_csv": str(summary_csv),
+                    "summary_json": str(summary_json),
+                },
+            )
+
+            response = self.client.get(
+                reverse(
+                    "epos_qbo:run-artifact-report",
+                    kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                )
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(b"".join(response.streaming_content), b"sku,status\nABC,in_sync\n")
+            self.assertIn("inventory_pipeline_company_a_120000.csv", response.headers["Content-Disposition"])
+
+    def test_report_download_rejects_unknown_or_missing_report(self):
+        self.client.login(username="op", password="pw")
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            exit_code=0,
+        )
+        artifact = RunArtifact.objects.create(
             kind=RunArtifact.KIND_INVENTORY_AUDIT,
             run_job=job,
             company_key="company_a",
             processed_at=timezone.now(),
-            source_path="/tmp/inventory_pipeline_company_a_120000.json",
-            source_hash="a" * 64,
+            source_path="/tmp/missing_inventory_pipeline.json",
+            source_hash="d" * 64,
             reliability_status=RunArtifact.RELIABILITY_HIGH,
-            rows_total=1,
-            rows_kept=1,
             upload_stats_json={
                 "report_type": "inventory_pipeline",
-                "products_checked": 147,
-                "in_sync": 147,
-                "catalog_fixes_applied": 0,
-                "base_items_created": 0,
-                "duplicate_base_items_resolved": 0,
-                "quantity_updates_applied": 0,
-                "blocked_items": 0,
+                "summary_csv": "/tmp/missing_inventory_pipeline.csv",
             },
         )
 
-        response = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id}))
+        with suppress_expected_request_logs():
+            unknown = self.client.get(
+                reverse(
+                    "epos_qbo:run-artifact-report",
+                    kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "unknown"},
+                )
+            )
+            missing = self.client.get(
+                reverse(
+                    "epos_qbo:run-artifact-report",
+                    kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                )
+            )
 
-        self.assertEqual(response.status_code, 200)
-        html = response.content.decode("utf-8")
-        self.assertIn("Inventory report", html)
-        self.assertIn("Products checked:", html)
-        self.assertIn("147", html)
-        self.assertIn("Catalog fixes:", html)
-        self.assertIn("Blocked items:", html)
-        self.assertNotIn("Run succeeded but no artifacts were linked", html)
-        self.assertNotIn("Reconciliation did not run or failed", html)
+        self.assertEqual(unknown.status_code, 404)
+        self.assertEqual(missing.status_code, 404)
+
+    def test_report_download_rejects_artifact_from_another_run(self):
+        self.client.login(username="op", password="pw")
+        with TemporaryDirectory() as td:
+            summary_csv = Path(td) / "summary.csv"
+            summary_csv.write_text("ok\n", encoding="utf-8")
+            job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a")
+            other_job = RunJob.objects.create(scope=RunJob.SCOPE_INVENTORY_PIPELINE, company_key="company_a")
+            artifact = RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=other_job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(summary_csv),
+                source_hash="e" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={"report_type": "inventory_pipeline", "summary_csv": str(summary_csv)},
+            )
+
+            with suppress_expected_request_logs():
+                response = self.client.get(
+                    reverse(
+                        "epos_qbo:run-artifact-report",
+                        kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_report_download_rejects_relative_traversal_path(self):
+        self.client.login(username="op", password="pw")
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            exit_code=0,
+        )
+        artifact = RunArtifact.objects.create(
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            run_job=job,
+            company_key="company_a",
+            processed_at=timezone.now(),
+            source_path="../outside.json",
+            source_hash="f" * 64,
+            reliability_status=RunArtifact.RELIABILITY_HIGH,
+            upload_stats_json={"report_type": "inventory_pipeline", "summary_csv": "../outside.csv"},
+        )
+
+        with suppress_expected_request_logs():
+            response = self.client.get(
+                reverse(
+                    "epos_qbo:run-artifact-report",
+                    kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
+                )
+            )
+
+        self.assertEqual(response.status_code, 404)
 
     def test_run_detail_sales_artifact_still_shows_sales_metrics(self):
         self.client.login(username="op", password="pw")

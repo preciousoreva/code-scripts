@@ -214,7 +214,7 @@ class SchedulesUiTests(TestCase):
         self.assertNotContains(response, "All Companies Daily Run")
         self.assertContains(response, "System Fallback Schedule")
         self.assertContains(response, "Legacy environment configuration")
-        self.assertContains(response, "System-managed")
+        self.assertContains(response, "System-managed", count=1)
         self.assertNotContains(response, "Legacy Env Fallback")
         self.assertContains(response, "Daily at 19:00")
         self.assertContains(response, "Workflow")
@@ -227,6 +227,13 @@ class SchedulesUiTests(TestCase):
         self.assertNotContains(response, "Cron / TZ")
         self.assertContains(response, "Recent Schedule Activity")
         self.assertNotContains(response, "Recent Scheduled Events")
+        html = response.content.decode("utf-8")
+        self.assertEqual(html.count('<th class="text-left px-4 py-3 font-medium">Workflow</th>'), 1)
+        self.assertIn("Active Schedules", html)
+        self.assertIn("Disabled Schedules", html)
+        self.assertNotIn("Completed One-time Runs", html)
+        self.assertNotIn("bg-slate-300", html)
+        self.assertNotIn("bg-gray-300", html)
 
     def test_schedules_page_displays_one_time_completed_schedule(self):
         completed_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)
@@ -254,6 +261,9 @@ class SchedulesUiTests(TestCase):
         self.assertContains(response, "Completed")
         self.assertContains(response, "Completed today at 19:05")
         self.assertContains(response, "Ran once")
+        self.assertContains(response, "Disabled automatically")
+        self.assertContains(response, "Completed One-time Runs")
+        self.assertContains(response, "—")
 
     def test_recurring_next_run_displays_in_schedule_timezone(self):
         # 18:00 UTC == 19:00 Africa/Lagos (WAT)
