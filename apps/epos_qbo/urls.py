@@ -35,26 +35,6 @@ urlpatterns = [
         views.company_inventory_review,
         name="company_inventory_review",
     ),
-    path(
-        "companies/<slug:company_key>/inventory/review/items/<int:item_id>/acknowledge/",
-        views.inventory_review_item_acknowledge,
-        name="inventory-review-item-acknowledge",
-    ),
-    path(
-        "companies/<slug:company_key>/inventory/review/items/<int:item_id>/ignore/",
-        views.inventory_review_item_ignore,
-        name="inventory-review-item-ignore",
-    ),
-    path(
-        "companies/<slug:company_key>/inventory/review/items/<int:item_id>/mark-resolved/",
-        views.inventory_review_item_mark_resolved,
-        name="inventory-review-item-mark-resolved",
-    ),
-    path(
-        "companies/<slug:company_key>/inventory/review/items/<int:item_id>/reopen/",
-        views.inventory_review_item_reopen,
-        name="inventory-review-item-reopen",
-    ),
     path("companies/<slug:company_key>/", views.company_detail, name="company-detail"),
     path("companies/<slug:company_key>/toggle-active/", views.company_toggle_active, name="company-toggle-active"),
     path("companies/<slug:company_key>/advanced", views.company_advanced, name="company-advanced"),
