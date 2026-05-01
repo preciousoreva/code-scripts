@@ -65,6 +65,7 @@
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
             <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Missing-from-QuickBooks rows</h2>
             <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ preview.rows|length }} row{{ preview.rows|length|pluralize }} from the latest final audit.</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Account mappings are read from Product.Mapping.csv. Expand mapping details to audit accounts.</p>
         </div>
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
@@ -74,31 +75,48 @@
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Suggested QBO Name</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">EPOS Expected</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Inventory Account</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Revenue Account</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">COGS Account</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Safety</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Block Reason</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Notes / Mapping</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
                     {% for row in preview.rows %}
                     <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                        <td class="px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56">{{ row.product }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-48">{{ row.suggested_qbo_name|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.category|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.epos_expected_qty|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.inventory_account|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.revenue_account|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.cogs_account|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm">
+                        <td class="px-4 py-4 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56 align-top">{{ row.product }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-700 dark:text-slate-300 min-w-48 align-top">{{ row.suggested_qbo_name|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 align-top">{{ row.category|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 align-top whitespace-nowrap tabular-nums">{{ row.epos_expected_qty|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm align-top whitespace-nowrap">
                             {% if row.is_safe %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-100 dark:border-emerald-800">{{ row.safety_status }}</span>
+                            <span class="inline-flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                Safe
+                            </span>
                             {% else %}
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">{{ row.safety_status }}</span>
+                            <span class="inline-flex items-center gap-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                                Blocked
+                            </span>
                             {% endif %}
                         </td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 min-w-72">{{ row.block_reason|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 min-w-80 align-top">
+                            {% if not row.is_safe and row.block_reason %}
+                            <p class="text-sm text-amber-800 dark:text-amber-200">{{ row.block_reason }}</p>
+                            {% else %}
+                            <p class="text-sm text-slate-600 dark:text-slate-300">{% if row.safety_status and row.safety_status != "Safe candidate" %}{{ row.safety_status }}{% else %}Mapped from Product.Mapping.csv{% endif %}</p>
+                            {% endif %}
+
+                            {% if row.inventory_account or row.revenue_account or row.cogs_account %}
+                            <details class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                                <summary class="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200">View accounts</summary>
+                                <div class="mt-2 space-y-1">
+                                    {% if row.inventory_account %}<div><span class="font-medium text-slate-600 dark:text-slate-300">Inventory:</span> {{ row.inventory_account }}</div>{% endif %}
+                                    {% if row.revenue_account %}<div><span class="font-medium text-slate-600 dark:text-slate-300">Revenue:</span> {{ row.revenue_account }}</div>{% endif %}
+                                    {% if row.cogs_account %}<div><span class="font-medium text-slate-600 dark:text-slate-300">COGS:</span> {{ row.cogs_account }}</div>{% endif %}
+                                </div>
+                            </details>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
