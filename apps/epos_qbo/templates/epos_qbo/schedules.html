@@ -269,246 +269,514 @@
             </div>
         </div>
         {% if schedule_rows %}
-        <div class="overflow-x-auto">
-            <table class="w-full table-fixed text-sm">
-                <colgroup>
-                    <col class="w-[34%]">
-                    <col class="w-[14%]">
-                    <col class="w-[24%]">
-                    <col class="w-[18%]">
-                    <col class="w-[10%]">
-                </colgroup>
-                <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-600">
-                    <tr>
-                        <th class="text-left px-4 py-3 font-medium">Workflow</th>
-                        <th class="text-left px-4 py-3 font-medium">Status</th>
-                        <th class="text-left px-4 py-3 font-medium">Timing</th>
-                        <th class="text-left px-4 py-3 font-medium">Next Run</th>
-                        <th class="text-center px-4 py-3 font-medium w-20">Actions</th>
-                    </tr>
-                </thead>
-                <tbody x-data="{ openEditId: null }" @close-edit="openEditId = null" class="text-slate-900 dark:text-slate-200">
-                    {% for section in schedule_sections %}
-                    {% if section.rows or section.show_when_empty %}
-                    <tr class="border-t border-slate-300 dark:border-slate-500">
-                        <td colspan="5" class="bg-slate-50/80 dark:bg-slate-800/70 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{{ section.title }}</td>
-                    </tr>
-                    {% if section.rows %}
-                        {% for row in section.rows %}
-                        {% with schedule=row.schedule %}
-                        <tr class="border-b border-slate-100 dark:border-slate-700">
-                            <td class="px-4 py-3 align-top">
-                                <div class="font-medium text-slate-900 dark:text-slate-100 break-words">{{ row.display_name }}</div>
-                                <div class="text-xs font-normal leading-snug text-slate-500 dark:text-slate-400 mt-1 break-words">
-                                    {{ row.subtitle|escape }}
-                                </div>
-                                {% if row.last_run_at %}
-                                <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">Last run: {{ row.last_run_at|date:"Y-m-d H:i" }} · {{ row.last_result_label }}</div>
-                                {% elif row.last_result_label != "Never run" %}
-                                <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{{ row.last_result_label }}</div>
-                                {% endif %}
-                            </td>
-                            <td class="px-4 py-3 align-top">
-                                <div class="flex flex-col items-start gap-1.5">
-                                    {% if schedule.enabled %}
-                                    <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Enabled</span>
-                                    {% else %}
-                                    <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">Disabled</span>
-                                    {% endif %}
-                                    {% if row.status_subtext %}
-                                    <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ row.status_subtext }}</div>
-                                    {% endif %}
-                                    {% if schedule.is_system_managed %}
-                                    <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
-                                    {% endif %}
-                                </div>
-                            </td>
-                            <td class="px-4 py-3 align-top">
-                                <div class="text-sm text-slate-800 dark:text-slate-200 break-words">{{ row.timing_primary }}</div>
-                                <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ row.timing_secondary }}</div>
-                                {% if row.timing_detail %}
-                                <div class="font-mono text-[11px] text-slate-400 dark:text-slate-500 mt-1 break-words">{{ row.timing_detail }}</div>
-                                {% endif %}
-                            </td>
-                            <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
-                                <div class="break-words">{{ row.next_run_label }}</div>
-                                {% if row.current_status_label %}
-                                <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Current: {{ row.current_status_label }}</span>
-                                {% endif %}
-                                {% if schedule.last_error %}
-                                <div class="mt-1 text-red-600 dark:text-red-400">{{ schedule.last_error|truncatechars:80 }}</div>
-                                {% endif %}
-                            </td>
-                            <td class="px-4 py-3 align-middle">
-                                <div class="flex justify-center" x-data="{ menuOpen: false, menuX: 0, menuY: 0 }">
-                                    <button type="button" x-ref="scheduleMenuBtn"
-                                            @click="menuOpen = !menuOpen; if (menuOpen) { $nextTick(() => { const b = $refs.scheduleMenuBtn; const r = b.getBoundingClientRect(); menuX = r.left; menuY = r.bottom + 6 }) }"
-                                            class="flex items-center justify-center w-8 h-8 rounded-lg border border-slate-300 dark:border-slate-500 bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500 shrink-0" aria-label="Schedule actions" aria-haspopup="true" :aria-expanded="menuOpen">
-                                        <iconify-icon icon="solar:menu-dots-linear" width="18" class="text-slate-600 dark:text-slate-200"></iconify-icon>
-                                    </button>
-                                    <template x-teleport="body">
-                                        <div x-show="menuOpen && menuY > 0" x-cloak @click.outside="menuOpen = false" x-transition
-                                             :style="'position: fixed; top: ' + menuY + 'px; left: ' + menuX + 'px;'"
-                                             class="w-44 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-[100] min-w-[11rem]">
-                                            {% if not schedule.is_system_managed %}
-                                            <button type="button" @click="openEditId = openEditId === '{{ schedule.id }}' ? null : '{{ schedule.id }}'; menuOpen = false"
-                                                    class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
-                                                Edit
+        <div class="p-6 space-y-6" x-data="{ openEditId: null }" @close-edit="openEditId = null">
+            {% for section in schedule_sections %}
+            {% if section.title == "Enabled" %}
+            <section class="rounded-xl border border-slate-200 dark:border-slate-600 bg-white/60 dark:bg-slate-900/20 overflow-hidden">
+                <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-600 bg-slate-50/70 dark:bg-slate-800/40">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Active Schedules</h3>
+                                <span class="inline-flex items-center justify-center min-w-6 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
+                                    {{ section.rows|length }}
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Schedules currently enabled and eligible to run.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full table-fixed text-sm">
+                        <colgroup>
+                            <col class="w-[34%]">
+                            <col class="w-[14%]">
+                            <col class="w-[24%]">
+                            <col class="w-[18%]">
+                            <col class="w-[10%]">
+                        </colgroup>
+                        <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-600">
+                            <tr>
+                                <th class="text-left px-4 py-3 font-medium">Workflow</th>
+                                <th class="text-left px-4 py-3 font-medium">Status</th>
+                                <th class="text-left px-4 py-3 font-medium">Timing</th>
+                                <th class="text-left px-4 py-3 font-medium">Next Run</th>
+                                <th class="text-center px-4 py-3 font-medium w-20">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-slate-900 dark:text-slate-200">
+                            {% if section.rows %}
+                                {% for row in section.rows %}
+                                {% with schedule=row.schedule %}
+                                <tr class="border-b border-slate-100 dark:border-slate-700">
+                                    <td class="px-4 py-3 align-top">
+                                        <div class="font-medium text-slate-900 dark:text-slate-100 break-words">{{ row.display_name }}</div>
+                                        <div class="text-xs font-normal leading-snug text-slate-500 dark:text-slate-400 mt-1 break-words">
+                                            {{ row.subtitle|escape }}
+                                        </div>
+                                        {% if row.last_run_at %}
+                                        <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">Last run: {{ row.last_run_at|date:"Y-m-d H:i" }} · {{ row.last_result_label }}</div>
+                                        {% elif row.last_result_label != "Never run" %}
+                                        <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{{ row.last_result_label }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3 align-top">
+                                        <div class="flex flex-col items-start gap-1.5">
+                                            {% if schedule.enabled %}
+                                            <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Enabled</span>
+                                            {% else %}
+                                            <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">Disabled</span>
+                                            {% endif %}
+                                            {% if row.status_subtext %}
+                                            <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ row.status_subtext }}</div>
+                                            {% endif %}
+                                            {% if schedule.is_system_managed %}
+                                            <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
+                                            {% endif %}
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3 align-top">
+                                        <div class="text-sm text-slate-800 dark:text-slate-200 break-words">{{ row.timing_primary }}</div>
+                                        <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ row.timing_secondary }}</div>
+                                        {% if row.timing_detail %}
+                                        <div class="font-mono text-[11px] text-slate-400 dark:text-slate-500 mt-1 break-words">{{ row.timing_detail }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
+                                        <div class="break-words">{{ row.next_run_label }}</div>
+                                        {% if row.current_status_label %}
+                                        <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Current: {{ row.current_status_label }}</span>
+                                        {% endif %}
+                                        {% if schedule.last_error %}
+                                        <div class="mt-1 text-red-600 dark:text-red-400">{{ schedule.last_error|truncatechars:80 }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3 align-middle">
+                                        <div class="flex justify-center" x-data="{ menuOpen: false, menuX: 0, menuY: 0 }">
+                                            <button type="button" x-ref="scheduleMenuBtn"
+                                                    @click="menuOpen = !menuOpen; if (menuOpen) { $nextTick(() => { const b = $refs.scheduleMenuBtn; const r = b.getBoundingClientRect(); menuX = r.left; menuY = r.bottom + 6 }) }"
+                                                    class="flex items-center justify-center w-8 h-8 rounded-lg border border-slate-300 dark:border-slate-500 bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500 shrink-0" aria-label="Schedule actions" aria-haspopup="true" :aria-expanded="menuOpen">
+                                                <iconify-icon icon="solar:menu-dots-linear" width="18" class="text-slate-600 dark:text-slate-200"></iconify-icon>
                                             </button>
+                                            <template x-teleport="body">
+                                                <div x-show="menuOpen && menuY > 0" x-cloak @click.outside="menuOpen = false" x-transition
+                                                     :style="'position: fixed; top: ' + menuY + 'px; left: ' + menuX + 'px;'"
+                                                     class="w-44 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-[100] min-w-[11rem]">
+                                                    {% if not schedule.is_system_managed %}
+                                                    <button type="button" @click="openEditId = openEditId === '{{ schedule.id }}' ? null : '{{ schedule.id }}'; menuOpen = false"
+                                                            class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                                        Edit
+                                                    </button>
+                                                    {% endif %}
+                                                    <form method="post" action="{% url 'epos_qbo:schedule-run-now' schedule.id %}" class="block">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Run Now</button>
+                                                    </form>
+                                                    {% if not schedule.is_system_managed %}
+                                                    <form method="post" action="{% url 'epos_qbo:schedule-toggle' schedule.id %}" class="block">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                                            {% if schedule.enabled %}Disable{% else %}Enable{% endif %}
+                                                        </button>
+                                                    </form>
+                                                    <form method="post" action="{% url 'epos_qbo:schedule-delete' schedule.id %}" class="block" onsubmit="return confirm('Delete schedule &quot;{{ row.display_name|escapejs }}&quot;? This cannot be undone.');">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
+                                                    </form>
+                                                    {% endif %}
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% if not schedule.is_system_managed %}
+                                <tr x-show="openEditId === '{{ schedule.id }}'" x-cloak x-transition class="bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                                    x-data="{ runType: '{{ schedule.schedule_type }}', workflow: '{{ row.workflow }}', target: '{{ row.company_target }}' }"
+                                    x-effect="if (workflow === '{{ workflow_inventory }}') target = '{{ company_target_one }}'">
+                                    <td colspan="5" class="px-4 py-4">
+                                        <p class="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">Edit schedule</p>
+                                        <form method="post" action="{% url 'epos_qbo:schedule-update' schedule.id %}" class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="target_date_mode" value="{{ schedule_target_date_mode }}">
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Name</label>
+                                                <input type="text" name="name" value="{{ row.display_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run type</label>
+                                                <select name="schedule_type" x-model="runType" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ schedule_type_recurring }}">Recurring</option>
+                                                    <option value="{{ schedule_type_one_time }}">One-time</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Workflow</label>
+                                                <select name="workflow" x-model="workflow" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ workflow_sales }}">Sales Sync</option>
+                                                    <option value="{{ workflow_inventory }}">Inventory Sync</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company target</label>
+                                                <!-- Separate selects so Inventory Sync cannot submit "all". -->
+                                                <select name="company_target"
+                                                        x-show="workflow === '{{ workflow_sales }}'"
+                                                        :disabled="workflow !== '{{ workflow_sales }}'"
+                                                        x-model="target"
+                                                        class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ company_target_all }}">All eligible companies</option>
+                                                    <option value="{{ company_target_one }}">One company</option>
+                                                </select>
+                                                <select name="company_target"
+                                                        x-show="workflow === '{{ workflow_inventory }}'"
+                                                        x-cloak
+                                                        :disabled="workflow !== '{{ workflow_inventory }}'"
+                                                        x-model="target"
+                                                        class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ company_target_one }}">One company</option>
+                                                </select>
+                                            </div>
+                                            <div x-show="target === '{{ company_target_one }}'" x-cloak class="md:col-span-2">
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company</label>
+                                                <!-- Separate selects so Inventory Sync only lists inventory-enabled companies. -->
+                                                <select name="company_key"
+                                                        x-show="workflow === '{{ workflow_sales }}'"
+                                                        :disabled="workflow !== '{{ workflow_sales }}'"
+                                                        class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="">—</option>
+                                                    {% for company in company_options %}
+                                                    <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
+                                                    {% endfor %}
+                                                </select>
+                                                <select name="company_key"
+                                                        x-show="workflow === '{{ workflow_inventory }}'"
+                                                        x-cloak
+                                                        :disabled="workflow !== '{{ workflow_inventory }}'"
+                                                        class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="">—</option>
+                                                    {% for company in inventory_company_options %}
+                                                    <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </div>
+                                            <div x-show="workflow === '{{ workflow_inventory }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Category</label>
+                                                <input type="text" name="category" value="{{ row.category }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                            </div>
+                                            <div x-show="workflow === '{{ workflow_inventory }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Product filter</label>
+                                                <input type="text" name="product_filter" value="{{ row.product_filter }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                            </div>
+                                            <div class="md:col-span-2" x-show="runType === '{{ schedule_type_recurring }}'">
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Cron</label>
+                                                <p class="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 mb-1">Minute hour day month weekday, e.g. <code class="font-mono text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 px-1 rounded">0 18 * * *</code> (6pm daily)</p>
+                                                <input type="text" name="cron_expr" value="{{ schedule.cron_expr }}" :required="runType === '{{ schedule_type_recurring }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm font-mono" placeholder="0 18 * * *">
+                                            </div>
+                                            <div x-show="runType === '{{ schedule_type_one_time }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run date</label>
+                                                <input type="date" name="run_once_date" value="{{ row.run_once_date_value }}" :required="runType === '{{ schedule_type_one_time }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                            </div>
+                                            <div x-show="runType === '{{ schedule_type_one_time }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run time</label>
+                                                <input type="time" name="run_once_time" value="{{ row.run_once_time_value }}" :required="runType === '{{ schedule_type_one_time }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Timezone</label>
+                                                <input type="text" name="timezone_name" value="{{ schedule.timezone_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm" placeholder="Africa/Lagos">
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-2" x-show="workflow === '{{ workflow_sales }}' && target === '{{ company_target_all }}'">
+                                                <div>
+                                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Parallel</label>
+                                                    <input type="number" min="1" name="parallel" value="{{ schedule.parallel }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Stagger seconds</label>
+                                                    <input type="number" min="0" name="stagger_seconds" value="{{ schedule.stagger_seconds }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                </div>
+                                            </div>
+                                            <div class="md:col-span-2 flex flex-wrap gap-4 items-center pt-1">
+                                                <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                                                    <input type="checkbox" name="enabled" {% if schedule.enabled %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Enabled
+                                                </label>
+                                                <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200" x-show="workflow === '{{ workflow_sales }}' && target === '{{ company_target_all }}'">
+                                                    <input type="checkbox" name="continue_on_failure" {% if schedule.continue_on_failure %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Continue on failure
+                                                </label>
+                                                <div class="flex gap-2 ml-auto">
+                                                    <button type="button" @click="$dispatch('close-edit')" class="btn btn-secondary btn-sm">Cancel</button>
+                                                    <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                                                </div>
+                                            </div>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% endif %}
+                                {% endwith %}
+                                {% endfor %}
+                            {% else %}
+                            <tr>
+                                <td colspan="5" class="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">No active schedules.</td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% endif %}
+            {% endfor %}
+
+            {% for section in schedule_sections %}
+            {% if section.title == "Disabled" %}
+            <section class="rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50/60 dark:bg-slate-900/10 overflow-hidden">
+                <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-600 bg-slate-50/80 dark:bg-slate-800/30">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-200">Inactive Schedules</h3>
+                                <span class="inline-flex items-center justify-center min-w-6 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200">
+                                    {{ section.rows|length }}
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Disabled, completed, or system-managed schedules.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full table-fixed text-sm">
+                        <colgroup>
+                            <col class="w-[34%]">
+                            <col class="w-[14%]">
+                            <col class="w-[24%]">
+                            <col class="w-[18%]">
+                            <col class="w-[10%]">
+                        </colgroup>
+                        <thead class="bg-slate-50 dark:bg-slate-700/30 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-600">
+                            <tr>
+                                <th class="text-left px-4 py-3 font-medium">Workflow</th>
+                                <th class="text-left px-4 py-3 font-medium">Status</th>
+                                <th class="text-left px-4 py-3 font-medium">Timing</th>
+                                <th class="text-left px-4 py-3 font-medium">Next Run</th>
+                                <th class="text-center px-4 py-3 font-medium w-20">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-slate-800 dark:text-slate-300">
+                            {% if section.rows %}
+                                {% for row in section.rows %}
+                                {% with schedule=row.schedule %}
+                                <tr class="border-b border-slate-200/60 dark:border-slate-700/60 bg-white/30 dark:bg-slate-900/10">
+                                    <td class="px-4 py-3 align-top">
+                                        <div class="font-medium text-slate-800 dark:text-slate-200 break-words">{{ row.display_name }}</div>
+                                        <div class="text-xs font-normal leading-snug text-slate-500 dark:text-slate-400 mt-1 break-words">
+                                            {{ row.subtitle|escape }}
+                                        </div>
+                                        {% if row.last_run_at %}
+                                        <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">Last run: {{ row.last_run_at|date:"Y-m-d H:i" }} · {{ row.last_result_label }}</div>
+                                        {% elif row.last_result_label != "Never run" %}
+                                        <div class="text-[11px] text-slate-400 dark:text-slate-500 mt-1">{{ row.last_result_label }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3 align-top">
+                                        <div class="flex flex-col items-start gap-1.5">
+                                            {% if schedule.enabled %}
+                                            <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Enabled</span>
+                                            {% else %}
+                                            <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">Disabled</span>
                                             {% endif %}
-                                            <form method="post" action="{% url 'epos_qbo:schedule-run-now' schedule.id %}" class="block">
-                                                {% csrf_token %}
-                                                <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Run Now</button>
-                                            </form>
-                                            {% if not schedule.is_system_managed %}
-                                            <form method="post" action="{% url 'epos_qbo:schedule-toggle' schedule.id %}" class="block">
-                                                {% csrf_token %}
-                                                <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
-                                                    {% if schedule.enabled %}Disable{% else %}Enable{% endif %}
-                                                </button>
-                                            </form>
-                                            <form method="post" action="{% url 'epos_qbo:schedule-delete' schedule.id %}" class="block" onsubmit="return confirm('Delete schedule &quot;{{ row.display_name|escapejs }}&quot;? This cannot be undone.');">
-                                                {% csrf_token %}
-                                                <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
-                                            </form>
+                                            {% if row.status_subtext %}
+                                            <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ row.status_subtext }}</div>
+                                            {% endif %}
+                                            {% if schedule.is_system_managed %}
+                                            <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
                                             {% endif %}
                                         </div>
-                                    </template>
-                                </div>
-                            </td>
-                        </tr>
-                        {% if not schedule.is_system_managed %}
-                        <tr x-show="openEditId === '{{ schedule.id }}'" x-cloak x-transition class="bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                            x-data="{ runType: '{{ schedule.schedule_type }}', workflow: '{{ row.workflow }}', target: '{{ row.company_target }}' }"
-                            x-effect="if (workflow === '{{ workflow_inventory }}') target = '{{ company_target_one }}'">
-                            <td colspan="5" class="px-4 py-4">
-                                <p class="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">Edit schedule</p>
-                                <form method="post" action="{% url 'epos_qbo:schedule-update' schedule.id %}" class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl">
-                                    {% csrf_token %}
-                                    <input type="hidden" name="target_date_mode" value="{{ schedule_target_date_mode }}">
-                                    <div>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Name</label>
-                                        <input type="text" name="name" value="{{ row.display_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
-                                    </div>
-                                    <div>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run type</label>
-                                        <select name="schedule_type" x-model="runType" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                            <option value="{{ schedule_type_recurring }}">Recurring</option>
-                                            <option value="{{ schedule_type_one_time }}">One-time</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Workflow</label>
-                                        <select name="workflow" x-model="workflow" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                            <option value="{{ workflow_sales }}">Sales Sync</option>
-                                            <option value="{{ workflow_inventory }}">Inventory Sync</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company target</label>
-                                        <!-- Separate selects so Inventory Sync cannot submit "all". -->
-                                        <select name="company_target"
-                                                x-show="workflow === '{{ workflow_sales }}'"
-                                                :disabled="workflow !== '{{ workflow_sales }}'"
-                                                x-model="target"
-                                                class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                            <option value="{{ company_target_all }}">All eligible companies</option>
-                                            <option value="{{ company_target_one }}">One company</option>
-                                        </select>
-                                        <select name="company_target"
-                                                x-show="workflow === '{{ workflow_inventory }}'"
-                                                x-cloak
-                                                :disabled="workflow !== '{{ workflow_inventory }}'"
-                                                x-model="target"
-                                                class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                            <option value="{{ company_target_one }}">One company</option>
-                                        </select>
-                                    </div>
-                                    <div x-show="target === '{{ company_target_one }}'" x-cloak class="md:col-span-2">
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company</label>
-                                        <!-- Separate selects so Inventory Sync only lists inventory-enabled companies. -->
-                                        <select name="company_key"
-                                                x-show="workflow === '{{ workflow_sales }}'"
-                                                :disabled="workflow !== '{{ workflow_sales }}'"
-                                                class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                            <option value="">—</option>
-                                            {% for company in company_options %}
-                                            <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
-                                            {% endfor %}
-                                        </select>
-                                        <select name="company_key"
-                                                x-show="workflow === '{{ workflow_inventory }}'"
-                                                x-cloak
-                                                :disabled="workflow !== '{{ workflow_inventory }}'"
-                                                class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                            <option value="">—</option>
-                                            {% for company in inventory_company_options %}
-                                            <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
-                                            {% endfor %}
-                                        </select>
-                                    </div>
-                                    <div x-show="workflow === '{{ workflow_inventory }}'" x-cloak>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Category</label>
-                                        <input type="text" name="category" value="{{ row.category }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
-                                    </div>
-                                    <div x-show="workflow === '{{ workflow_inventory }}'" x-cloak>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Product filter</label>
-                                        <input type="text" name="product_filter" value="{{ row.product_filter }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
-                                    </div>
-                                    <div class="md:col-span-2" x-show="runType === '{{ schedule_type_recurring }}'">
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Cron</label>
-                                        <p class="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 mb-1">Minute hour day month weekday, e.g. <code class="font-mono text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 px-1 rounded">0 18 * * *</code> (6pm daily)</p>
-                                        <input type="text" name="cron_expr" value="{{ schedule.cron_expr }}" :required="runType === '{{ schedule_type_recurring }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm font-mono" placeholder="0 18 * * *">
-                                    </div>
-                                    <div x-show="runType === '{{ schedule_type_one_time }}'" x-cloak>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run date</label>
-                                        <input type="date" name="run_once_date" value="{{ row.run_once_date_value }}" :required="runType === '{{ schedule_type_one_time }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                    </div>
-                                    <div x-show="runType === '{{ schedule_type_one_time }}'" x-cloak>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run time</label>
-                                        <input type="time" name="run_once_time" value="{{ row.run_once_time_value }}" :required="runType === '{{ schedule_type_one_time }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                    </div>
-                                    <div>
-                                        <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Timezone</label>
-                                        <input type="text" name="timezone_name" value="{{ schedule.timezone_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm" placeholder="Africa/Lagos">
-                                    </div>
-                                    <div class="grid grid-cols-2 gap-2" x-show="workflow === '{{ workflow_sales }}' && target === '{{ company_target_all }}'">
-                                        <div>
-                                            <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Parallel</label>
-                                            <input type="number" min="1" name="parallel" value="{{ schedule.parallel }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                    </td>
+                                    <td class="px-4 py-3 align-top">
+                                        <div class="text-sm text-slate-700 dark:text-slate-200 break-words">{{ row.timing_primary }}</div>
+                                        <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ row.timing_secondary }}</div>
+                                        {% if row.timing_detail %}
+                                        <div class="font-mono text-[11px] text-slate-400 dark:text-slate-500 mt-1 break-words">{{ row.timing_detail }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3 align-top text-xs text-slate-600 dark:text-slate-300">
+                                        <div class="break-words">{{ row.next_run_label }}</div>
+                                        {% if row.current_status_label %}
+                                        <span class="inline-flex mt-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Current: {{ row.current_status_label }}</span>
+                                        {% endif %}
+                                        {% if schedule.last_error %}
+                                        <div class="mt-1 text-red-600 dark:text-red-400">{{ schedule.last_error|truncatechars:80 }}</div>
+                                        {% endif %}
+                                    </td>
+                                    <td class="px-4 py-3 align-middle">
+                                        <div class="flex justify-center opacity-95" x-data="{ menuOpen: false, menuX: 0, menuY: 0 }">
+                                            <button type="button" x-ref="scheduleMenuBtn"
+                                                    @click="menuOpen = !menuOpen; if (menuOpen) { $nextTick(() => { const b = $refs.scheduleMenuBtn; const r = b.getBoundingClientRect(); menuX = r.left; menuY = r.bottom + 6 }) }"
+                                                    class="flex items-center justify-center w-8 h-8 rounded-lg border border-slate-300 dark:border-slate-500 bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:focus:ring-slate-500 shrink-0" aria-label="Schedule actions" aria-haspopup="true" :aria-expanded="menuOpen">
+                                                <iconify-icon icon="solar:menu-dots-linear" width="18" class="text-slate-600 dark:text-slate-200"></iconify-icon>
+                                            </button>
+                                            <template x-teleport="body">
+                                                <div x-show="menuOpen && menuY > 0" x-cloak @click.outside="menuOpen = false" x-transition
+                                                     :style="'position: fixed; top: ' + menuY + 'px; left: ' + menuX + 'px;'"
+                                                     class="w-44 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-[100] min-w-[11rem]">
+                                                    {% if not schedule.is_system_managed %}
+                                                    <button type="button" @click="openEditId = openEditId === '{{ schedule.id }}' ? null : '{{ schedule.id }}'; menuOpen = false"
+                                                            class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                                        Edit
+                                                    </button>
+                                                    {% endif %}
+                                                    <form method="post" action="{% url 'epos_qbo:schedule-run-now' schedule.id %}" class="block">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Run Now</button>
+                                                    </form>
+                                                    {% if not schedule.is_system_managed %}
+                                                    <form method="post" action="{% url 'epos_qbo:schedule-toggle' schedule.id %}" class="block">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                                            {% if schedule.enabled %}Disable{% else %}Enable{% endif %}
+                                                        </button>
+                                                    </form>
+                                                    <form method="post" action="{% url 'epos_qbo:schedule-delete' schedule.id %}" class="block" onsubmit="return confirm('Delete schedule &quot;{{ row.display_name|escapejs }}&quot;? This cannot be undone.');">
+                                                        {% csrf_token %}
+                                                        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
+                                                    </form>
+                                                    {% endif %}
+                                                </div>
+                                            </template>
                                         </div>
-                                        <div>
-                                            <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Stagger seconds</label>
-                                            <input type="number" min="0" name="stagger_seconds" value="{{ schedule.stagger_seconds }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
-                                        </div>
-                                    </div>
-                                    <div class="md:col-span-2 flex flex-wrap gap-4 items-center pt-1">
-                                        <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-                                            <input type="checkbox" name="enabled" {% if schedule.enabled %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Enabled
-                                        </label>
-                                        <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200" x-show="workflow === '{{ workflow_sales }}' && target === '{{ company_target_all }}'">
-                                            <input type="checkbox" name="continue_on_failure" {% if schedule.continue_on_failure %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Continue on failure
-                                        </label>
-                                        <div class="flex gap-2 ml-auto">
-                                            <button type="button" @click="$dispatch('close-edit')" class="btn btn-secondary btn-sm">Cancel</button>
-                                            <button type="submit" class="btn btn-primary btn-sm">Save</button>
-                                        </div>
-                                    </div>
-                                </form>
-                            </td>
-                        </tr>
-                        {% endif %}
-                        {% endwith %}
-                        {% endfor %}
-                    {% else %}
-                    <tr>
-                        <td colspan="5" class="px-4 py-4 text-sm text-slate-500 dark:text-slate-400">{{ section.empty_message }}</td>
-                    </tr>
-                    {% endif %}
-                    {% endif %}
-                    {% endfor %}
-                </tbody>
-            </table>
+                                    </td>
+                                </tr>
+                                {% if not schedule.is_system_managed %}
+                                <tr x-show="openEditId === '{{ schedule.id }}'" x-cloak x-transition class="bg-slate-50/80 dark:bg-slate-800/60 text-slate-900 dark:text-slate-100"
+                                    x-data="{ runType: '{{ schedule.schedule_type }}', workflow: '{{ row.workflow }}', target: '{{ row.company_target }}' }"
+                                    x-effect="if (workflow === '{{ workflow_inventory }}') target = '{{ company_target_one }}'">
+                                    <td colspan="5" class="px-4 py-4">
+                                        <p class="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-3">Edit schedule</p>
+                                        <form method="post" action="{% url 'epos_qbo:schedule-update' schedule.id %}" class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="target_date_mode" value="{{ schedule_target_date_mode }}">
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Name</label>
+                                                <input type="text" name="name" value="{{ row.display_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run type</label>
+                                                <select name="schedule_type" x-model="runType" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ schedule_type_recurring }}">Recurring</option>
+                                                    <option value="{{ schedule_type_one_time }}">One-time</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Workflow</label>
+                                                <select name="workflow" x-model="workflow" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ workflow_sales }}">Sales Sync</option>
+                                                    <option value="{{ workflow_inventory }}">Inventory Sync</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company target</label>
+                                                <!-- Separate selects so Inventory Sync cannot submit "all". -->
+                                                <select name="company_target"
+                                                        x-show="workflow === '{{ workflow_sales }}'"
+                                                        :disabled="workflow !== '{{ workflow_sales }}'"
+                                                        x-model="target"
+                                                        class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ company_target_all }}">All eligible companies</option>
+                                                    <option value="{{ company_target_one }}">One company</option>
+                                                </select>
+                                                <select name="company_target"
+                                                        x-show="workflow === '{{ workflow_inventory }}'"
+                                                        x-cloak
+                                                        :disabled="workflow !== '{{ workflow_inventory }}'"
+                                                        x-model="target"
+                                                        class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="{{ company_target_one }}">One company</option>
+                                                </select>
+                                            </div>
+                                            <div x-show="target === '{{ company_target_one }}'" x-cloak class="md:col-span-2">
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Company</label>
+                                                <!-- Separate selects so Inventory Sync only lists inventory-enabled companies. -->
+                                                <select name="company_key"
+                                                        x-show="workflow === '{{ workflow_sales }}'"
+                                                        :disabled="workflow !== '{{ workflow_sales }}'"
+                                                        class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="">—</option>
+                                                    {% for company in company_options %}
+                                                    <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
+                                                    {% endfor %}
+                                                </select>
+                                                <select name="company_key"
+                                                        x-show="workflow === '{{ workflow_inventory }}'"
+                                                        x-cloak
+                                                        :disabled="workflow !== '{{ workflow_inventory }}'"
+                                                        class="mt-1 w-full max-w-xs h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                    <option value="">—</option>
+                                                    {% for company in inventory_company_options %}
+                                                    <option value="{{ company.company_key }}" {% if schedule.company_key == company.company_key %}selected{% endif %}>{{ company.display_name }} ({{ company.company_key }})</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </div>
+                                            <div x-show="workflow === '{{ workflow_inventory }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Category</label>
+                                                <input type="text" name="category" value="{{ row.category }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                            </div>
+                                            <div x-show="workflow === '{{ workflow_inventory }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Product filter</label>
+                                                <input type="text" name="product_filter" value="{{ row.product_filter }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm">
+                                            </div>
+                                            <div class="md:col-span-2" x-show="runType === '{{ schedule_type_recurring }}'">
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Cron</label>
+                                                <p class="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 mb-1">Minute hour day month weekday, e.g. <code class="font-mono text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 px-1 rounded">0 18 * * *</code> (6pm daily)</p>
+                                                <input type="text" name="cron_expr" value="{{ schedule.cron_expr }}" :required="runType === '{{ schedule_type_recurring }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm font-mono" placeholder="0 18 * * *">
+                                            </div>
+                                            <div x-show="runType === '{{ schedule_type_one_time }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run date</label>
+                                                <input type="date" name="run_once_date" value="{{ row.run_once_date_value }}" :required="runType === '{{ schedule_type_one_time }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                            </div>
+                                            <div x-show="runType === '{{ schedule_type_one_time }}'" x-cloak>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Run time</label>
+                                                <input type="time" name="run_once_time" value="{{ row.run_once_time_value }}" :required="runType === '{{ schedule_type_one_time }}'" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Timezone</label>
+                                                <input type="text" name="timezone_name" value="{{ schedule.timezone_name }}" required class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm" placeholder="Africa/Lagos">
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-2" x-show="workflow === '{{ workflow_sales }}' && target === '{{ company_target_all }}'">
+                                                <div>
+                                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Parallel</label>
+                                                    <input type="number" min="1" name="parallel" value="{{ schedule.parallel }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                </div>
+                                                <div>
+                                                    <label class="text-xs font-medium text-slate-600 dark:text-slate-300 uppercase tracking-wider">Stagger seconds</label>
+                                                    <input type="number" min="0" name="stagger_seconds" value="{{ schedule.stagger_seconds }}" class="mt-1 w-full h-9 px-2 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 text-sm">
+                                                </div>
+                                            </div>
+                                            <div class="md:col-span-2 flex flex-wrap gap-4 items-center pt-1">
+                                                <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                                                    <input type="checkbox" name="enabled" {% if schedule.enabled %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Enabled
+                                                </label>
+                                                <label class="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200" x-show="workflow === '{{ workflow_sales }}' && target === '{{ company_target_all }}'">
+                                                    <input type="checkbox" name="continue_on_failure" {% if schedule.continue_on_failure %}checked{% endif %} class="rounded border-slate-300 dark:border-slate-600"> Continue on failure
+                                                </label>
+                                                <div class="flex gap-2 ml-auto">
+                                                    <button type="button" @click="$dispatch('close-edit')" class="btn btn-secondary btn-sm">Cancel</button>
+                                                    <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                                                </div>
+                                            </div>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% endif %}
+                                {% endwith %}
+                                {% endfor %}
+                            {% else %}
+                            <tr>
+                                <td colspan="5" class="px-4 py-6 text-sm text-slate-500 dark:text-slate-400">No inactive schedules.</td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            {% endif %}
+            {% endfor %}
         </div>
         {% else %}
         <div class="px-6 py-8 text-sm text-slate-500 dark:text-slate-400">No schedules configured yet.</div>
