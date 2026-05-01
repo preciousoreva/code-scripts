@@ -352,6 +352,7 @@
                                         {% endif %}
                                     </td>
                                     <td class="px-4 py-3 align-middle">
+                                        {% if not schedule.is_system_managed %}
                                         <div class="flex justify-center" x-data="{ menuOpen: false, menuX: 0, menuY: 0 }">
                                             <button type="button" x-ref="scheduleMenuBtn"
                                                     @click="menuOpen = !menuOpen; if (menuOpen) { $nextTick(() => { const b = $refs.scheduleMenuBtn; const r = b.getBoundingClientRect(); menuX = r.left; menuY = r.bottom + 6 }) }"
@@ -362,17 +363,16 @@
                                                 <div x-show="menuOpen && menuY > 0" x-cloak @click.outside="menuOpen = false" x-transition
                                                      :style="'position: fixed; top: ' + menuY + 'px; left: ' + menuX + 'px;'"
                                                      class="w-44 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-[100] min-w-[11rem]">
-                                                    {% if not schedule.is_system_managed %}
                                                     <button type="button" @click="openEditId = openEditId === '{{ schedule.id }}' ? null : '{{ schedule.id }}'; menuOpen = false"
                                                             class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
                                                         Edit
                                                     </button>
-                                                    {% endif %}
+                                                    {% if schedule.enabled %}
                                                     <form method="post" action="{% url 'epos_qbo:schedule-run-now' schedule.id %}" class="block">
                                                         {% csrf_token %}
                                                         <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Run Now</button>
                                                     </form>
-                                                    {% if not schedule.is_system_managed %}
+                                                    {% endif %}
                                                     <form method="post" action="{% url 'epos_qbo:schedule-toggle' schedule.id %}" class="block">
                                                         {% csrf_token %}
                                                         <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
@@ -383,10 +383,12 @@
                                                         {% csrf_token %}
                                                         <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
                                                     </form>
-                                                    {% endif %}
                                                 </div>
                                             </template>
                                         </div>
+                                        {% else %}
+                                        <span class="block text-center text-slate-400 dark:text-slate-500">—</span>
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% if not schedule.is_system_managed %}
@@ -606,6 +608,7 @@
                                         {% endif %}
                                     </td>
                                     <td class="px-4 py-3 align-middle">
+                                        {% if not schedule.is_system_managed %}
                                         <div class="flex justify-center opacity-95" x-data="{ menuOpen: false, menuX: 0, menuY: 0 }">
                                             <button type="button" x-ref="scheduleMenuBtn"
                                                     @click="menuOpen = !menuOpen; if (menuOpen) { $nextTick(() => { const b = $refs.scheduleMenuBtn; const r = b.getBoundingClientRect(); menuX = r.left; menuY = r.bottom + 6 }) }"
@@ -616,17 +619,16 @@
                                                 <div x-show="menuOpen && menuY > 0" x-cloak @click.outside="menuOpen = false" x-transition
                                                      :style="'position: fixed; top: ' + menuY + 'px; left: ' + menuX + 'px;'"
                                                      class="w-44 bg-white dark:bg-slate-800 rounded-lg shadow-lg border border-slate-200 dark:border-slate-600 py-1 z-[100] min-w-[11rem]">
-                                                    {% if not schedule.is_system_managed %}
                                                     <button type="button" @click="openEditId = openEditId === '{{ schedule.id }}' ? null : '{{ schedule.id }}'; menuOpen = false"
                                                             class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
                                                         Edit
                                                     </button>
-                                                    {% endif %}
+                                                    {% if schedule.enabled %}
                                                     <form method="post" action="{% url 'epos_qbo:schedule-run-now' schedule.id %}" class="block">
                                                         {% csrf_token %}
                                                         <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Run Now</button>
                                                     </form>
-                                                    {% if not schedule.is_system_managed %}
+                                                    {% endif %}
                                                     <form method="post" action="{% url 'epos_qbo:schedule-toggle' schedule.id %}" class="block">
                                                         {% csrf_token %}
                                                         <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">
@@ -637,10 +639,12 @@
                                                         {% csrf_token %}
                                                         <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30">Delete</button>
                                                     </form>
-                                                    {% endif %}
                                                 </div>
                                             </template>
                                         </div>
+                                        {% else %}
+                                        <span class="block text-center text-slate-400 dark:text-slate-500">—</span>
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% if not schedule.is_system_managed %}

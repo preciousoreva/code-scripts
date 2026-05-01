@@ -2340,6 +2340,9 @@ def schedule_toggle(request, schedule_id):
 @require_POST
 def schedule_run_now(request, schedule_id):
     schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be run manually.")
+        return redirect("epos_qbo:schedules")
     if schedule.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE} and not (
         schedule.company_key or ""
     ).strip():
