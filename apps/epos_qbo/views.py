@@ -53,6 +53,7 @@ from .services.config_sync import (
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
 from .services.inventory_categories import load_inventory_categories_by_company
+from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
@@ -775,6 +776,17 @@ def _inventory_status_for_company(
     }
 
 
+def _inventory_review_required(inventory_enabled: bool, inventory_status: dict) -> bool:
+    return bool(inventory_enabled and str(inventory_status.get("label") or "") == "Needs review")
+
+
+def _inventory_review_action_label(inventory_status: dict) -> str:
+    blocked = _safe_int_stat(inventory_status, "blocked_items")
+    if blocked > 0:
+        return f"Review {blocked} item{'s' if blocked != 1 else ''}"
+    return "Review inventory"
+
+
 def _company_card_status(
     sales_status: dict,
     inventory_status: dict,
@@ -1211,6 +1223,7 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
             latest_job=latest_inventory_job,
             latest_artifact=latest_inventory_artifact,
         )
+        inventory_review_required = _inventory_review_required(inventory_enabled, inventory_status)
         health = _company_health_snapshot(
             company,
             latest_artifact=latest_sales_artifact,
@@ -1270,6 +1283,12 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
                 "inventory_enabled": inventory_enabled,
                 "capabilities": capabilities,
                 "inventory_status": inventory_status,
+                "inventory_review_required": inventory_review_required,
+                "inventory_review_label": _inventory_review_action_label(inventory_status),
+                "inventory_review_url": reverse(
+                    "epos_qbo:company_inventory_review",
+                    kwargs={"company_key": company.company_key},
+                ) if inventory_enabled else "",
                 "latest_inventory_job": latest_inventory_job,
                 "latest_inventory_artifact": latest_inventory_artifact,
                 "records_synced": latest_sales_artifact.rows_kept if latest_sales_artifact else 0,
@@ -2995,6 +3014,11 @@ def _artifact_report_path_value(artifact: RunArtifact, report_key: str) -> str:
         return str(stats.get(report_key) or "").strip()
     if report_key in {"final_audit", "initial_audit", "catalog_cleanup", "post_catalog_audit"}:
         child_reports = stats.get("child_reports") if isinstance(stats.get("child_reports"), dict) else {}
+        value = str(child_reports.get(report_key) or "").strip()
+        if value:
+            return value
+        summary = _inventory_summary_from_artifact(artifact)
+        child_reports = summary.get("child_reports") if isinstance(summary.get("child_reports"), dict) else {}
         return str(child_reports.get(report_key) or "").strip()
     return ""
 
@@ -3053,6 +3077,83 @@ def _resolve_artifact_report_path(artifact: RunArtifact, report_key: str) -> Pat
     if not resolved.exists() or not resolved.is_file():
         raise Http404("Report not found.")
     return resolved
+
+
+def _latest_inventory_review_artifact(company_key: str) -> RunArtifact | None:
+    artifacts = (
+        RunArtifact.objects.filter(company_key=company_key)
+        .select_related("run_job")
+        .order_by("-processed_at", "-imported_at", "-id")
+    )
+    for artifact in artifacts:
+        if not _is_inventory_artifact(artifact):
+            continue
+        summary = _inventory_summary_from_artifact(artifact)
+        if (
+            str(summary.get("report_type") or "") == RunJob.SCOPE_INVENTORY_PIPELINE
+            or _artifact_report_path_value(artifact, "final_audit")
+            or isinstance(summary.get("final_status_counts"), dict)
+            or "products_checked" in summary
+        ):
+            return artifact
+    return None
+
+
+def _format_inventory_review_number(value) -> str:
+    try:
+        number = Decimal(str(value if value not in (None, "") else 0))
+    except Exception:
+        return str(value or "0")
+    if number == number.to_integral_value():
+        return f"{int(number):,}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _inventory_review_reason_counts(rows: list[dict]) -> list[dict]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        slug = str(row.get("reason_group_slug") or "other")
+        counts[slug] += 1
+    return [
+        {"slug": slug, "label": label, "count": counts.get(slug, 0)}
+        for slug, label in REASON_GROUPS.items()
+        if counts.get(slug, 0) > 0
+    ]
+
+
+def _inventory_review_summary_cards(summary: dict, rows: list[dict], parsed_total_rows: int, parsed_healthy_rows: int) -> dict:
+    products_checked = _safe_int_stat(summary, "products_checked")
+    if products_checked == 0 and parsed_total_rows:
+        products_checked = parsed_total_rows
+    in_sync = _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct"))
+    if in_sync == 0 and parsed_healthy_rows:
+        in_sync = parsed_healthy_rows
+    blocked = _safe_int_stat(summary, "blocked_items")
+    if blocked == 0 and rows:
+        blocked = len(rows)
+    negative_rows = _safe_int_stat(summary, "epos_negative_rows_clamped")
+    negative_units = summary.get("epos_negative_units_clamped", 0)
+    return {
+        "products_checked": products_checked,
+        "products_checked_display": _format_inventory_review_number(products_checked),
+        "in_sync": in_sync,
+        "in_sync_display": _format_inventory_review_number(in_sync),
+        "blocked_items": blocked,
+        "blocked_items_display": _format_inventory_review_number(blocked),
+        "epos_negative_rows_clamped": negative_rows,
+        "epos_negative_rows_clamped_display": _format_inventory_review_number(negative_rows),
+        "epos_negative_units_clamped": negative_units,
+        "epos_negative_units_clamped_display": _format_inventory_review_number(negative_units),
+    }
+
+
+def _inventory_review_report_links(artifact: RunArtifact | None) -> dict[str, str]:
+    if artifact is None or artifact.run_job_id is None or artifact.run_job is None:
+        return {}
+    return {
+        link["key"]: link["url"]
+        for link in _artifact_report_links(artifact.run_job, artifact)
+    }
 
 
 def _select_day_artifact_for_uploaded_count(artifacts: list[RunArtifact]) -> RunArtifact | None:
@@ -3386,6 +3487,7 @@ def _enrich_company_data(
         latest_job=latest_inventory_job,
         latest_artifact=latest_inventory_artifact,
     )
+    inventory_review_required = _inventory_review_required(inventory_enabled, inventory_status)
 
     health = _company_health_snapshot(
         company,
@@ -3474,6 +3576,12 @@ def _enrich_company_data(
         "inventory_enabled": inventory_enabled,
         "sales_status": sales_status,
         "inventory_status": inventory_status,
+        "inventory_review_required": inventory_review_required,
+        "inventory_review_label": _inventory_review_action_label(inventory_status),
+        "inventory_review_url": reverse(
+            "epos_qbo:company_inventory_review",
+            kwargs={"company_key": company.company_key},
+        ) if inventory_enabled else "",
         "records_24h": records_24h,
         "last_activity_at": last_activity_at,
         "last_run_display": _format_last_run_time(last_activity_at),
@@ -3755,6 +3863,124 @@ def companies_list(request):
     if request.headers.get("HX-Request"):
         return render(request, "components/company_cards.html", context)
     return render(request, "epos_qbo/companies.html", context)
+
+
+@login_required
+def company_inventory_review(request, company_key):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    inventory_enabled = _company_inventory_enabled(company)
+
+    artifact = None
+    summary: dict = {}
+    rows: list[dict] = []
+    parsed_total_rows = 0
+    parsed_healthy_rows = 0
+    parse_error = ""
+    empty_message = ""
+    final_audit_raw = ""
+    final_audit_filename = ""
+
+    if not inventory_enabled:
+        status_label = "No inventory review found"
+        status_color = "slate"
+        empty_message = "Inventory review is not enabled for this company."
+    else:
+        artifact = _latest_inventory_review_artifact(company.company_key)
+        if artifact is None:
+            status_label = "No inventory review found"
+            status_color = "slate"
+            empty_message = "No inventory review is currently required for this company."
+        else:
+            summary = _inventory_summary_from_artifact(artifact)
+            final_audit_raw = _artifact_report_path_value(artifact, "final_audit")
+            if not final_audit_raw:
+                empty_message = "No final inventory audit was found for the latest inventory run."
+            else:
+                try:
+                    final_audit_path = _resolve_artifact_report_path(artifact, "final_audit")
+                except Http404:
+                    empty_message = (
+                        "The final audit artifact exists in the database but the source file could not be found."
+                    )
+                else:
+                    final_audit_filename = final_audit_path.name
+                    parsed = parse_inventory_review_csv(final_audit_path)
+                    rows = parsed.rows
+                    parsed_total_rows = parsed.total_rows
+                    parsed_healthy_rows = parsed.healthy_rows
+                    parse_error = parsed.error
+                    if not rows and not parse_error:
+                        empty_message = "No inventory review is currently required for this company."
+                    elif not rows and parse_error:
+                        empty_message = "The final audit CSV could not be parsed."
+
+            summary_cards = _inventory_review_summary_cards(
+                summary,
+                rows,
+                parsed_total_rows,
+                parsed_healthy_rows,
+            )
+            if rows or summary_cards["blocked_items"] > 0 or _has_non_in_sync_inventory_rows(summary):
+                status_label = "Needs review"
+                status_color = "amber"
+            else:
+                status_label = "Healthy"
+                status_color = "emerald"
+
+    if not inventory_enabled or artifact is None:
+        summary_cards = _inventory_review_summary_cards(summary, rows, parsed_total_rows, parsed_healthy_rows)
+
+    report_links = _inventory_review_report_links(artifact)
+    run = artifact.run_job if artifact and artifact.run_job_id else None
+    latest_run_time = _run_status_time(run) or _artifact_status_time(artifact)
+    run_label = run.friendly_id if run else (Path(str(artifact.source_path)).name if artifact else "")
+    run_title = run.friendly_title if run else "Inventory report"
+    has_negative_summary = bool(
+        summary_cards["epos_negative_rows_clamped"] > 0
+        or str(summary_cards["epos_negative_units_clamped_display"]) not in {"", "0"}
+    )
+
+    context = {
+        "company": company,
+        "inventory_enabled": inventory_enabled,
+        "review": {
+            "artifact": artifact,
+            "run": run,
+            "run_label": run_label,
+            "run_title": run_title,
+            "run_detail_url": reverse("epos_qbo:run-detail", kwargs={"job_id": run.id}) if run else "",
+            "final_audit_download_url": report_links.get("final_audit", ""),
+            "final_audit_raw": final_audit_raw,
+            "final_audit_filename": final_audit_filename,
+            "latest_run_time": latest_run_time,
+            "status_label": status_label,
+            "status_color": status_color,
+            "summary": summary_cards,
+            "rows": rows,
+            "row_count": len(rows),
+            "reason_counts": _inventory_review_reason_counts(rows),
+            "empty_message": empty_message,
+            "parse_error": parse_error,
+            "has_negative_summary": has_negative_summary,
+        },
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse("epos_qbo:company-detail", kwargs={"company_key": company.company_key}),
+                },
+                {"label": "Inventory Review", "url": None},
+            ],
+            back_url=reverse("epos_qbo:company-detail", kwargs={"company_key": company.company_key}),
+            back_label=company.display_name,
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_review.html", context)
 
 
 @login_required

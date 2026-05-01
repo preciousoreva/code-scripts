@@ -30,6 +30,11 @@ urlpatterns = [
     path("schedules/<uuid:schedule_id>/delete", views.schedule_delete, name="schedule-delete"),
     path("companies/", views.companies_list, name="companies-list"),
     path("companies/new", views.company_new, name="company-new"),
+    path(
+        "companies/<slug:company_key>/inventory/review/",
+        views.company_inventory_review,
+        name="company_inventory_review",
+    ),
     path("companies/<slug:company_key>/", views.company_detail, name="company-detail"),
     path("companies/<slug:company_key>/toggle-active/", views.company_toggle_active, name="company-toggle-active"),
     path("companies/<slug:company_key>/advanced", views.company_advanced, name="company-advanced"),

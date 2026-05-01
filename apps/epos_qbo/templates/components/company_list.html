@@ -98,6 +98,11 @@
                             </button>
                         </form>
                         {% endif %}
+                        {% if company.inventory_review_required %}
+                        <a href="{{ company.inventory_review_url }}" class="text-xs font-medium px-2 py-1 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700 rounded text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50">
+                            {{ company.inventory_review_label }}
+                        </a>
+                        {% endif %}
                         <a href="{% url 'epos_qbo:company-detail' company_key=company.company_key %}" class="text-xs font-medium px-2 py-1 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600">
                             View Details
                         </a>
