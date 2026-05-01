@@ -124,6 +124,62 @@
     </div>
     {% endif %}
 
+    {% if review.actions.available %}
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+            <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Resolve Review Items</h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Actions use the latest final audit for this company. No products are selected from free-text input.</p>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 p-6">
+            {% if review.actions.catalog_cleanup_count > 0 %}
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-4 flex flex-col gap-3">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Duplicate/base conflicts</p>
+                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.catalog_cleanup_count }}</p>
+                </div>
+                <p class="text-sm text-slate-600 dark:text-slate-300">Base items and pack variants both exist. Retry catalog cleanup to consolidate pack variants and keep the base item.</p>
+                <form method="post" action="{{ review.actions.retry_catalog_cleanup_url }}">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-secondary w-full justify-center">
+                        <iconify-icon icon="solar:restart-linear" width="16"></iconify-icon>
+                        Retry catalog cleanup ({{ review.actions.catalog_cleanup_count }})
+                    </button>
+                </form>
+            </div>
+            {% endif %}
+            {% if review.actions.quantity_adjustment_count > 0 %}
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-4 flex flex-col gap-3">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Quantity mismatches</p>
+                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.quantity_adjustment_count }}</p>
+                </div>
+                <p class="text-sm text-slate-600 dark:text-slate-300">Exact QBO matches where QtyOnHand differs from EPOS. EPOS is source of truth, so these can be adjusted automatically.</p>
+                <form method="post" action="{{ review.actions.retry_quantity_adjustments_url }}">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-secondary w-full justify-center">
+                        <iconify-icon icon="solar:tuning-square-linear" width="16"></iconify-icon>
+                        Retry quantity adjustments ({{ review.actions.quantity_adjustment_count }})
+                    </button>
+                </form>
+            </div>
+            {% endif %}
+            {% if review.actions.missing_count > 0 %}
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-4 flex flex-col gap-3">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Missing from QuickBooks</p>
+                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.missing_count }}</p>
+                </div>
+                <p class="text-sm text-slate-600 dark:text-slate-300">Products not found in QBO. Creation needs a preview because category/account mappings must be checked first.</p>
+                <a href="{{ review.actions.missing_preview_url }}" class="btn btn-secondary w-full justify-center">
+                    <iconify-icon icon="solar:eye-linear" width="16"></iconify-icon>
+                    Preview item creation ({{ review.actions.missing_count }})
+                </a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
     {% if review.rows %}
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">

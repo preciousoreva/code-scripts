@@ -88,6 +88,29 @@ def normalize_inventory_review_key(value: object) -> str:
     return re.sub(r"_+", "_", text).strip("_")
 
 
+def is_inventory_summary_or_invalid_product_name(value: object) -> bool:
+    """Return True for summary/footer rows or unusable product identifiers."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return True
+    key = normalize_inventory_review_key(raw)
+    if not key:
+        return True
+    if key == "total":
+        return True
+    if key.startswith(("total", "totals")):
+        return True
+    return any(fragment in key for fragment in ("grand_total", "subtotal", "report_total", "summary"))
+
+
+def _clean_display_value(value: object) -> str:
+    text = str(value or "").strip()
+    if normalize_inventory_review_key(text) in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
 def _normalize_row(raw_row: dict[Any, Any]) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for raw_key, raw_value in raw_row.items():
@@ -253,6 +276,8 @@ def parse_inventory_review_csv(path: Path) -> InventoryReviewParseResult:
                 total_rows += 1
                 normalized = _normalize_row(raw_row)
                 product = _pick(normalized, PRODUCT_ALIASES)
+                if is_inventory_summary_or_invalid_product_name(product):
+                    continue
                 status = _pick(normalized, STATUS_ALIASES)
                 reason = _pick(normalized, REASON_ALIASES)
                 issue_type = _pick(normalized, ISSUE_TYPE_ALIASES)
@@ -275,7 +300,7 @@ def parse_inventory_review_csv(path: Path) -> InventoryReviewParseResult:
                         "epos_expected_qty": _pick(normalized, EPOS_QTY_ALIASES),
                         "qbo_qty": _pick(normalized, QBO_QTY_ALIASES),
                         "delta": _pick(normalized, DELTA_ALIASES),
-                        "category": _pick(normalized, CATEGORY_ALIASES),
+                        "category": _clean_display_value(_pick(normalized, CATEGORY_ALIASES)),
                         "suggested_next_step": inventory_review_suggested_next_step(
                             status,
                             reason,

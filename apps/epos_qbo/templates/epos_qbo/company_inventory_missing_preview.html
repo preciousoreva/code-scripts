@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}Missing Item Creation Preview • {{ company.display_name }}{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+        <div>
+            <div class="flex flex-wrap items-center gap-3 mb-2">
+                <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Missing Item Creation Preview</h1>
+                <span class="px-3 py-1 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm font-medium rounded-full flex items-center gap-2">
+                    <span class="w-2 h-2 bg-slate-400 rounded-full"></span>
+                    Preview only
+                </span>
+            </div>
+            <p class="text-sm text-slate-500 dark:text-slate-400">{{ company.display_name }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Source: {{ final_audit_filename }}
+            </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+            <a href="{{ review_url }}" class="btn btn-secondary">
+                <iconify-icon icon="solar:arrow-left-linear" width="16"></iconify-icon>
+                Back to Inventory Review
+            </a>
+        </div>
+    </div>
+
+    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+        Preview only. No QuickBooks items are created from this page yet. Each row's safety status reflects how a future create-item action would treat it.
+    </div>
+
+    {% if preview.mapping_error %}
+    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+        Product mapping warning: {{ preview.mapping_error }}
+    </div>
+    {% endif %}
+    {% if preview.qbo_base_names_error %}
+    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+        QBO snapshot warning: {{ preview.qbo_base_names_error }} Pack-variant guard cannot run reliably until this is resolved.
+    </div>
+    {% endif %}
+
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Total candidates</p>
+            <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ preview.rows|length }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Safe to create</p>
+            <p class="mt-2 text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{{ preview.safe_count }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Blocked</p>
+            <p class="mt-2 text-2xl font-semibold text-amber-600 dark:text-amber-400">{{ preview.blocked_count }}</p>
+        </div>
+    </div>
+
+    {% if preview.rows %}
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+            <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Missing-from-QuickBooks rows</h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ preview.rows|length }} row{{ preview.rows|length|pluralize }} from the latest final audit.</p>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                <thead class="bg-slate-50 dark:bg-slate-700/50">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Product</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Suggested QBO Name</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">EPOS Expected</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Inventory Account</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Revenue Account</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">COGS Account</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Safety</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Block Reason</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+                    {% for row in preview.rows %}
+                    <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                        <td class="px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56">{{ row.product }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-48">{{ row.suggested_qbo_name|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.category|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.epos_expected_qty|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.inventory_account|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.revenue_account|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.cogs_account|default:"—" }}</td>
+                        <td class="px-4 py-3 text-sm">
+                            {% if row.is_safe %}
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-100 dark:border-emerald-800">{{ row.safety_status }}</span>
+                            {% else %}
+                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">{{ row.safety_status }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 min-w-72">{{ row.block_reason|default:"—" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% else %}
+    <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+        <p class="text-sm text-slate-700 dark:text-slate-200">No missing-from-QuickBooks rows in the latest final audit.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

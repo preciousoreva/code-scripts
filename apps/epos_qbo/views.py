@@ -54,6 +54,16 @@ from .services.config_sync import (
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
 from .services.inventory_categories import load_inventory_categories_by_company
 from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
+from .services.inventory_review_actions import (
+    REASON_GROUP_MISSING,
+    build_missing_item_creation_preview,
+    get_catalog_cleanup_rows,
+    get_quantity_adjustment_rows,
+    get_review_rows_by_reason,
+    load_review_context,
+    retry_catalog_cleanup_for_review,
+    retry_quantity_adjustments_for_review,
+)
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
@@ -2340,6 +2350,9 @@ def schedule_toggle(request, schedule_id):
 @require_POST
 def schedule_run_now(request, schedule_id):
     schedule = get_object_or_404(RunSchedule, id=schedule_id)
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be run manually.")
+        return redirect("epos_qbo:schedules")
     if schedule.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE} and not (
         schedule.company_key or ""
     ).strip():
@@ -3940,6 +3953,35 @@ def company_inventory_review(request, company_key):
         or str(summary_cards["epos_negative_units_clamped_display"]) not in {"", "0"}
     )
 
+    actions = {
+        "available": False,
+        "catalog_cleanup_count": 0,
+        "quantity_adjustment_count": 0,
+        "missing_count": 0,
+        "retry_catalog_cleanup_url": "",
+        "retry_quantity_adjustments_url": "",
+        "missing_preview_url": "",
+    }
+    if inventory_enabled and rows:
+        actions = {
+            "available": True,
+            "catalog_cleanup_count": len(get_catalog_cleanup_rows(rows)),
+            "quantity_adjustment_count": len(get_quantity_adjustment_rows(rows)),
+            "missing_count": len(get_review_rows_by_reason(rows, REASON_GROUP_MISSING)),
+            "retry_catalog_cleanup_url": reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup",
+                kwargs={"company_key": company.company_key},
+            ),
+            "retry_quantity_adjustments_url": reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments",
+                kwargs={"company_key": company.company_key},
+            ),
+            "missing_preview_url": reverse(
+                "epos_qbo:company_inventory_missing_preview",
+                kwargs={"company_key": company.company_key},
+            ),
+        }
+
     context = {
         "company": company,
         "inventory_enabled": inventory_enabled,
@@ -3962,6 +4004,7 @@ def company_inventory_review(request, company_key):
             "empty_message": empty_message,
             "parse_error": parse_error,
             "has_negative_summary": has_negative_summary,
+            "actions": actions,
         },
     }
     context.update(_nav_context())
@@ -3981,6 +4024,151 @@ def company_inventory_review(request, company_key):
         )
     )
     return render(request, "epos_qbo/company_inventory_review.html", context)
+
+
+def _inventory_review_action_context(request, company_key: str):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    if not _company_inventory_enabled(company):
+        messages.error(request, "Inventory is not enabled for this company.")
+        return company, None, redirect("epos_qbo:company-detail", company_key=company.company_key)
+
+    artifact = _latest_inventory_review_artifact(company.company_key)
+    if artifact is None:
+        messages.error(request, "No inventory final audit is available for this company yet.")
+        return company, None, redirect(review_url)
+
+    context = load_review_context(
+        company=company,
+        artifact=artifact,
+        final_audit_path_resolver=_resolve_artifact_report_path,
+    )
+    if context is None:
+        messages.error(
+            request,
+            "The final audit artifact exists in the database but the source file could not be found.",
+        )
+        return company, None, redirect(review_url)
+    if context.parse_result.error and not context.rows:
+        messages.error(request, "The final audit CSV could not be parsed.")
+        return company, None, redirect(review_url)
+    return company, context, None
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_retry_catalog_cleanup(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+
+    rows = get_catalog_cleanup_rows(context.rows)
+    if not rows:
+        messages.info(request, "No duplicate/base conflicts found in the latest final audit.")
+        return redirect(review_url)
+
+    result = retry_catalog_cleanup_for_review(
+        context=context,
+        requested_by=request.user,
+    )
+    job_id = result.get("job_id")
+    if job_id is None:
+        messages.info(request, "No catalog cleanup actions were queued.")
+        return redirect(review_url)
+
+    dispatch_next_queued_job()
+    messages.success(
+        request,
+        f"Catalog cleanup retry queued for {result['row_count']} item(s).",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job_id)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_retry_quantity_adjustments(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+
+    rows = get_quantity_adjustment_rows(context.rows)
+    if not rows:
+        messages.info(request, "No exact-match quantity adjustments needed in the latest final audit.")
+        return redirect(review_url)
+
+    result = retry_quantity_adjustments_for_review(
+        context=context,
+        requested_by=request.user,
+    )
+    job_id = result.get("job_id")
+    if job_id is None:
+        messages.info(request, "No quantity adjustment actions were queued.")
+        return redirect(review_url)
+
+    dispatch_next_queued_job()
+    messages.success(
+        request,
+        f"Quantity adjustment retry queued for {result['row_count']} item(s).",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job_id)
+
+
+@login_required
+@require_GET
+def company_inventory_missing_preview(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+
+    preview = build_missing_item_creation_preview(context=context)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    template_context = {
+        "company": company,
+        "preview": preview,
+        "review_url": review_url,
+        "final_audit_filename": context.final_audit_path.name,
+    }
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Missing Preview", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(
+        request,
+        "epos_qbo/company_inventory_missing_preview.html",
+        template_context,
+    )
 
 
 @login_required
