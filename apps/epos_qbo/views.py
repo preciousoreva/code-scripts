@@ -15,7 +15,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
 from django.db import DatabaseError
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -37,6 +37,7 @@ from .forms import (
 from .models import (
     CompanyConfigRecord,
     DashboardUserPreference,
+    InventoryReviewItem,
     PortalSettings,
     RunArtifact,
     RunJob,
@@ -53,7 +54,7 @@ from .services.config_sync import (
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
 from .services.inventory_categories import load_inventory_categories_by_company
-from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
+from .services.inventory_review import REASON_GROUPS, ingest_inventory_review_items, parse_inventory_review_csv
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
@@ -3873,12 +3874,16 @@ def company_inventory_review(request, company_key):
     artifact = None
     summary: dict = {}
     rows: list[dict] = []
+    db_items: list = []
+    db_reason_counts: list[dict] = []
+    db_summary: dict[str, int] = {}
     parsed_total_rows = 0
     parsed_healthy_rows = 0
     parse_error = ""
     empty_message = ""
     final_audit_raw = ""
     final_audit_filename = ""
+    ingestion_warning = ""
 
     if not inventory_enabled:
         status_label = "No inventory review found"
@@ -3913,6 +3918,82 @@ def company_inventory_review(request, company_key):
                         empty_message = "No inventory review is currently required for this company."
                     elif not rows and parse_error:
                         empty_message = "The final audit CSV could not be parsed."
+
+                    # Best-effort ingestion. If it fails, we keep artifact-driven rows.
+                    try:
+                        ingest_inventory_review_items(artifact=artifact, final_audit_path=final_audit_path)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        ingestion_warning = f"DB ingestion failed; showing artifact-only rows. ({exc})"
+                    else:
+                        include_ignored = request.GET.get("include_ignored") in {"1", "true", "yes"}
+                        include_resolved = request.GET.get("include_resolved") in {"1", "true", "yes"}
+
+                        qs = InventoryReviewItem.objects.filter(company_key=company.company_key)
+                        if not include_resolved:
+                            qs = qs.filter(is_active=True)
+
+                        # Default view hides ignored + resolved rows unless toggled.
+                        if not include_ignored:
+                            qs = qs.exclude(review_status=InventoryReviewItem.REVIEW_IGNORED)
+
+                        # Default view shows open + acknowledged (and optionally ignored/resolved via toggles).
+                        qs = qs.filter(
+                            review_status__in=[
+                                InventoryReviewItem.REVIEW_OPEN,
+                                InventoryReviewItem.REVIEW_ACKNOWLEDGED,
+                                InventoryReviewItem.REVIEW_IGNORED,
+                                InventoryReviewItem.REVIEW_MANUALLY_RESOLVED,
+                                InventoryReviewItem.REVIEW_RESOLVED_BY_RERUN,
+                            ]
+                        ).order_by("-last_seen_at", "-occurrence_count", "product_name")
+
+                        db_items = list(qs.select_related("run_job", "artifact")[:2000])
+                        db_summary = {
+                            "active_total": InventoryReviewItem.objects.filter(
+                                company_key=company.company_key, is_active=True
+                            ).count(),
+                            "open": InventoryReviewItem.objects.filter(
+                                company_key=company.company_key,
+                                is_active=True,
+                                review_status=InventoryReviewItem.REVIEW_OPEN,
+                            ).count(),
+                            "acknowledged": InventoryReviewItem.objects.filter(
+                                company_key=company.company_key,
+                                is_active=True,
+                                review_status=InventoryReviewItem.REVIEW_ACKNOWLEDGED,
+                            ).count(),
+                            "ignored": InventoryReviewItem.objects.filter(
+                                company_key=company.company_key,
+                                is_active=True,
+                                review_status=InventoryReviewItem.REVIEW_IGNORED,
+                            ).count(),
+                            "manually_resolved": InventoryReviewItem.objects.filter(
+                                company_key=company.company_key,
+                                review_status=InventoryReviewItem.REVIEW_MANUALLY_RESOLVED,
+                            ).count(),
+                        }
+
+                        reason_map = {
+                            "missing_from_qbo": "Missing from QuickBooks",
+                            "duplicate_base_conflict": "Duplicate/base conflicts",
+                            "pack_variant_issue": "Pack/base variant issues",
+                            "needs_adjustment": "Needs adjustment",
+                            "other": "Other/Unknown",
+                        }
+                        counts = (
+                            InventoryReviewItem.objects.filter(company_key=company.company_key, is_active=True)
+                            .values("reason_group")
+                            .annotate(count=Count("id"))
+                            .order_by("-count")
+                        )
+                        db_reason_counts = [
+                            {
+                                "slug": c["reason_group"] or "other",
+                                "label": reason_map.get(c["reason_group"] or "other", "Other/Unknown"),
+                                "count": c["count"],
+                            }
+                            for c in counts
+                        ]
 
             summary_cards = _inventory_review_summary_cards(
                 summary,
@@ -3958,9 +4039,12 @@ def company_inventory_review(request, company_key):
             "summary": summary_cards,
             "rows": rows,
             "row_count": len(rows),
-            "reason_counts": _inventory_review_reason_counts(rows),
+            "reason_counts": db_reason_counts or _inventory_review_reason_counts(rows),
+            "db_items": db_items,
+            "db_summary": db_summary,
             "empty_message": empty_message,
             "parse_error": parse_error,
+            "ingestion_warning": ingestion_warning,
             "has_negative_summary": has_negative_summary,
         },
     }
@@ -3981,6 +4065,95 @@ def company_inventory_review(request, company_key):
         )
     )
     return render(request, "epos_qbo/company_inventory_review.html", context)
+
+
+def _get_inventory_review_item_or_404(*, company_key: str, item_id: int):
+    item = get_object_or_404(InventoryReviewItem, id=item_id)
+    if item.company_key != company_key:
+        raise Http404("Inventory review item not found.")
+    return item
+
+
+@login_required
+@require_POST
+def inventory_review_item_acknowledge(request, company_key, item_id):
+    item = _get_inventory_review_item_or_404(company_key=company_key, item_id=item_id)
+    item.review_status = InventoryReviewItem.REVIEW_ACKNOWLEDGED
+    note = str(request.POST.get("note") or "").strip()
+    if note:
+        item.operator_note = note
+    item.is_active = True
+    item.save(update_fields=["review_status", "operator_note", "is_active", "updated_at"])
+    messages.success(request, "Item acknowledged. No QuickBooks changes were made.")
+    return redirect(reverse("epos_qbo:company_inventory_review", kwargs={"company_key": company_key}))
+
+
+@login_required
+@require_POST
+def inventory_review_item_ignore(request, company_key, item_id):
+    item = _get_inventory_review_item_or_404(company_key=company_key, item_id=item_id)
+    item.review_status = InventoryReviewItem.REVIEW_IGNORED
+    item.resolution_type = "intentional_ignore"
+    note = str(request.POST.get("note") or "").strip()
+    if note:
+        item.operator_note = note
+    item.is_active = True
+    item.save(update_fields=["review_status", "resolution_type", "operator_note", "is_active", "updated_at"])
+    messages.success(request, "Item ignored. No QuickBooks changes were made.")
+    return redirect(reverse("epos_qbo:company_inventory_review", kwargs={"company_key": company_key}))
+
+
+@login_required
+@require_POST
+def inventory_review_item_mark_resolved(request, company_key, item_id):
+    item = _get_inventory_review_item_or_404(company_key=company_key, item_id=item_id)
+    item.review_status = InventoryReviewItem.REVIEW_MANUALLY_RESOLVED
+    item.resolution_type = str(request.POST.get("resolution_type") or "manual_qbo_fix").strip() or "manual_qbo_fix"
+    note = str(request.POST.get("note") or "").strip()
+    if note:
+        item.operator_note = note
+    item.is_active = False
+    item.resolved_at = timezone.now()
+    item.resolved_by = request.user
+    item.save(
+        update_fields=[
+            "review_status",
+            "resolution_type",
+            "operator_note",
+            "is_active",
+            "resolved_at",
+            "resolved_by",
+            "updated_at",
+        ]
+    )
+    messages.success(
+        request,
+        "Item marked as manually resolved. No QuickBooks changes were made by the portal.",
+    )
+    return redirect(reverse("epos_qbo:company_inventory_review", kwargs={"company_key": company_key}))
+
+
+@login_required
+@require_POST
+def inventory_review_item_reopen(request, company_key, item_id):
+    item = _get_inventory_review_item_or_404(company_key=company_key, item_id=item_id)
+    item.review_status = InventoryReviewItem.REVIEW_OPEN
+    item.is_active = True
+    item.resolved_at = None
+    item.resolved_by = None
+    item.resolution_type = ""
+    item.save(
+        update_fields=[
+            "review_status",
+            "is_active",
+            "resolved_at",
+            "resolved_by",
+            "resolution_type",
+            "updated_at",
+        ]
+    )
+    messages.success(request, "Item reopened.")
+    return redirect(reverse("epos_qbo:company_inventory_review", kwargs={"company_key": company_key}))
 
 
 @login_required

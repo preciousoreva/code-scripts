@@ -3,8 +3,14 @@ from __future__ import annotations
 import csv
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+from django.db import transaction
+from django.utils import timezone
+
+from apps.epos_qbo.models import InventoryReviewItem, RunArtifact
 
 
 PRODUCT_ALIASES = (
@@ -316,3 +322,224 @@ def parse_inventory_review_csv(path: Path) -> InventoryReviewParseResult:
         malformed_rows=malformed_rows,
         error=error,
     )
+
+
+def normalize_product_name(value: object) -> str:
+    return normalize_inventory_review_key(value)
+
+
+def _parse_decimal(value: object) -> Decimal | None:
+    raw = str(value or "").strip()
+    if raw in {"", "—", "-"}:
+        return None
+    try:
+        return Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _map_reason_group(*, status: str, reason: str, issue_type: str = "") -> str:
+    """Stable group slugs for DB-backed review items."""
+    key = " ".join(_key(part) for part in (status, reason, issue_type) if str(part or "").strip())
+    raw = " ".join(str(part or "").lower() for part in (status, reason, issue_type))
+
+    if (
+        "missing_from_qbo" in key
+        or "missing_in_qbo" in key
+        or "product_not_found" in key
+        or "not_found_in_quickbooks" in key
+        or "missing_from_quickbooks" in key
+        or "product not found in quickbooks" in raw
+        or "missing from quickbooks" in raw
+    ):
+        return "missing_from_qbo"
+
+    if (
+        "multiple_active_base_items" in key
+        or "ambiguous_in_qbo" in key
+        or "duplicate" in key
+        or "base item and pack variants both exist" in raw
+    ):
+        return "duplicate_base_conflict"
+
+    if (
+        "only_pack_variant_exists" in key
+        or "base_with_pack_variants" in key
+        or "pack_variant" in key
+        or "pack variants" in raw
+    ):
+        return "pack_variant_issue"
+
+    if "needs_adjustment" in key or "adjustment" in key:
+        return "needs_adjustment"
+
+    return "other"
+
+
+def ingest_inventory_review_items(*, artifact: RunArtifact, final_audit_path: Path) -> dict[str, int]:
+    """Idempotently ingest blocked rows from a final audit CSV into InventoryReviewItem."""
+    parsed = parse_inventory_review_csv(final_audit_path)
+    blocked_rows = parsed.rows
+    now = timezone.now()
+
+    # Build desired set keyed by practical dedupe key.
+    desired: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in blocked_rows:
+        product = str(row.get("product") or "").strip() or "(Unnamed product)"
+        normalized = normalize_product_name(product)
+        reason_group = _map_reason_group(
+            status=str(row.get("status") or ""),
+            reason=str(row.get("reason") or ""),
+            issue_type=str(row.get("issue_type") or ""),
+        )
+        status_code = _key(row.get("status") or row.get("issue_type") or "")
+        desired[(artifact.company_key, normalized, reason_group, status_code)] = {
+            "product_name": product,
+            "normalized_product_name": normalized,
+            "category": str(row.get("category") or "").strip(),
+            "status_code": status_code,
+            "reason": str(row.get("reason_label") or row.get("reason") or "").strip(),
+            "reason_group": reason_group,
+            "epos_expected_qty": _parse_decimal(row.get("epos_expected_qty")),
+            "qbo_qty": _parse_decimal(row.get("qbo_qty")),
+            "delta": _parse_decimal(row.get("delta")),
+            "source_row_json": row.get("raw") or {},
+            "suggested_next_step": str(row.get("suggested_next_step") or "").strip(),
+        }
+
+    created = 0
+    updated = 0
+    reopened = 0
+    resolved_by_rerun = 0
+
+    run = artifact.run_job if getattr(artifact, "run_job_id", None) else None
+    run_label = run.friendly_id if run else ""
+
+    with transaction.atomic():
+        existing_qs = InventoryReviewItem.objects.select_for_update().filter(
+            company_key=artifact.company_key,
+            normalized_product_name__in=[k[1] for k in desired.keys()] or [""],
+        )
+        existing_map: dict[tuple[str, str, str, str], InventoryReviewItem] = {
+            (i.company_key, i.normalized_product_name, i.reason_group, i.status_code): i for i in existing_qs
+        }
+
+        seen_keys = set()
+        for key, payload in desired.items():
+            seen_keys.add(key)
+            item = existing_map.get(key)
+            if item is None:
+                InventoryReviewItem.objects.create(
+                    company_key=artifact.company_key,
+                    run_job=run,
+                    artifact=artifact,
+                    product_name=payload["product_name"],
+                    normalized_product_name=payload["normalized_product_name"],
+                    category=payload["category"],
+                    status_code=payload["status_code"],
+                    reason=payload["reason"],
+                    reason_group=payload["reason_group"],
+                    epos_expected_qty=payload["epos_expected_qty"],
+                    qbo_qty=payload["qbo_qty"],
+                    delta=payload["delta"],
+                    source_row_json=payload["source_row_json"],
+                    suggested_next_step=payload["suggested_next_step"],
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    last_seen_run_label=run_label,
+                    occurrence_count=1,
+                    is_active=True,
+                    review_status=InventoryReviewItem.REVIEW_OPEN,
+                )
+                created += 1
+                continue
+
+            was_inactive = not item.is_active
+            prior_status = item.review_status
+            item.run_job = run
+            item.artifact = artifact
+            item.product_name = payload["product_name"]
+            item.category = payload["category"]
+            item.reason = payload["reason"]
+            item.epos_expected_qty = payload["epos_expected_qty"]
+            item.qbo_qty = payload["qbo_qty"]
+            item.delta = payload["delta"]
+            item.source_row_json = payload["source_row_json"]
+            item.suggested_next_step = payload["suggested_next_step"]
+            item.last_seen_at = now
+            item.last_seen_run_label = run_label
+            item.occurrence_count = (item.occurrence_count or 0) + 1
+            item.is_active = True
+
+            # If it reappears after being marked resolved, reopen to open for now.
+            if prior_status in {
+                InventoryReviewItem.REVIEW_MANUALLY_RESOLVED,
+                InventoryReviewItem.REVIEW_RESOLVED_BY_RERUN,
+            }:
+                item.review_status = InventoryReviewItem.REVIEW_OPEN
+                item.resolved_at = None
+                item.resolution_type = ""
+                item.resolved_by = None
+                reopened += 1
+            elif was_inactive and prior_status in {InventoryReviewItem.REVIEW_OPEN, InventoryReviewItem.REVIEW_ACKNOWLEDGED}:
+                reopened += 1
+
+            item.save(update_fields=[
+                "run_job",
+                "artifact",
+                "product_name",
+                "category",
+                "reason",
+                "epos_expected_qty",
+                "qbo_qty",
+                "delta",
+                "source_row_json",
+                "suggested_next_step",
+                "last_seen_at",
+                "last_seen_run_label",
+                "occurrence_count",
+                "is_active",
+                "review_status",
+                "resolved_at",
+                "resolution_type",
+                "resolved_by",
+                "updated_at",
+            ])
+            updated += 1
+
+        # Mark previously-active open/ack items as resolved_by_rerun if not present anymore.
+        active_to_check = InventoryReviewItem.objects.select_for_update().filter(
+            company_key=artifact.company_key,
+            is_active=True,
+        )
+        for item in active_to_check:
+            key = (item.company_key, item.normalized_product_name, item.reason_group, item.status_code)
+            if key in seen_keys:
+                continue
+
+            # Disappeared from latest blocked set.
+            if item.review_status in {InventoryReviewItem.REVIEW_OPEN, InventoryReviewItem.REVIEW_ACKNOWLEDGED}:
+                item.review_status = InventoryReviewItem.REVIEW_RESOLVED_BY_RERUN
+                item.resolution_type = "resolved_by_future_sync"
+                if item.resolved_at is None:
+                    item.resolved_at = now
+                item.is_active = False
+                item.save(update_fields=["review_status", "resolution_type", "resolved_at", "is_active", "updated_at"])
+                resolved_by_rerun += 1
+            elif item.review_status in {InventoryReviewItem.REVIEW_IGNORED}:
+                # Keep operator decision, but it's no longer active for the latest run.
+                item.is_active = False
+                item.save(update_fields=["is_active", "updated_at"])
+
+    return {
+        "created": created,
+        "updated": updated,
+        "reopened": reopened,
+        "resolved_by_rerun": resolved_by_rerun,
+        "active_open_count": InventoryReviewItem.objects.filter(
+            company_key=artifact.company_key,
+            is_active=True,
+            review_status__in=[InventoryReviewItem.REVIEW_OPEN, InventoryReviewItem.REVIEW_ACKNOWLEDGED],
+        ).count(),
+        "total_blocked_from_artifact": len(blocked_rows),
+    }
