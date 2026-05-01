@@ -13,6 +13,107 @@
         <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">Internal ID: {{ job.id }}</p>
     </div>
 
+    {% if inventory_review_action %}
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm space-y-4">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory Review Action</h2>
+        {% if inventory_review_action.action_type == "create_missing" %}
+        <p class="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">This run was queued from the Missing Item Creation flow. Only safe missing QBO candidates are in scope.</p>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.intent_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Safe candidates</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.safe_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Blocked candidates</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.blocked_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.scope_label }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Source final audit</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100 break-all">{{ inventory_review_action.source_final_audit_name }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Mapping source</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.mapping_source }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Quantity policy</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.create_qty_policy_label }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">InvStartDate (queued)</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">
+                    <span class="font-mono">{{ inventory_review_action.item_inv_start_date }}</span>
+                    {% if inventory_review_action.txn_date_source %}
+                    <span class="text-xs font-sans text-slate-500 dark:text-slate-400">({{ inventory_review_action.txn_date_source }})</span>
+                    {% endif %}
+                </dd>
+            </div>
+            {% if inventory_review_action.missing_create_report_url %}
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Per-item report</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100"><a href="{{ inventory_review_action.missing_create_report_url }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ inventory_review_action.missing_create_report_label }}</a> (CSV)</dd>
+            </div>
+            {% endif %}
+        </dl>
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-1">Limits</p>
+            <ul class="list-disc list-inside text-slate-900 dark:text-slate-100 space-y-0.5">
+                <li>Catalog fixes: {{ inventory_review_action.max_catalog_fixes }}</li>
+                <li>Quantity adjustments: {{ inventory_review_action.max_quantity_adjustments }}</li>
+            </ul>
+        </div>
+        {% else %}
+        <p class="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">This run was queued from the Inventory Review page and is scoped to the listed base names.</p>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.intent_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Affected items</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.affected_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.scope_label }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Source final audit</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100 break-all">{{ inventory_review_action.source_final_audit_name }}</dd>
+            </div>
+        </dl>
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-1">Limits</p>
+            <ul class="list-disc list-inside text-slate-900 dark:text-slate-100 space-y-0.5">
+                <li>Catalog fixes: {{ inventory_review_action.max_catalog_fixes }}</li>
+                <li>Quantity adjustments: {{ inventory_review_action.max_quantity_adjustments }}</li>
+            </ul>
+        </div>
+        {% endif %}
+        {% if inventory_review_action.preview_base_names %}
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-2">Affected base names</p>
+            <ul class="border border-slate-200 dark:border-slate-600 rounded-lg divide-y divide-slate-100 dark:divide-slate-700 bg-slate-50/50 dark:bg-slate-900/30">
+                {% for name in inventory_review_action.preview_base_names %}
+                <li class="px-3 py-1.5 text-slate-900 dark:text-slate-100">{{ name }}</li>
+                {% endfor %}
+            </ul>
+            {% if inventory_review_action.has_more_base_names %}
+            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">and {{ inventory_review_action.more_base_names_count }} more</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
     <section
         class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
         <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>

@@ -108,18 +108,58 @@
     </div>
     {% endif %}
 
-    {% if review.reason_counts %}
+    {% if review.actions.available %}
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
-            <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Reason Counts</h2>
+            <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Resolve Review Items</h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Retry actions queue real inventory pipeline jobs. Preview item creation is read-only.</p>
         </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-6">
-            {% for reason in review.reason_counts %}
-            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-3">
-                <p class="text-xs text-slate-500 dark:text-slate-400">{{ reason.label }}</p>
-                <p class="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ reason.count }}</p>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 p-6 items-stretch">
+            {% if review.actions.catalog_cleanup_count > 0 %}
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-4 grid grid-rows-[auto_1fr_auto] min-h-[220px] h-full">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Duplicate/base conflicts</p>
+                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.catalog_cleanup_count }}</p>
+                </div>
+                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Base items and pack variants both exist for the same product. These should be consolidated so QBO tracks one canonical inventory item.</p>
+                <div class="pt-3 self-end w-full">
+                    <a href="{{ review.actions.retry_catalog_cleanup_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
+                        <iconify-icon icon="solar:restart-linear" width="16"></iconify-icon>
+                        Review cleanup
+                    </a>
+                </div>
             </div>
-            {% endfor %}
+            {% endif %}
+            {% if review.actions.quantity_adjustment_count > 0 %}
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-4 grid grid-rows-[auto_1fr_auto] min-h-[220px] h-full">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Quantity mismatches</p>
+                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.quantity_adjustment_count }}</p>
+                </div>
+                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Exact QBO item matches were found, but QtyOnHand differs from EPOS. EPOS is the source of truth for inventory quantity.</p>
+                <div class="pt-3 self-end w-full">
+                    <a href="{{ review.actions.retry_quantity_adjustments_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
+                        <iconify-icon icon="solar:tuning-square-linear" width="16"></iconify-icon>
+                        Review adjustments
+                    </a>
+                </div>
+            </div>
+            {% endif %}
+            {% if review.actions.missing_count > 0 %}
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-4 grid grid-rows-[auto_1fr_auto] min-h-[220px] h-full">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Missing from QuickBooks</p>
+                    <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.missing_count }}</p>
+                </div>
+                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">These EPOS products were not found as QBO inventory items. Item creation needs mapping/account review before anything is created.</p>
+                <div class="pt-3 self-end w-full">
+                    <a href="{{ review.actions.missing_preview_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
+                    <iconify-icon icon="solar:eye-linear" width="16"></iconify-icon>
+                    Preview items
+                    </a>
+                </div>
+            </div>
+            {% endif %}
         </div>
     </div>
     {% endif %}
@@ -150,29 +190,37 @@
                 <thead class="bg-slate-50 dark:bg-slate-700/50">
                     <tr>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Product</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Reason / Status</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">EPOS Expected</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">QBO Qty</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Delta</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Suggested Next Step</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Source / Run</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100 dark:divide-slate-700" data-review-table>
                     {% for row in review.rows %}
                     <tr data-review-row data-search="{{ row.search_text }}" data-reason="{{ row.reason_group_slug }}" class="hover:bg-slate-50 dark:hover:bg-slate-700/50">
-                        <td class="px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56">{{ row.product }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-52">
-                            <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">{{ row.reason_group }}</span>
-                            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ row.reason_label }}</p>
+                        <td class="px-4 py-4 min-w-[24rem] align-top">
+                            <div class="text-sm font-semibold text-slate-900 dark:text-slate-100 leading-5">{{ row.product }}</div>
+                            <div class="mt-1.5 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 leading-5">
+                                {% if row.reason_group_slug == "missing_from_quickbooks" %}
+                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                                {% elif row.reason_group_slug == "needs_adjustment" %}
+                                <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                                {% else %}
+                                <span class="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500"></span>
+                                {% endif %}
+                                <span>{{ row.reason_group }}</span>
+                            </div>
+                            {% if row.reason_label %}
+                            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400 leading-5">{{ row.reason_label }}</p>
+                            {% endif %}
                         </td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.epos_expected_qty|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.qbo_qty|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.delta|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.category|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-72">{{ row.suggested_next_step }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">{{ row.epos_expected_qty|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">{{ row.qbo_qty|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">{{ row.delta|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 min-w-64 align-top">{{ row.category|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap min-w-52 align-top">
                             {% if review.run_detail_url %}
                             <a href="{{ review.run_detail_url }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium">{{ review.run_label }}</a>
                             {% else %}
@@ -182,7 +230,7 @@
                     </tr>
                     {% endfor %}
                     <tr data-review-empty class="hidden">
-                        <td colspan="8" class="px-4 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No inventory review rows match the current filters.</td>
+                        <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No inventory review rows match the current filters.</td>
                     </tr>
                 </tbody>
             </table>

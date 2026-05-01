@@ -35,6 +35,41 @@ urlpatterns = [
         views.company_inventory_review,
         name="company_inventory_review",
     ),
+    path(
+        "companies/<slug:company_key>/inventory/review/retry-catalog-cleanup/",
+        views.company_inventory_retry_catalog_cleanup,
+        name="company_inventory_retry_catalog_cleanup",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/retry-catalog-cleanup/confirm/",
+        views.company_inventory_retry_catalog_cleanup_confirm,
+        name="company_inventory_retry_catalog_cleanup_confirm",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/retry-quantity-adjustments/",
+        views.company_inventory_retry_quantity_adjustments,
+        name="company_inventory_retry_quantity_adjustments",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/retry-quantity-adjustments/confirm/",
+        views.company_inventory_retry_quantity_adjustments_confirm,
+        name="company_inventory_retry_quantity_adjustments_confirm",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/missing-preview/",
+        views.company_inventory_missing_preview,
+        name="company_inventory_missing_preview",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/missing-create/confirm/",
+        views.company_inventory_missing_create_confirm,
+        name="company_inventory_missing_create_confirm",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/missing-create/",
+        views.company_inventory_missing_create,
+        name="company_inventory_missing_create",
+    ),
     path("companies/<slug:company_key>/", views.company_detail, name="company-detail"),
     path("companies/<slug:company_key>/toggle-active/", views.company_toggle_active, name="company-toggle-active"),
     path("companies/<slug:company_key>/advanced", views.company_advanced, name="company-advanced"),

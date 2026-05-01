@@ -54,6 +54,22 @@ from .services.config_sync import (
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
 from .services.inventory_categories import load_inventory_categories_by_company
 from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
+from .services.inventory_review_actions import (
+    REASON_GROUP_MISSING,
+    RETRY_INTENT_CATALOG,
+    RETRY_INTENT_QUANTITY,
+    REVIEW_CREATE_MISSING_INTENT,
+    SNAPSHOT_PACK_GUARD_MESSAGE,
+    build_missing_item_creation_preview,
+    get_catalog_cleanup_rows,
+    get_quantity_adjustment_rows,
+    get_review_rows_by_reason,
+    load_review_context,
+    queue_missing_item_creation_job,
+    resolve_txn_date_for_review_missing_item_creation,
+    retry_catalog_cleanup_for_review,
+    retry_quantity_adjustments_for_review,
+)
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
@@ -120,10 +136,12 @@ RUN_ARTIFACT_REPORT_LABELS = {
     "initial_audit": "Initial Audit",
     "catalog_cleanup": "Catalog Cleanup",
     "post_catalog_audit": "Post Catalog Audit",
+    "review_missing_create_report": "Missing item creation report",
 }
 RUN_ARTIFACT_REPORT_ORDER = [
     "summary_csv",
     "summary_json",
+    "review_missing_create_report",
     "final_audit",
     "initial_audit",
     "catalog_cleanup",
@@ -2647,6 +2665,7 @@ def run_detail(request, job_id):
         "exit_code_reference": EXIT_CODE_REFERENCE,
         "run_attention_message": _run_attention_message(job, artifacts_list),
         "run_upload_summary_message": run_upload_summary_message,
+        "inventory_review_action": _run_detail_inventory_review_action_context(job),
     }
     context.update(_nav_context())
     context.update(
@@ -3009,13 +3028,140 @@ def _run_detail_upload_summary_message(artifacts_list: list[RunArtifact]) -> str
     return None
 
 
+REVIEW_RETRY_INTENT_LABELS = {
+    RETRY_INTENT_CATALOG: "Catalog cleanup retry",
+    RETRY_INTENT_QUANTITY: "Quantity adjustment retry",
+}
+
+
+def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object] | None:
+    """Template context for Inventory Review–triggered runs (retry or missing-item creation)."""
+    opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    rcm = opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        raw_audit = str(rcm.get("source_final_audit") or "").strip()
+        source_final_audit_name = Path(raw_audit).name if raw_audit else ""
+        affected_raw = rcm.get("affected_base_names")
+        if not isinstance(affected_raw, list):
+            affected_raw = opts.get("base_names") if isinstance(opts.get("base_names"), list) else []
+        affected_base_names = [str(x).strip() for x in affected_raw if str(x).strip()]
+        preview_limit = 10
+        preview_base_names = affected_base_names[:preview_limit]
+        has_more_base_names = len(affected_base_names) > preview_limit
+        more_base_names_count = max(0, len(affected_base_names) - preview_limit)
+        try:
+            safe_count = int(rcm.get("safe_count"))
+        except (TypeError, ValueError):
+            safe_count = len(affected_base_names)
+        try:
+            blocked_count = int(rcm.get("blocked_count"))
+        except (TypeError, ValueError):
+            blocked_count = 0
+        qty_policy = str(rcm.get("create_qty_policy") or "").strip() or "initial_qty_from_epos"
+        mapping_source = str(rcm.get("mapping_source") or "").strip() or "Product.Mapping.csv"
+        try:
+            max_catalog_fixes = int(opts.get("max_catalog_fixes", 0))
+        except (TypeError, ValueError):
+            max_catalog_fixes = 0
+        try:
+            max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
+        except (TypeError, ValueError):
+            max_quantity_adjustments = 0
+        txn_date = str(opts.get("txn_date") or rcm.get("item_inv_start_date") or "").strip()
+        txn_date_source = str(rcm.get("txn_date_source") or "").strip()
+        missing_create_report_url = ""
+        missing_create_report_label = ""
+        for art in job.artifacts.order_by("-processed_at", "-imported_at"):
+            for link in _artifact_report_links(job, art):
+                if link.get("key") == "review_missing_create_report":
+                    missing_create_report_url = str(link.get("url") or "")
+                    missing_create_report_label = str(link.get("label") or "")
+                    break
+            if missing_create_report_url:
+                break
+        return {
+            "action_type": "create_missing",
+            "intent": str(rcm.get("intent") or REVIEW_CREATE_MISSING_INTENT),
+            "intent_label": "Missing item creation",
+            "source_artifact_id": rcm.get("source_artifact_id"),
+            "source_final_audit": raw_audit,
+            "source_final_audit_name": source_final_audit_name or "—",
+            "safe_count": safe_count,
+            "blocked_count": blocked_count,
+            "affected_base_names": affected_base_names,
+            "preview_base_names": preview_base_names,
+            "has_more_base_names": has_more_base_names,
+            "more_base_names_count": more_base_names_count,
+            "scope_label": "Safe missing QBO candidates only",
+            "mapping_source": mapping_source,
+            "create_qty_policy": qty_policy,
+            "create_qty_policy_label": "Initial QtyOnHand from EPOS expected (no separate adjustment in this run).",
+            "max_catalog_fixes": max_catalog_fixes,
+            "max_quantity_adjustments": max_quantity_adjustments,
+            "item_inv_start_date": txn_date or "—",
+            "txn_date_source": txn_date_source,
+            "missing_create_report_url": missing_create_report_url,
+            "missing_create_report_label": missing_create_report_label,
+        }
+
+    review_retry = opts.get("review_retry")
+    if not isinstance(review_retry, dict) or not review_retry:
+        return None
+    intent = str(review_retry.get("intent") or "").strip()
+    intent_label = REVIEW_RETRY_INTENT_LABELS.get(intent, intent.replace("_", " ").strip() or "Inventory review retry")
+    raw_audit = str(review_retry.get("source_final_audit") or "").strip()
+    source_final_audit_name = Path(raw_audit).name if raw_audit else ""
+    affected_raw = review_retry.get("affected_base_names")
+    if not isinstance(affected_raw, list):
+        affected_raw = opts.get("base_names") if isinstance(opts.get("base_names"), list) else []
+    affected_base_names = [str(x).strip() for x in affected_raw if str(x).strip()]
+    preview_limit = 10
+    preview_base_names = affected_base_names[:preview_limit]
+    has_more_base_names = len(affected_base_names) > preview_limit
+    more_base_names_count = max(0, len(affected_base_names) - preview_limit)
+    try:
+        affected_count = int(review_retry.get("row_count"))
+    except (TypeError, ValueError):
+        affected_count = len(affected_base_names)
+    try:
+        max_catalog_fixes = int(opts.get("max_catalog_fixes", 0))
+    except (TypeError, ValueError):
+        max_catalog_fixes = 0
+    try:
+        max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
+    except (TypeError, ValueError):
+        max_quantity_adjustments = 0
+    return {
+        "action_type": "retry",
+        "intent": intent,
+        "intent_label": intent_label,
+        "source_artifact_id": review_retry.get("source_artifact_id"),
+        "source_final_audit": raw_audit,
+        "source_final_audit_name": source_final_audit_name or "—",
+        "affected_count": affected_count,
+        "affected_base_names": affected_base_names,
+        "preview_base_names": preview_base_names,
+        "has_more_base_names": has_more_base_names,
+        "more_base_names_count": more_base_names_count,
+        "max_catalog_fixes": max_catalog_fixes,
+        "max_quantity_adjustments": max_quantity_adjustments,
+        "scope_label": "Selected base names only",
+    }
+
+
 def _artifact_report_path_value(artifact: RunArtifact, report_key: str) -> str:
     stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
     if report_key == "source":
         return str(artifact.source_path or "").strip()
     if report_key in {"summary_json", "summary_csv"}:
         return str(stats.get(report_key) or "").strip()
-    if report_key in {"final_audit", "initial_audit", "catalog_cleanup", "post_catalog_audit"}:
+    if report_key in {
+        "final_audit",
+        "initial_audit",
+        "catalog_cleanup",
+        "post_catalog_audit",
+        "review_missing_create_report",
+    }:
         child_reports = stats.get("child_reports") if isinstance(stats.get("child_reports"), dict) else {}
         value = str(child_reports.get(report_key) or "").strip()
         if value:
@@ -3943,6 +4089,45 @@ def company_inventory_review(request, company_key):
         or str(summary_cards["epos_negative_units_clamped_display"]) not in {"", "0"}
     )
 
+    actions = {
+        "available": False,
+        "catalog_cleanup_count": 0,
+        "quantity_adjustment_count": 0,
+        "missing_count": 0,
+        "retry_catalog_cleanup_url": "",
+        "retry_catalog_cleanup_confirm_url": "",
+        "retry_quantity_adjustments_url": "",
+        "retry_quantity_adjustments_confirm_url": "",
+        "missing_preview_url": "",
+    }
+    if inventory_enabled and rows:
+        actions = {
+            "available": True,
+            "catalog_cleanup_count": len(get_catalog_cleanup_rows(rows)),
+            "quantity_adjustment_count": len(get_quantity_adjustment_rows(rows)),
+            "missing_count": len(get_review_rows_by_reason(rows, REASON_GROUP_MISSING)),
+            "retry_catalog_cleanup_url": reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup",
+                kwargs={"company_key": company.company_key},
+            ),
+            "retry_catalog_cleanup_confirm_url": reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
+                kwargs={"company_key": company.company_key},
+            ),
+            "retry_quantity_adjustments_url": reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments",
+                kwargs={"company_key": company.company_key},
+            ),
+            "retry_quantity_adjustments_confirm_url": reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
+                kwargs={"company_key": company.company_key},
+            ),
+            "missing_preview_url": reverse(
+                "epos_qbo:company_inventory_missing_preview",
+                kwargs={"company_key": company.company_key},
+            ),
+        }
+
     context = {
         "company": company,
         "inventory_enabled": inventory_enabled,
@@ -3965,6 +4150,7 @@ def company_inventory_review(request, company_key):
             "empty_message": empty_message,
             "parse_error": parse_error,
             "has_negative_summary": has_negative_summary,
+            "actions": actions,
         },
     }
     context.update(_nav_context())
@@ -3984,6 +4170,422 @@ def company_inventory_review(request, company_key):
         )
     )
     return render(request, "epos_qbo/company_inventory_review.html", context)
+
+
+def _inventory_review_action_context(request, company_key: str):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    if not _company_inventory_enabled(company):
+        messages.error(request, "Inventory is not enabled for this company.")
+        return company, None, redirect("epos_qbo:company-detail", company_key=company.company_key)
+
+    artifact = _latest_inventory_review_artifact(company.company_key)
+    if artifact is None:
+        messages.error(request, "No inventory final audit is available for this company yet.")
+        return company, None, redirect(review_url)
+
+    context = load_review_context(
+        company=company,
+        artifact=artifact,
+        final_audit_path_resolver=_resolve_artifact_report_path,
+    )
+    if context is None:
+        messages.error(
+            request,
+            "The final audit artifact exists in the database but the source file could not be found.",
+        )
+        return company, None, redirect(review_url)
+    if context.parse_result.error and not context.rows:
+        messages.error(request, "The final audit CSV could not be parsed.")
+        return company, None, redirect(review_url)
+    return company, context, None
+
+
+def _inventory_retry_confirm_context(
+    *,
+    company,
+    context,
+    action_title: str,
+    action_label: str,
+    warning_text: str,
+    rows: list[dict],
+    preview_limit: int = 25,
+) -> dict:
+    run = context.artifact.run_job if context.artifact and context.artifact.run_job_id else None
+    run_label = run.friendly_id if run else ""
+    return {
+        "company": company,
+        "action_title": action_title,
+        "action_label": action_label,
+        "warning_text": warning_text,
+        "row_count": len(rows),
+        "rows": rows,
+        "preview_rows": rows[:preview_limit],
+        "preview_limit": int(preview_limit),
+        "final_audit_filename": context.final_audit_path.name,
+        "source_run_label": run_label,
+    }
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_retry_catalog_cleanup_confirm(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    rows = get_catalog_cleanup_rows(context.rows)
+    if not rows:
+        messages.info(request, "No duplicate/base conflicts found in the latest final audit.")
+        return redirect(review_url)
+
+    template_context = _inventory_retry_confirm_context(
+        company=company,
+        context=context,
+        action_title="Confirm Catalog Cleanup Retry",
+        action_label="Catalog cleanup retry",
+        warning_text=(
+            "This will queue a real inventory pipeline job. When the job runs, it may update "
+            "QuickBooks inventory by consolidating/inactivating duplicate or pack-variant items "
+            "and adjusting base quantities. No changes are made until you confirm."
+        ),
+        rows=rows,
+    )
+    template_context.update(
+        {
+            "review_url": review_url,
+            "confirm_post_url": reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup",
+                kwargs={"company_key": company.company_key},
+            ),
+            "confirm_button_text": "Confirm and queue",
+        }
+    )
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Confirm retry", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_retry_confirm.html", template_context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_retry_quantity_adjustments_confirm(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    rows = get_quantity_adjustment_rows(context.rows)
+    if not rows:
+        messages.info(request, "No exact-match quantity adjustments needed in the latest final audit.")
+        return redirect(review_url)
+
+    template_context = _inventory_retry_confirm_context(
+        company=company,
+        context=context,
+        action_title="Confirm Quantity Adjustment Retry",
+        action_label="Quantity adjustment retry",
+        warning_text=(
+            "This will queue a real inventory pipeline job. When the job runs, it may post "
+            "QuickBooks InventoryAdjustment entries so QBO QtyOnHand matches EPOS. EPOS is the "
+            "source of truth. No changes are made until you confirm."
+        ),
+        rows=rows,
+    )
+    template_context.update(
+        {
+            "review_url": review_url,
+            "confirm_post_url": reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments",
+                kwargs={"company_key": company.company_key},
+            ),
+            "confirm_button_text": "Confirm and queue",
+        }
+    )
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Confirm retry", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_retry_confirm.html", template_context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_retry_catalog_cleanup(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+
+    rows = get_catalog_cleanup_rows(context.rows)
+    if not rows:
+        messages.info(request, "No duplicate/base conflicts found in the latest final audit.")
+        return redirect(review_url)
+
+    result = retry_catalog_cleanup_for_review(
+        context=context,
+        requested_by=request.user,
+    )
+    job_id = result.get("job_id")
+    if job_id is None:
+        messages.info(request, "No catalog cleanup actions were queued.")
+        return redirect(review_url)
+
+    dispatch_next_queued_job()
+    messages.success(
+        request,
+        f"Catalog cleanup retry queued for {result['row_count']} item(s).",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job_id)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_retry_quantity_adjustments(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+
+    rows = get_quantity_adjustment_rows(context.rows)
+    if not rows:
+        messages.info(request, "No exact-match quantity adjustments needed in the latest final audit.")
+        return redirect(review_url)
+
+    result = retry_quantity_adjustments_for_review(
+        context=context,
+        requested_by=request.user,
+    )
+    job_id = result.get("job_id")
+    if job_id is None:
+        messages.info(request, "No quantity adjustment actions were queued.")
+        return redirect(review_url)
+
+    dispatch_next_queued_job()
+    messages.success(
+        request,
+        f"Quantity adjustment retry queued for {result['row_count']} item(s).",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job_id)
+
+
+@login_required
+@require_GET
+def company_inventory_missing_preview(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+
+    preview = build_missing_item_creation_preview(context=context)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    item_inv_start_date, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
+    template_context = {
+        "company": company,
+        "preview": preview,
+        "review_url": review_url,
+        "final_audit_filename": context.final_audit_path.name,
+        "item_inv_start_date": item_inv_start_date,
+        "txn_date_source": txn_date_source,
+        "missing_item_queue_allowed": missing_item_queue_allowed,
+        "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
+    }
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Missing Preview", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(
+        request,
+        "epos_qbo/company_inventory_missing_preview.html",
+        template_context,
+    )
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_missing_create_confirm(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    missing_preview_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+    preview = build_missing_item_creation_preview(context=context)
+    item_inv_start_date, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
+    if preview.safe_count <= 0:
+        messages.info(request, "No safe missing-item candidates to create in the latest final audit.")
+        return redirect(missing_preview_url)
+
+    safe_rows = [r for r in preview.rows if r.is_safe]
+    preview_limit = 25
+    run = context.artifact.run_job if context.artifact and context.artifact.run_job_id else None
+    source_run_label = run.friendly_id if run else ""
+    template_context = {
+        "company": company,
+        "preview": preview,
+        "safe_rows": safe_rows,
+        "preview_safe_rows": safe_rows[:preview_limit],
+        "preview_limit": preview_limit,
+        "safe_total": len(safe_rows),
+        "review_url": review_url,
+        "missing_preview_url": missing_preview_url,
+        "final_audit_filename": context.final_audit_path.name,
+        "source_run_label": source_run_label,
+        "confirm_post_url": reverse(
+            "epos_qbo:company_inventory_missing_create",
+            kwargs={"company_key": company.company_key},
+        ),
+        "item_inv_start_date": item_inv_start_date,
+        "txn_date_source": txn_date_source,
+        "missing_item_queue_allowed": missing_item_queue_allowed,
+        "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
+    }
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Confirm missing items", "url": None},
+            ],
+            back_url=missing_preview_url,
+            back_label="Missing preview",
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_missing_create_confirm.html", template_context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_missing_create(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    missing_preview_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+    preview = build_missing_item_creation_preview(context=context)
+    if str(preview.qbo_base_names_error or "").strip():
+        messages.error(request, SNAPSHOT_PACK_GUARD_MESSAGE)
+        return redirect(
+            "epos_qbo:company_inventory_missing_create_confirm",
+            company_key=company.company_key,
+        )
+    job = queue_missing_item_creation_job(
+        company=company,
+        artifact=context.artifact,
+        final_audit_path=context.final_audit_path,
+        preview=preview,
+        requested_by=request.user,
+    )
+    if job is None:
+        messages.warning(
+            request,
+            "No safe missing-item candidates to queue. Refresh the preview and try again if the audit changed.",
+        )
+        return redirect(missing_preview_url)
+
+    dispatch_next_queued_job()
+    messages.success(
+        request,
+        f"Missing item creation queued for {preview.safe_count} safe candidate(s).",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job.id)
 
 
 @login_required

@@ -92,6 +92,57 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("4", cmd)
 
+    def test_build_command_for_job_supports_base_name_scope_and_zero_caps(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["Pack Conflict", "BENSON & HEDGES CIGARETTES"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 2,
+            },
+        )
+        cmd = build_command_for_job(job)
+        flat = " ".join(cmd)
+        self.assertIn("code_scripts.inventory_pipeline", flat)
+        self.assertIn("--base-name", cmd)
+        self.assertIn("Pack Conflict", cmd)
+        self.assertIn("BENSON & HEDGES CIGARETTES", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("0", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("2", cmd)
+
+    def test_build_command_for_job_includes_review_create_missing_items_flag(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["WIDGET A"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 0,
+                "txn_date": "2026-04-28",
+                "review_create_missing_items": {
+                    "intent": "review_create_missing_items",
+                    "source_final_audit": "/tmp/final.csv",
+                    "affected_base_names": ["WIDGET A"],
+                    "row_count": 1,
+                    "safe_count": 1,
+                    "blocked_count": 0,
+                    "item_inv_start_date": "2026-04-28",
+                    "txn_date_source": "test",
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+        self.assertIn("--review-create-missing-items", cmd)
+        self.assertIn("--base-name", cmd)
+        self.assertIn("WIDGET A", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("0", cmd)
+        self.assertIn("--txn-date", cmd)
+        self.assertIn("2026-04-28", cmd)
+
     def test_default_inventory_schedule_builds_all_products_pipeline_command(self):
         schedule = RunSchedule.objects.create(
             name="Weekly Inventory Sync",

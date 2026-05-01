@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -105,6 +106,14 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
 
     if product_filter:
         cmd.extend(["--product", product_filter])
+    base_names = opts.get("base_names") or []
+    if isinstance(base_names, str):
+        base_names = [base_names]
+    if isinstance(base_names, list):
+        for base_name in base_names:
+            value = str(base_name or "").strip()
+            if value:
+                cmd.extend(["--base-name", value])
     categories = opts.get("categories") or []
     if isinstance(categories, str):
         categories = [categories]
@@ -127,6 +136,9 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
     if max_quantity_adjustments is not None:
         cmd.extend(["--max-quantity-adjustments", str(max_quantity_adjustments)])
 
+    if isinstance(opts.get("review_create_missing_items"), dict) and opts.get("review_create_missing_items"):
+        cmd.append("--review-create-missing-items")
+
     if opts.get("max_qty_delta") is not None:
         cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
     if opts.get("adjust_account_id"):
@@ -145,9 +157,9 @@ def _positive_inventory_limit(value: object, option_name: str) -> int | None:
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"inventory_pipeline requires positive {option_name}") from exc
-    if parsed < 1:
-        raise ValueError(f"inventory_pipeline requires positive {option_name}")
+        raise ValueError(f"inventory_pipeline requires non-negative {option_name}") from exc
+    if parsed < 0:
+        raise ValueError(f"inventory_pipeline requires non-negative {option_name}")
     return parsed
 
 
@@ -335,6 +347,10 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
     env["OIAT_RUN_JOB_ID"] = str(job.id)
     env["OIAT_RUN_SCOPE"] = str(job.scope)
     env["OIAT_RUN_STARTED_AT"] = timezone.now().isoformat()
+    job_opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    rcm = job_opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        env["OIAT_REVIEW_CREATE_MISSING_JSON"] = json.dumps(rcm, separators=(",", ":"))
     # Prefer explicit env override; otherwise fall back to Django settings.
     if not env.get("OIAT_PORTAL_BASE_URL"):
         base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or "").strip().rstrip("/")

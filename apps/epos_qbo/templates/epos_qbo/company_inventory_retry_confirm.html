@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}{{ action_title }} • {{ company.display_name }}{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+        <div>
+            <div class="flex flex-wrap items-center gap-3 mb-2">
+                <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ action_title }}</h1>
+                <span class="px-3 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-sm font-medium rounded-full flex items-center gap-2">
+                    <span class="w-2 h-2 bg-amber-500 rounded-full"></span>
+                    Confirmation required
+                </span>
+            </div>
+            <p class="text-sm text-slate-500 dark:text-slate-400">{{ company.display_name }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Source: {{ final_audit_filename }}{% if source_run_label %} • {{ source_run_label }}{% endif %}
+            </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+            <a href="{{ review_url }}" class="btn btn-secondary">
+                <iconify-icon icon="solar:arrow-left-linear" width="16"></iconify-icon>
+                Back to Inventory Review
+            </a>
+        </div>
+    </div>
+
+    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-900 dark:text-amber-200">
+        <div class="flex items-start gap-3">
+            <iconify-icon icon="solar:danger-triangle-linear" width="20" class="text-amber-600 dark:text-amber-400 mt-0.5"></iconify-icon>
+            <div>
+                <p class="font-medium">{{ warning_text }}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Affected items</p>
+            <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ row_count }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Action</p>
+            <p class="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ action_label }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Company</p>
+            <p class="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ company.display_name }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Source</p>
+            <p class="mt-2 text-xs font-medium text-slate-700 dark:text-slate-200 break-all">{{ final_audit_filename }}</p>
+        </div>
+    </div>
+
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+            <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Affected item preview</h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                {% if row_count > preview_limit %}
+                Showing first {{ preview_limit }} of {{ row_count }} affected item{{ row_count|pluralize }}.
+                {% else %}
+                Showing {{ row_count }} affected item{{ row_count|pluralize }}.
+                {% endif %}
+            </p>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                <thead class="bg-slate-50 dark:bg-slate-700/50">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Product</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">EPOS Expected</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">QBO Qty</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Delta</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Reason</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+                    {% for row in preview_rows %}
+                    <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                        <td class="px-4 py-4 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-64 align-top">{{ row.product }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">{{ row.epos_expected_qty|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">{{ row.qbo_qty|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap align-top">{{ row.delta|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 min-w-48 align-top">{{ row.category|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 min-w-56 align-top">
+                            <div class="text-xs font-medium text-slate-600 dark:text-slate-200">{{ row.reason_group }}</div>
+                            {% if row.reason_label %}
+                            <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ row.reason_label }}</div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
+        <p class="text-sm text-slate-700 dark:text-slate-200 mb-4">This is the final step — submitting below queues the inventory job immediately (same as confirming a run).</p>
+        <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <a href="{{ review_url }}" class="btn btn-secondary whitespace-nowrap justify-center sm:justify-start">
+                Cancel
+            </a>
+            <form method="post" action="{{ confirm_post_url }}" class="w-full sm:w-auto">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-primary w-full sm:w-auto justify-center whitespace-nowrap">
+                    <iconify-icon icon="solar:check-circle-linear" width="16"></iconify-icon>
+                    {{ confirm_button_text }}
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

@@ -72,6 +72,181 @@ class InventorySyncHelpersTest(unittest.TestCase):
         self.assertEqual(grouped.iloc[0]["epos_categories"], "ALCOHOLS & SPIRITS")
         self.assertEqual(grouped.iloc[0]["epos_category_count"], 1)
 
+    def test_load_epos_stock_snapshot_base_name_filter_exact_and_includes_pack_variants(self):
+        """base_names filtering must match exact normalized base_name_norm (not substring),
+        and include pack variants that normalize to the same base."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            stock_csv = Path(td) / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "CHEESE BALLS 13g,Snacks,2\n"
+                "CHEESE BALLS 13g*50,Snacks,1\n"
+                "CHEESE BALLS90g,Snacks,9\n"
+                "SOME OTHER ITEM,General,3\n",
+                encoding="utf-8",
+            )
+            grouped = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                base_names=["CHEESE BALLS 13g"],
+            )
+
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped.iloc[0]["base_name"], "CHEESE BALLS 13g")
+        # Includes pack row (multiplier 50) + base row.
+        # base 2 + (pack 1 * 50) = 52
+        self.assertEqual(grouped.iloc[0]["epos_single_units"], 52.0)
+        # Substring-like near-miss must be excluded.
+        self.assertNotIn("CHEESE BALLS90g", grouped["base_name"].tolist())
+
+    def test_load_epos_stock_snapshot_base_name_filter_normalizes_spaces_and_case(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            stock_csv = Path(td) / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "CHEESE BALLS 13g,Snacks,2\n"
+                "CHEESE BALLS 13g*50,Snacks,1\n",
+                encoding="utf-8",
+            )
+            grouped = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                base_names=["  cheese   balls 13G  "],
+            )
+
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped.iloc[0]["base_name"], "CHEESE BALLS 13g")
+
+    def test_load_epos_stock_snapshot_base_name_filter_empty_means_no_filter(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            stock_csv = Path(td) / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "CHEESE BALLS 13g,Snacks,2\n"
+                "CHEESE BALLS90g,Snacks,9\n",
+                encoding="utf-8",
+            )
+            grouped_none = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                base_names=None,
+            )
+            grouped_empty = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                base_names=[],
+            )
+
+        self.assertEqual(set(grouped_none["base_name"].tolist()), {"CHEESE BALLS 13g", "CHEESE BALLS90g"})
+        self.assertEqual(set(grouped_empty["base_name"].tolist()), {"CHEESE BALLS 13g", "CHEESE BALLS90g"})
+
+    def test_load_epos_stock_snapshot_base_name_filter_is_not_substring_match(self):
+        """Selecting a partial base name must not include other bases that merely contain it."""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            stock_csv = Path(td) / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "CHEESE BALLS 13g,Snacks,2\n"
+                "CHEESE BALLS 13g*50,Snacks,1\n"
+                "CHEESE BALLS90g,Snacks,9\n",
+                encoding="utf-8",
+            )
+            grouped = inventory_sync.load_epos_stock_snapshot(
+                str(stock_csv),
+                base_names=["CHEESE BALLS"],
+            )
+
+        # There is no exact base_name_norm of "CHEESE BALLS" in the input, so nothing should match.
+        self.assertEqual(len(grouped), 0)
+
+
+class QboSnapshotBaseNameFilterTest(unittest.TestCase):
+    def _write_qbo_csv(self, path):
+        # Minimal columns used by load_qbo_inventory_snapshot.
+        path.write_text(
+            "Id,Name,Type,TrackQtyOnHand,QtyOnHand,Active\n"
+            "1,CHEESE BALLS 13g,Inventory,true,5,true\n"
+            "2,CHEESE BALLS 13g*50,Inventory,true,7,true\n"
+            "3,CHEESE BALLS90g,Inventory,true,9,true\n"
+            "4,SOME OTHER ITEM,Inventory,true,3,true\n",
+            encoding="utf-8",
+        )
+
+    def test_load_qbo_inventory_snapshot_base_name_filter_exact_and_includes_pack_variants(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            qbo_csv = Path(td) / "qbo.csv"
+            self._write_qbo_csv(qbo_csv)
+            grouped = inventory_sync.load_qbo_inventory_snapshot(
+                str(qbo_csv),
+                base_names=["CHEESE BALLS 13g"],
+            )
+
+        self.assertEqual(len(grouped), 1)
+        row = grouped.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "CHEESE BALLS 13g")
+        # Pack variants for the base remain included in grouped naming fields.
+        self.assertIn("CHEESE BALLS 13g", str(row.get("qbo_item_names_for_base") or ""))
+        self.assertIn("CHEESE BALLS 13g*50", str(row.get("qbo_item_names_for_base") or ""))
+        self.assertTrue(bool(row.get("qbo_has_pack_variants")))
+        self.assertGreater(int(row.get("qbo_active_pack_variant_count") or 0), 0)
+
+    def test_load_qbo_inventory_snapshot_base_name_filter_normalizes_spaces_and_case(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            qbo_csv = Path(td) / "qbo.csv"
+            self._write_qbo_csv(qbo_csv)
+            grouped = inventory_sync.load_qbo_inventory_snapshot(
+                str(qbo_csv),
+                base_names=["  cheese   balls 13G  "],
+            )
+
+        self.assertEqual(len(grouped), 1)
+        row = grouped.iloc[0].to_dict()
+        self.assertEqual(row["base_name"], "CHEESE BALLS 13g")
+        self.assertIn("CHEESE BALLS 13g*50", str(row.get("qbo_item_names_for_base") or ""))
+
+    def test_load_qbo_inventory_snapshot_base_name_filter_empty_means_no_filter(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            qbo_csv = Path(td) / "qbo.csv"
+            self._write_qbo_csv(qbo_csv)
+            grouped_none = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv), base_names=None)
+            grouped_empty = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv), base_names=[])
+
+        # Grouped snapshot is per-base, so CHEESE BALLS 13g and CHEESE BALLS 13g*50 collapse to one base.
+        self.assertEqual(len(grouped_none), 3)
+        self.assertEqual(len(grouped_empty), 3)
+
+    def test_load_qbo_inventory_snapshot_base_name_filter_is_not_substring_match(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            qbo_csv = Path(td) / "qbo.csv"
+            self._write_qbo_csv(qbo_csv)
+            grouped = inventory_sync.load_qbo_inventory_snapshot(
+                str(qbo_csv),
+                base_names=["CHEESE BALLS"],
+            )
+
+        # No exact base_name_norm of "CHEESE BALLS" exists, so nothing should match.
+        self.assertEqual(len(grouped), 0)
+
 
 class InventorySyncRuntimeGuardTest(unittest.TestCase):
     """main() must refuse to continue when OIAT_RUNTIME_ENV does not match

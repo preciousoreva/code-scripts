@@ -305,8 +305,10 @@ class InventoryTriggerViewTests(TestCase):
             initial_audit = sync_dir / "inventory_audit_company_a_initial_180545.csv"
             catalog_cleanup = cleanup_dir / "inventory_catalog_cleanup_company_a_pipeline_180558.csv"
             post_catalog = sync_dir / "inventory_audit_company_a_post_catalog_184100.csv"
+            missing_create = pipeline_dir / "inventory_review_missing_create_company_a_120001.csv"
             summary_json.write_text("{}", encoding="utf-8")
             summary_csv.write_text("sku,status\nABC,in_sync\n", encoding="utf-8")
+            missing_create.write_text("suggested_qbo_name,outcome\nFOO,created\n", encoding="utf-8")
             final_audit.write_text("base_name,status\nABC,in_sync\n", encoding="utf-8")
             initial_audit.write_text("base_name,status\nABC,needs_review\n", encoding="utf-8")
             catalog_cleanup.write_text("base_name,planned_action\nABC,noop\n", encoding="utf-8")
@@ -337,6 +339,7 @@ class InventoryTriggerViewTests(TestCase):
                         "initial_audit": str(initial_audit),
                         "catalog_cleanup": str(catalog_cleanup),
                         "post_catalog_audit": str(post_catalog),
+                        "review_missing_create_report": str(missing_create),
                     },
                 },
             )
@@ -352,9 +355,22 @@ class InventoryTriggerViewTests(TestCase):
                         kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": "summary_csv"},
                     )
                 )
+                download_missing = self.client.get(
+                    reverse(
+                        "epos_qbo:run-artifact-report",
+                        kwargs={
+                            "job_id": job.id,
+                            "artifact_id": artifact.id,
+                            "report_key": "review_missing_create_report",
+                        },
+                    )
+                )
 
         self.assertEqual(detail.status_code, 200)
         html = detail.content.decode("utf-8")
+        self.assertIn("Missing item creation report", html)
+        self.assertEqual(download_missing.status_code, 200)
+        self.assertIn(b"suggested_qbo_name", b"".join(download_missing.streaming_content))
         self.assertIn("Summary CSV", html)
         self.assertNotIn("Summary JSON", html)
         self.assertIn("Final Audit", html)
