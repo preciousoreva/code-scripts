@@ -73,7 +73,9 @@
                 <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
                     <tr>
                         <th class="text-left px-3 py-2">Company</th>
+                        {% if job.workflow_label == 'Sales' %}
                         <th class="text-left px-3 py-2">Target Date</th>
+                        {% endif %}
                         <th class="text-left px-3 py-2">Processed</th>
                         <th class="text-left px-3 py-2">Metrics</th>
                         <th class="text-left px-3 py-2">Reports</th>
@@ -84,7 +86,9 @@
                     {% for artifact in artifacts %}
                     <tr>
                         <td class="px-3 py-2">{{ artifact.company_key }}</td>
+                        {% if job.workflow_label == 'Sales' %}
                         <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
+                        {% endif %}
                         <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
                         <td class="px-3 py-2">
                             {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
@@ -165,7 +169,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="6" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
+                        <td colspan="{% if job.workflow_label == 'Sales' %}6{% else %}5{% endif %}" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
                     </tr>
                     {% endfor %}
                 </tbody>
