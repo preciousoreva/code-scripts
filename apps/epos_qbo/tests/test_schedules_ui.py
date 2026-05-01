@@ -236,7 +236,7 @@ class SchedulesUiTests(TestCase):
         self.assertNotIn("Completed One-time Runs", html)
         self.assertNotIn("bg-slate-300", html)
         self.assertNotIn("bg-gray-300", html)
-        section_header_class = 'colspan="5" class="bg-slate-50 dark:bg-slate-800'
+        section_header_class = 'colspan="5" class="bg-slate-50'
         self.assertIn(section_header_class, html)
         self.assertEqual(html.count(section_header_class), 2)
 
