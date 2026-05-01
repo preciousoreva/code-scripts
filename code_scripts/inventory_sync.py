@@ -710,18 +710,19 @@ def load_epos_stock_snapshot(
     else:
         category_values = pd.Series([""] * len(df))
 
-    base_names = []
+    requested_base_names = list(base_names or [])
+    derived_base_names = []
     multipliers = []
     for n in names.tolist():
         base, mult = strip_pack_multiplier(n)
-        base_names.append(_collapse_spaces(base))
+        derived_base_names.append(_collapse_spaces(base))
         multipliers.append(int(mult))
 
     out = pd.DataFrame(
         {
             "raw_name": names,
-            "base_name": base_names,
-            "base_name_norm": [_normalize_name_key(v) for v in base_names],
+            "base_name": derived_base_names,
+            "base_name_norm": [_normalize_name_key(v) for v in derived_base_names],
             "multiplier": multipliers,
             "epos_qty_raw": qty_raw,
             "category_name": category_values,
@@ -782,8 +783,12 @@ def load_epos_stock_snapshot(
     if product_filter:
         out = out[literal_product_filter_mask(out, product_filter, raw_col="raw_name")].copy()
 
-    if base_names:
-        requested = {_normalize_name_key(_collapse_spaces(v)) for v in base_names if str(v).strip()}
+    if requested_base_names:
+        requested = {
+            _normalize_name_key(_collapse_spaces(v))
+            for v in requested_base_names
+            if str(v).strip()
+        }
         if requested:
             out = out[out["base_name_norm"].isin(requested)].copy()
 
@@ -838,13 +843,14 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
     else:
         names_original = _original_qbo_names(inv["Name"])
     names_display = names_original.map(_collapse_spaces)
-    base_names = []
+    requested_base_names = list(base_names or [])
+    derived_base_names = []
     had_pack = []
     for n in names_display.tolist():
         base, mult = strip_pack_multiplier(n)
-        base_names.append(_collapse_spaces(base))
+        derived_base_names.append(_collapse_spaces(base))
         had_pack.append(mult > 1)
-    inv["base_name"] = base_names
+    inv["base_name"] = derived_base_names
     inv["base_name_norm"] = inv["base_name"].map(_normalize_name_key)
     inv["qbo_name_original"] = names_original
     inv["qbo_name_raw"] = names_original
@@ -853,8 +859,12 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
     inv["qbo_qty_on_hand"] = inv.get("QtyOnHand", 0).map(_safe_float)
     inv["qbo_is_base_item"] = [not v for v in had_pack]
 
-    if base_names:
-        requested = {_normalize_name_key(_collapse_spaces(v)) for v in base_names if str(v).strip()}
+    if requested_base_names:
+        requested = {
+            _normalize_name_key(_collapse_spaces(v))
+            for v in requested_base_names
+            if str(v).strip()
+        }
         if requested:
             inv = inv[inv["base_name_norm"].isin(requested)].copy()
 

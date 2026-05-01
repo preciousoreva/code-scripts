@@ -1230,6 +1230,10 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     scope_text = format_scope(category=categories, product=product_filter)
     if scope_text:
         print(f"Scope: {scope_text}")
+    if base_names:
+        preview = ", ".join(list(base_names)[:5])
+        suffix = "…" if len(base_names) > 5 else ""
+        print(f"Base names selected: {len(base_names)} ({preview}{suffix})")
     print(
         "Catalog fixes limit: "
         + ("unlimited" if max_catalog_fixes is None else str(max_catalog_fixes))
@@ -1251,6 +1255,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             webhook_url=webhook,
             metadata={
                 "scope": "inventory_pipeline",
+                "base_names_selected": int(len(base_names or [])),
                 "run_job_id": os.environ.get("OIAT_RUN_JOB_ID", "").strip(),
                 "run_url": _build_run_detail_url(os.environ.get("OIAT_RUN_JOB_ID", "").strip()),
             },
