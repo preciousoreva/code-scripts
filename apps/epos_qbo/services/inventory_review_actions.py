@@ -16,8 +16,12 @@ This module adds Phase 1 remediation actions that work on top of that artifact:
   scoped retry.
 
 * ``build_missing_item_creation_preview`` is a read-only classifier for
-  ``missing_from_qbo`` rows. It does **not** create QBO items. Phase 2 will turn
-  this preview into a guarded write workflow.
+  ``missing_from_qbo`` rows (shared logic lives in
+  ``code_scripts.inventory_review_missing_candidates``).
+
+* ``queue_missing_item_creation_job`` queues a pipeline run that creates only
+  server-classified safe missing Inventory items (see
+  ``inventory_pipeline --review-create-missing-items``).
 
 Critical guardrail: missing-item creation must never re-introduce a pack
 variant when a base item already exists. The classifier in this module is the
@@ -27,17 +31,20 @@ classifier.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 from django.http import Http404
 
+from code_scripts.inventory_review_missing_candidates import (
+    _normalize_base_name,
+    classify_missing_items_for_audit_file,
+)
+
 from ..models import CompanyConfigRecord, RunArtifact, RunJob
 from .inventory_review import (
     InventoryReviewParseResult,
-    is_inventory_summary_or_invalid_product_name,
     normalize_inventory_review_key,
     parse_inventory_review_csv,
 )
@@ -65,17 +72,7 @@ QUANTITY_ADJUSTMENT_ISSUE_TYPES = {"exact_name_match"}
 # can attribute a retry run back to the review action that triggered it.
 RETRY_INTENT_CATALOG = "review_retry_catalog_cleanup"
 RETRY_INTENT_QUANTITY = "review_retry_quantity_adjustments"
-
-
-PACK_SUFFIX_RE = re.compile(r"(?P<base>.+?)\s*\*\s*(?P<count>\d+)\s*$")
-INVALID_NAME_FRAGMENTS = (
-    "total:",
-    "totals:",
-    "grand total",
-    "subtotal",
-    "report total",
-    "summary",
-)
+REVIEW_CREATE_MISSING_INTENT = "review_create_missing_items"
 
 
 @dataclass(frozen=True)
@@ -116,30 +113,6 @@ class MissingPreview:
     mapping_error: str = ""
     qbo_base_names_loaded: bool = False
     qbo_base_names_error: str = ""
-
-
-def _normalize_base_name(value: str) -> str:
-    """Strip a trailing ``*N`` pack-size suffix and collapse whitespace."""
-
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    match = PACK_SUFFIX_RE.match(text)
-    if match:
-        text = match.group("base").strip()
-    return re.sub(r"\s+", " ", text)
-
-
-def _name_key(value: str) -> str:
-    return _normalize_base_name(value).lower()
-
-
-def _is_pack_variant(name: str) -> bool:
-    return bool(PACK_SUFFIX_RE.match(str(name or "").strip()))
-
-
-def _looks_invalid(name: str) -> bool:
-    return is_inventory_summary_or_invalid_product_name(name)
 
 
 def get_review_rows_by_reason(
@@ -363,293 +336,81 @@ def retry_quantity_adjustments_for_review(
 
 
 # ---------------------------------------------------------------------------
-# Missing from QuickBooks: read-only preview
+# Missing from QuickBooks: read-only preview + queued item creation
 # ---------------------------------------------------------------------------
-
-
-def _load_category_mapping_safe(company: CompanyConfigRecord) -> tuple[dict[str, dict[str, str]], str]:
-    """Load Product.Mapping.csv for the company; return (mapping, error)."""
-
-    try:
-        from code_scripts.company_config import load_company_config
-        from code_scripts.qbo_upload import load_category_account_mapping
-    except Exception as exc:  # pragma: no cover - defensive
-        return {}, f"Could not import inventory mapping helpers: {exc}"
-    try:
-        cfg = load_company_config(company.company_key)
-    except Exception as exc:
-        return {}, f"Could not load company config: {exc}"
-    try:
-        mapping = load_category_account_mapping(cfg)
-    except FileNotFoundError as exc:
-        return {}, str(exc)
-    except ValueError as exc:
-        return {}, str(exc)
-    except Exception as exc:  # pragma: no cover - defensive
-        return {}, f"Could not load Product.Mapping.csv: {exc}"
-    if not isinstance(mapping, dict):
-        return {}, "Product.Mapping.csv produced no mapping."
-    return mapping, ""
-
-
-def _load_qbo_base_name_keys(company: CompanyConfigRecord) -> tuple[set[str], str]:
-    """Best-effort load of normalized QBO base names from the cached snapshot.
-
-    Used to detect "would create a pack variant when base exists" in the
-    preview. If the snapshot can't be read, we still render the preview but
-    flag mapping-only safety.
-    """
-
-    try:
-        from code_scripts.inventory_sync import load_qbo_inventory_item_rows
-        from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path
-    except Exception as exc:  # pragma: no cover - defensive
-        return set(), f"Could not import QBO snapshot helpers: {exc}"
-    try:
-        snapshot_path = get_qbo_snapshot_path(company.company_key)
-    except Exception as exc:
-        return set(), f"Could not resolve QBO snapshot path: {exc}"
-    if not snapshot_path or not Path(snapshot_path).exists():
-        return set(), "QBO inventory snapshot not found; refresh inventory data."
-    try:
-        rows = load_qbo_inventory_item_rows(str(snapshot_path))
-    except Exception as exc:  # pragma: no cover - defensive
-        return set(), f"Could not load QBO snapshot: {exc}"
-    keys: set[str] = set()
-    if rows is None:
-        return keys, ""
-    try:
-        for _, row in rows.iterrows():
-            active = row.get("Active") if "Active" in rows.columns else True
-            if isinstance(active, str):
-                active_flag = active.strip().lower() not in {"false", "0", "no"}
-            else:
-                active_flag = bool(active) if active is not None else True
-            if not active_flag:
-                continue
-            base = str(row.get("base_name") or row.get("Name") or "").strip()
-            if not base:
-                continue
-            if _is_pack_variant(base):
-                continue
-            keys.add(_name_key(base))
-    except Exception:
-        # Pandas iteration issues shouldn't crash the preview.
-        return keys, "Could not iterate QBO snapshot rows; treating QBO bases as unknown."
-    return keys, ""
-
-
-def _classify_missing_row(
-    row: dict[str, Any],
-    *,
-    mapping: dict[str, dict[str, str]],
-    mapping_loaded: bool,
-    qbo_base_keys: set[str],
-    qbo_base_keys_loaded: bool,
-    seen_keys: set[str],
-) -> MissingPreviewRow:
-    product = str(row.get("product") or "").strip()
-    category = str(row.get("category") or "").strip()
-    if normalize_inventory_review_key(category) in {"nan", "none", "null"}:
-        category = ""
-    epos_qty = str(row.get("epos_expected_qty") or "").strip()
-    base_name = _normalize_base_name(product)
-    base_key = _name_key(product)
-
-    inventory_account = ""
-    revenue_account = ""
-    cogs_account = ""
-
-    if _looks_invalid(product):
-        return MissingPreviewRow(
-            product=product or "(blank)",
-            base_name=base_name,
-            suggested_qbo_name=base_name or product or "(blank)",
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Invalid row",
-            block_reason="Row looks like a CSV summary or empty product (e.g. 'Total:').",
-            is_safe=False,
-        )
-
-    is_pack = _is_pack_variant(product)
-    base_exists_in_qbo = qbo_base_keys_loaded and base_key in qbo_base_keys
-    if is_pack and base_exists_in_qbo:
-        return MissingPreviewRow(
-            product=product,
-            base_name=base_name,
-            suggested_qbo_name=base_name,
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Pack variant of existing base",
-            block_reason="Do not create pack variant; base item exists.",
-            is_safe=False,
-        )
-
-    if base_key in seen_keys:
-        return MissingPreviewRow(
-            product=product,
-            base_name=base_name,
-            suggested_qbo_name=base_name,
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Duplicate candidate",
-            block_reason=(
-                "Another missing row already maps to this base name; review the "
-                "EPOS source before creating duplicates."
-            ),
-            is_safe=False,
-        )
-    seen_keys.add(base_key)
-
-    if not mapping_loaded:
-        return MissingPreviewRow(
-            product=product,
-            base_name=base_name,
-            suggested_qbo_name=base_name,
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Mapping unavailable",
-            block_reason="Product.Mapping.csv could not be loaded; cannot verify accounts.",
-            is_safe=False,
-        )
-
-    category_normalized = re.sub(r"\s+", " ", category).strip()
-    if not category_normalized:
-        return MissingPreviewRow(
-            product=product,
-            base_name=base_name,
-            suggested_qbo_name=base_name,
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Missing category",
-            block_reason="EPOS row has no category; cannot resolve account mapping.",
-            is_safe=False,
-        )
-    if category_normalized not in mapping:
-        return MissingPreviewRow(
-            product=product,
-            base_name=base_name,
-            suggested_qbo_name=base_name,
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Category not in mapping",
-            block_reason=(
-                f"Category '{category_normalized}' is not in Product.Mapping.csv; "
-                "add it before creating items."
-            ),
-            is_safe=False,
-        )
-
-    accounts = mapping[category_normalized]
-    inventory_account = str(accounts.get("asset") or "").strip()
-    revenue_account = str(accounts.get("income") or "").strip()
-    cogs_account = str(accounts.get("expense") or "").strip()
-    missing_accounts = [
-        label
-        for label, value in (
-            ("Inventory", inventory_account),
-            ("Revenue", revenue_account),
-            ("COGS", cogs_account),
-        )
-        if not value
-    ]
-    if missing_accounts:
-        return MissingPreviewRow(
-            product=product,
-            base_name=base_name,
-            suggested_qbo_name=base_name,
-            category=category,
-            epos_expected_qty=epos_qty,
-            inventory_account=inventory_account,
-            revenue_account=revenue_account,
-            cogs_account=cogs_account,
-            safety_status="Incomplete account mapping",
-            block_reason=(
-                "Mapping is missing: "
-                + ", ".join(missing_accounts)
-                + ". Fill in Product.Mapping.csv."
-            ),
-            is_safe=False,
-        )
-
-    return MissingPreviewRow(
-        product=product,
-        base_name=base_name,
-        suggested_qbo_name=base_name,
-        category=category,
-        epos_expected_qty=epos_qty,
-        inventory_account=inventory_account,
-        revenue_account=revenue_account,
-        cogs_account=cogs_account,
-        safety_status="Safe candidate",
-        block_reason="",
-        is_safe=True,
-    )
 
 
 def build_missing_item_creation_preview(
     *,
     context: ReviewContext,
-    mapping_loader=_load_category_mapping_safe,
-    qbo_base_loader=_load_qbo_base_name_keys,
 ) -> MissingPreview:
-    """Classify missing-from-QBO rows for the read-only preview page.
+    """Classify missing-from-QBO rows for the read-only preview page."""
 
-    The classifier is the place where the "do not create pack variant when base
-    exists" guardrail lives. The future Phase 2 write path will gate on
-    ``MissingPreviewRow.is_safe`` from this same classifier.
-    """
-
-    rows = get_review_rows_by_reason(context.rows, REASON_GROUP_MISSING)
-    mapping, mapping_error = mapping_loader(context.company)
-    mapping_loaded = bool(mapping) and not mapping_error
-    qbo_base_keys, qbo_base_keys_error = qbo_base_loader(context.company)
-    qbo_base_keys_loaded = not qbo_base_keys_error
-
-    seen_keys: set[str] = set()
-    classified: list[MissingPreviewRow] = []
-    safe_count = 0
-    blocked_count = 0
-    for row in rows:
-        result = _classify_missing_row(
-            row,
-            mapping=mapping,
-            mapping_loaded=mapping_loaded,
-            qbo_base_keys=qbo_base_keys,
-            qbo_base_keys_loaded=qbo_base_keys_loaded,
-            seen_keys=seen_keys,
-        )
-        classified.append(result)
-        if result.is_safe:
-            safe_count += 1
-        else:
-            blocked_count += 1
-
+    data = classify_missing_items_for_audit_file(context.company.company_key, context.final_audit_path)
+    classified = [MissingPreviewRow(**row) for row in data["rows"]]
+    mapping_error = str(data.get("mapping_error") or "").strip()
+    parse_error = str(data.get("parse_error") or "").strip()
+    combined_mapping_error = mapping_error or parse_error
     return MissingPreview(
         rows=classified,
-        safe_count=safe_count,
-        blocked_count=blocked_count,
-        mapping_loaded=mapping_loaded,
-        mapping_error=mapping_error,
-        qbo_base_names_loaded=qbo_base_keys_loaded,
-        qbo_base_names_error=qbo_base_keys_error,
+        safe_count=int(data.get("safe_count") or 0),
+        blocked_count=int(data.get("blocked_count") or 0),
+        mapping_loaded=bool(data.get("mapping_loaded")),
+        mapping_error=combined_mapping_error,
+        qbo_base_names_loaded=bool(data.get("qbo_base_names_loaded")),
+        qbo_base_names_error=str(data.get("qbo_base_names_error") or ""),
+    )
+
+
+def _build_missing_create_inventory_options(
+    *,
+    artifact: RunArtifact,
+    final_audit_path: Path,
+    preview: MissingPreview,
+) -> dict[str, Any]:
+    safe_rows = [r for r in preview.rows if r.is_safe]
+    base_names = [str(r.suggested_qbo_name or "").strip() for r in safe_rows if str(r.suggested_qbo_name or "").strip()]
+    return {
+        "base_names": base_names,
+        "max_catalog_fixes": 0,
+        "max_quantity_adjustments": 0,
+        "review_create_missing_items": {
+            "intent": REVIEW_CREATE_MISSING_INTENT,
+            "source_artifact_id": int(artifact.id) if artifact.id else None,
+            "source_final_audit": str(final_audit_path),
+            "affected_base_names": base_names,
+            "row_count": int(len(preview.rows)),
+            "safe_count": int(preview.safe_count),
+            "blocked_count": int(preview.blocked_count),
+            "create_qty_policy": "initial_qty_from_epos",
+            "mapping_source": "Product.Mapping.csv",
+        },
+    }
+
+
+def queue_missing_item_creation_job(
+    *,
+    company: CompanyConfigRecord,
+    artifact: RunArtifact,
+    final_audit_path: Path,
+    preview: MissingPreview,
+    requested_by,
+) -> RunJob | None:
+    """Queue inventory pipeline run that only creates safe missing Inventory items."""
+
+    if preview.safe_count <= 0:
+        return None
+    inventory_options = _build_missing_create_inventory_options(
+        artifact=artifact,
+        final_audit_path=final_audit_path,
+        preview=preview,
+    )
+    if not inventory_options.get("base_names"):
+        return None
+    return RunJob.objects.create(
+        scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+        company_key=company.company_key,
+        inventory_options_json=inventory_options,
+        requested_by=requested_by,
+        status=RunJob.STATUS_QUEUED,
     )

@@ -1227,6 +1227,7 @@ def create_inventory_item(
     account_cache: Dict[str, Optional[str]],
     target_date: Optional[str] = None,
     category_item_id: Optional[str] = None,
+    qty_on_hand: Optional[float] = None,
 ) -> str:
     """
     Create a QBO Inventory item.
@@ -1246,6 +1247,7 @@ def create_inventory_item(
             config.inventory_start_date is used.
         category_item_id: Optional QBO Item Id of Type="Category" to set as parent (SubItem=True, ParentRef).
             When set, the new Inventory item appears under that category in QBO UI.
+        qty_on_hand: Optional initial tracked quantity. When omitted, uses ``config.default_qty_on_hand``.
     
     Returns:
         Created item ID
@@ -1264,13 +1266,16 @@ def create_inventory_item(
     inv_start_date = target_date if target_date else config.inventory_start_date
     
     tax_code_id = config.tax_code_id or "2"
+    initial_qty = config.default_qty_on_hand
+    if qty_on_hand is not None:
+        initial_qty = float(qty_on_hand)
     
     # Build Item payload: pricing + tax-inclusive + tax code refs
     payload = {
         "Name": name,
         "Type": "Inventory",
         "TrackQtyOnHand": True,
-        "QtyOnHand": config.default_qty_on_hand,
+        "QtyOnHand": initial_qty,
         "InvStartDate": inv_start_date,
         "Description": f"Sale(s) of {name}",
         "UnitPrice": unit_sales_price,

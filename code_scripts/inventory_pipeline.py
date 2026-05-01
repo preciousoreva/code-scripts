@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,10 @@ from code_scripts.inventory_catalog_cleanup import (
     plan_catalog_cleanup,
 )
 from code_scripts.inventory_notifications import format_scope
+from code_scripts.inventory_review_missing_candidates import (
+    classify_missing_items_for_audit_file,
+    parse_epos_qty_for_item_create,
+)
 from code_scripts.inventory_sync import (
     EPOS_NEGATIVE_STOCK_POLICY,
     TokenManager,
@@ -62,6 +67,11 @@ from code_scripts.inventory_sync import (
     post_inventory_adjustment,
 )
 from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path
+from code_scripts.qbo_upload import (
+    create_inventory_item,
+    get_or_create_item_category_id,
+    load_category_account_mapping,
+)
 from code_scripts.run_lock import GlobalRunLock
 from code_scripts.slack_notify import notify_inventory_pipeline_start, send_slack_success
 from code_scripts.token_manager import verify_realm_match
@@ -117,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adjust-account-id", default=None)
     parser.add_argument("--txn-date", default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--review-create-missing-items",
+        action="store_true",
+        help="Create safe missing Inventory items only (requires OIAT_REVIEW_CREATE_MISSING_JSON env).",
+    )
     parser.add_argument("--no-slack", action="store_true")
     parser.add_argument(
         "--summary-output-dir",
@@ -1211,10 +1226,272 @@ def _collect_blocked_catalog_examples(report: pd.DataFrame, *, max_examples: int
     return examples
 
 
+def _run_review_create_missing_items_phase(
+    args: argparse.Namespace,
+    cfg,
+    spec: dict[str, Any],
+    *,
+    started_at: str,
+) -> dict[str, Any]:
+    """Execute review-triggered creation of safe missing QBO Inventory items only."""
+
+    audit_path = Path(str(spec.get("source_final_audit") or "")).expanduser()
+    if not audit_path.is_file():
+        raise RuntimeError(f"Review missing-item run: final audit CSV not found: {audit_path}")
+
+    data = classify_missing_items_for_audit_file(cfg.company_key, audit_path)
+    safe_by_name = {
+        str(r["suggested_qbo_name"]).strip(): r
+        for r in data["rows"]
+        if r.get("is_safe") and str(r.get("suggested_qbo_name") or "").strip()
+    }
+    allowed = [str(x).strip() for x in (spec.get("affected_base_names") or []) if str(x).strip()]
+    to_create: list[dict[str, Any]] = []
+    for nm in allowed:
+        if nm in safe_by_name:
+            to_create.append(safe_by_name[nm])
+
+    txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
+    dry_run = bool(args.dry_run)
+    mapping_cache = load_category_account_mapping(cfg)
+
+    token_mgr: Optional[TokenManager] = None
+    run_lock: Optional[GlobalRunLock] = None
+    if not dry_run:
+        verify_realm_match(cfg.company_key, cfg.realm_id)
+        token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
+        run_lock = GlobalRunLock(holder=f"inventory_pipeline:{cfg.company_key}")
+        lock_result = run_lock.acquire()
+        if not lock_result.acquired:
+            raise RuntimeError(
+                f"another pipeline run is active ({lock_result.reason}); refusing missing-item creation."
+            )
+
+    report_rows: list[dict[str, Any]] = []
+    created_count = 0
+    skipped_count = 0
+    failed_count = 0
+    qbo_path: Path | None = None
+
+    print("=" * 68)
+    print(f"Inventory pipeline (review missing items): {cfg.display_name} ({cfg.company_key})")
+    print(f"Candidates from job payload: {len(allowed)} | safe+allowed: {len(to_create)}")
+    print("=" * 68)
+
+    try:
+        qbo_path = _resolve_qbo_snapshot(args, cfg, force_refresh=True)
+        qbo_item_rows = load_qbo_inventory_item_rows(str(qbo_path))
+        existing_norms: set[str] = set()
+        if not qbo_item_rows.empty and "base_name_norm" in qbo_item_rows.columns:
+            existing_norms = {
+                str(x).strip()
+                for x in qbo_item_rows["base_name_norm"].tolist()
+                if str(x).strip()
+            }
+        else:
+            for _, qr in qbo_item_rows.iterrows():
+                bn = str(qr.get("base_name") or "").strip()
+                if bn:
+                    existing_norms.add(_normalize_name_key(bn))
+
+        category_item_cache: dict[str, str] = {}
+        account_cache: dict[str, Any] = {}
+
+        for row in to_create:
+            name = str(row["suggested_qbo_name"]).strip()
+            norm = _normalize_name_key(name)
+            product = str(row.get("product") or "").strip()
+            category_raw = str(row.get("category") or "").strip()
+            category_norm = re.sub(r"\s+", " ", category_raw).strip()
+
+            detail_base: dict[str, Any] = {
+                "suggested_qbo_name": name,
+                "product": product,
+                "category": category_norm,
+                "epos_expected_qty": str(row.get("epos_expected_qty") or ""),
+            }
+
+            if norm in existing_norms:
+                skipped_count += 1
+                report_rows.append({**detail_base, "outcome": "skipped", "reason": "item_already_in_snapshot"})
+                print(f"[SKIP] missing-item create name={name!r} reason=item_already_in_snapshot")
+                continue
+
+            qty = parse_epos_qty_for_item_create(str(row.get("epos_expected_qty") or ""))
+
+            if dry_run:
+                report_rows.append({**detail_base, "outcome": "planned", "qty_on_hand": qty, "dry_run": True})
+                print(f"[DRY-RUN] would create Inventory item name={name!r} category={category_norm!r} qty={qty}")
+                continue
+
+            assert token_mgr is not None
+            category_item_id_val: Optional[str] = None
+            if category_norm:
+                try:
+                    category_item_id_val = get_or_create_item_category_id(
+                        token_mgr, cfg.realm_id, category_norm, cache=category_item_cache
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    failed_count += 1
+                    report_rows.append(
+                        {**detail_base, "outcome": "failed", "reason": f"category_resolution:{exc}"}
+                    )
+                    print(f"[FAIL] name={name!r} category lookup: {exc}")
+                    continue
+
+            try:
+                item_id = create_inventory_item(
+                    name,
+                    category_norm,
+                    0.0,
+                    0.0,
+                    cfg,
+                    token_mgr,
+                    cfg.realm_id,
+                    mapping_cache,
+                    account_cache,
+                    target_date=txn_date,
+                    category_item_id=category_item_id_val,
+                    qty_on_hand=qty,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed_count += 1
+                report_rows.append({**detail_base, "outcome": "failed", "reason": str(exc)})
+                print(f"[FAIL] create_inventory_item name={name!r}: {exc}")
+                continue
+
+            created_count += 1
+            existing_norms.add(norm)
+            report_rows.append(
+                {**detail_base, "outcome": "created", "item_id": str(item_id), "qty_on_hand": qty}
+            )
+            print(f"[OK] Created missing Inventory item name={name!r} Id={item_id} qty={qty}")
+    finally:
+        if run_lock is not None:
+            run_lock.release()
+
+    if created_count > 0 and not dry_run:
+        mark_qbo_snapshot_stale(cfg.company_key, reason="inventory_pipeline_missing_items_created")
+
+    reports_dir = inventory_pipeline_reports_dir()
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%H%M%S")
+    report_csv = reports_dir / f"inventory_review_missing_create_{cfg.company_key}_{stamp}.csv"
+    fieldnames = [
+        "suggested_qbo_name",
+        "outcome",
+        "product",
+        "category",
+        "epos_expected_qty",
+        "reason",
+        "item_id",
+        "qty_on_hand",
+        "dry_run",
+    ]
+    with open(report_csv, "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        for r in report_rows:
+            w.writerow(r)
+        if not report_rows:
+            w.writerow({"suggested_qbo_name": "", "outcome": "no_work", "product": ""})
+
+    run_job_id = os.environ.get("OIAT_RUN_JOB_ID", "").strip()
+    run_url = _build_run_detail_url(run_job_id)
+
+    summary: dict[str, Any] = {
+        "run_type": "inventory_pipeline",
+        "started_at": started_at,
+        "finished_at": _now_utc_iso(),
+        "company_key": cfg.company_key,
+        "display_name": cfg.display_name,
+        "scope": "review_create_missing_items",
+        "dry_run": dry_run,
+        "stock_csv": str(audit_path),
+        "qbo_csv": str(qbo_path or ""),
+        "max_catalog_fixes": 0,
+        "max_quantity_adjustments": 0,
+        "products_checked": int(len(to_create)),
+        "already_correct": 0,
+        "in_sync": 0,
+        "catalog_fixes_applied": 0,
+        "base_items_created": int(created_count),
+        "duplicate_base_items_resolved": 0,
+        "quantity_updates_applied": 0,
+        "blocked_items": int(skipped_count + failed_count),
+        "missing_base_item_in_qbo": 0,
+        "duplicate_base_items_in_qbo": 0,
+        "epos_negative_rows_clamped": 0,
+        "epos_negative_units_clamped": 0.0,
+        "epos_negative_stock_policy": EPOS_NEGATIVE_STOCK_POLICY,
+        "skipped_unsupported": 0,
+        "skipped_safely": int(skipped_count),
+        "still_needs_review": int(failed_count),
+        "final_status_counts": {},
+        "final_catalog_issue_counts": {},
+        "unsupported_catalog_issues": {},
+        "blocked_catalog_examples": [],
+        "created_base_details": report_rows,
+        "duplicate_resolution_details": [],
+        "quantity_adjustment_stats": {},
+        "child_reports": {
+            "review_missing_create_report": str(report_csv),
+            "source_final_audit": str(audit_path),
+        },
+        "completion_status": _completion_status(
+            blocked_items=int(skipped_count + failed_count),
+            final_status_counts={},
+            final_catalog_issue_counts={},
+        ),
+        "product_details": [],
+        "run_job_id": run_job_id,
+        "run_url": run_url,
+        "review_create_missing_items": dict(spec),
+        "review_missing_create_execution": {
+            "created": created_count,
+            "skipped": skipped_count,
+            "failed": failed_count,
+            "report_csv": str(report_csv),
+        },
+    }
+    summary = _stable_summary_payload(summary)
+    summary_json, summary_csv_out = _write_summary_reports(summary, output_dir=args.summary_output_dir)
+    summary["summary_json"] = str(summary_json)
+    summary["summary_csv"] = str(summary_csv_out)
+    summary = _stable_summary_payload(summary)
+
+    print("=" * 68)
+    print(
+        f"Review missing items: created={created_count} skipped={skipped_count} failed={failed_count} "
+        f"dry_run={dry_run}"
+    )
+    print("=" * 68)
+
+    webhook = getattr(cfg, "slack_webhook_url", None)
+    if webhook and not args.no_slack:
+        send_slack_success(
+            f"Review missing Inventory items: created={created_count} skipped={skipped_count} failed={failed_count} ({cfg.display_name})",
+            webhook,
+        )
+
+    return summary
+
+
 def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     started_at = _now_utc_iso()
     cfg = load_company_config(args.company)
     ensure_company_runtime_compatible(cfg)
+
+    if getattr(args, "review_create_missing_items", False):
+        raw_spec = os.environ.get("OIAT_REVIEW_CREATE_MISSING_JSON", "").strip()
+        if not raw_spec:
+            raise RuntimeError(
+                "OIAT_REVIEW_CREATE_MISSING_JSON is required when using --review-create-missing-items."
+            )
+        spec = json.loads(raw_spec)
+        if not isinstance(spec, dict):
+            raise RuntimeError("OIAT_REVIEW_CREATE_MISSING_JSON must be a JSON object.")
+        return _run_review_create_missing_items_phase(args, cfg, spec, started_at=started_at)
 
     max_catalog_fixes = _optional_non_negative_int(args.max_catalog_fixes)
     max_quantity_adjustments = _optional_non_negative_int(args.max_quantity_adjustments)

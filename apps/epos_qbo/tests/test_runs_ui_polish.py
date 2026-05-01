@@ -8,7 +8,11 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
-from apps.epos_qbo.services.inventory_review_actions import RETRY_INTENT_CATALOG, RETRY_INTENT_QUANTITY
+from apps.epos_qbo.services.inventory_review_actions import (
+    RETRY_INTENT_CATALOG,
+    RETRY_INTENT_QUANTITY,
+    REVIEW_CREATE_MISSING_INTENT,
+)
 
 
 class RunJobFriendlyIdTests(TestCase):
@@ -236,7 +240,7 @@ class RunsAndRunDetailRenderingTests(TestCase):
         html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
         self.assertIn("Company: ACME LTD.", html)
 
-    def test_run_detail_without_review_retry_does_not_show_inventory_review_retry_card(self):
+    def test_run_detail_without_review_retry_does_not_show_inventory_review_action_card(self):
         job = RunJob.objects.create(
             scope=RunJob.SCOPE_INVENTORY_PIPELINE,
             company_key="company_a",
@@ -244,7 +248,7 @@ class RunsAndRunDetailRenderingTests(TestCase):
             inventory_options_json={"product_filter": "SOME PRODUCT"},
         )
         html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
-        self.assertNotIn("Inventory Review Retry", html)
+        self.assertNotIn("Inventory Review Action", html)
 
     def test_run_detail_review_retry_shows_catalog_cleanup_metadata(self):
         affected = [f"CHEESE ITEM {i:02d}" for i in range(12)]
@@ -266,7 +270,7 @@ class RunsAndRunDetailRenderingTests(TestCase):
             },
         )
         html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
-        self.assertIn("Inventory Review Retry", html)
+        self.assertIn("Inventory Review Action", html)
         self.assertIn("Catalog cleanup retry", html)
         self.assertIn("This run was queued from the Inventory Review page", html)
         self.assertIn("Selected base names only", html)
@@ -312,5 +316,51 @@ class RunsAndRunDetailRenderingTests(TestCase):
             html,
             re.compile(
                 r"Affected items</dt>\s*<dd class=\"font-medium text-slate-900 dark:text-slate-100\">2</dd>"
+            ),
+        )
+
+    def test_run_detail_review_create_missing_shows_item_creation_metadata(self):
+        affected = [f"SAFE ITEM {i:02d}" for i in range(12)]
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_QUEUED,
+            inventory_options_json={
+                "base_names": affected,
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 0,
+                "review_create_missing_items": {
+                    "intent": REVIEW_CREATE_MISSING_INTENT,
+                    "source_artifact_id": 9,
+                    "source_final_audit": "/data/reports/final_audit_company_a.csv",
+                    "affected_base_names": affected,
+                    "row_count": 15,
+                    "safe_count": 12,
+                    "blocked_count": 3,
+                    "create_qty_policy": "initial_qty_from_epos",
+                    "mapping_source": "Product.Mapping.csv",
+                },
+            },
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Inventory Review Action", html)
+        self.assertIn("Missing item creation", html)
+        self.assertIn("Safe missing QBO candidates only", html)
+        self.assertIn("final_audit_company_a.csv", html)
+        self.assertIn("Product.Mapping.csv", html)
+        self.assertIn("SAFE ITEM 00", html)
+        self.assertIn("and 2 more", html)
+        self.assertIn("Catalog fixes: 0", html)
+        self.assertIn("Quantity adjustments: 0", html)
+        self.assertRegex(
+            html,
+            re.compile(
+                r"Safe candidates</dt>\s*<dd class=\"font-medium text-slate-900 dark:text-slate-100\">12</dd>"
+            ),
+        )
+        self.assertRegex(
+            html,
+            re.compile(
+                r"Blocked candidates</dt>\s*<dd class=\"font-medium text-slate-900 dark:text-slate-100\">3</dd>"
             ),
         )

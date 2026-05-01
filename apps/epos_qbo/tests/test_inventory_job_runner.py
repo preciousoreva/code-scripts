@@ -113,6 +113,31 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("2", cmd)
 
+    def test_build_command_for_job_includes_review_create_missing_items_flag(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["WIDGET A"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 0,
+                "review_create_missing_items": {
+                    "intent": "review_create_missing_items",
+                    "source_final_audit": "/tmp/final.csv",
+                    "affected_base_names": ["WIDGET A"],
+                    "row_count": 1,
+                    "safe_count": 1,
+                    "blocked_count": 0,
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+        self.assertIn("--review-create-missing-items", cmd)
+        self.assertIn("--base-name", cmd)
+        self.assertIn("WIDGET A", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("0", cmd)
+
     def test_default_inventory_schedule_builds_all_products_pipeline_command(self):
         schedule = RunSchedule.objects.create(
             name="Weekly Inventory Sync",

@@ -58,11 +58,13 @@ from .services.inventory_review_actions import (
     REASON_GROUP_MISSING,
     RETRY_INTENT_CATALOG,
     RETRY_INTENT_QUANTITY,
+    REVIEW_CREATE_MISSING_INTENT,
     build_missing_item_creation_preview,
     get_catalog_cleanup_rows,
     get_quantity_adjustment_rows,
     get_review_rows_by_reason,
     load_review_context,
+    queue_missing_item_creation_job,
     retry_catalog_cleanup_for_review,
     retry_quantity_adjustments_for_review,
 )
@@ -2659,7 +2661,7 @@ def run_detail(request, job_id):
         "exit_code_reference": EXIT_CODE_REFERENCE,
         "run_attention_message": _run_attention_message(job, artifacts_list),
         "run_upload_summary_message": run_upload_summary_message,
-        "review_retry_context": _run_detail_review_retry_context(job),
+        "inventory_review_action": _run_detail_inventory_review_action_context(job),
     }
     context.update(_nav_context())
     context.update(
@@ -3028,9 +3030,60 @@ REVIEW_RETRY_INTENT_LABELS = {
 }
 
 
-def _run_detail_review_retry_context(job: RunJob) -> dict[str, object] | None:
-    """Build template context for Inventory Review retry runs; None if not a review retry."""
+def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object] | None:
+    """Template context for Inventory Review–triggered runs (retry or missing-item creation)."""
     opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    rcm = opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        raw_audit = str(rcm.get("source_final_audit") or "").strip()
+        source_final_audit_name = Path(raw_audit).name if raw_audit else ""
+        affected_raw = rcm.get("affected_base_names")
+        if not isinstance(affected_raw, list):
+            affected_raw = opts.get("base_names") if isinstance(opts.get("base_names"), list) else []
+        affected_base_names = [str(x).strip() for x in affected_raw if str(x).strip()]
+        preview_limit = 10
+        preview_base_names = affected_base_names[:preview_limit]
+        has_more_base_names = len(affected_base_names) > preview_limit
+        more_base_names_count = max(0, len(affected_base_names) - preview_limit)
+        try:
+            safe_count = int(rcm.get("safe_count"))
+        except (TypeError, ValueError):
+            safe_count = len(affected_base_names)
+        try:
+            blocked_count = int(rcm.get("blocked_count"))
+        except (TypeError, ValueError):
+            blocked_count = 0
+        qty_policy = str(rcm.get("create_qty_policy") or "").strip() or "initial_qty_from_epos"
+        mapping_source = str(rcm.get("mapping_source") or "").strip() or "Product.Mapping.csv"
+        try:
+            max_catalog_fixes = int(opts.get("max_catalog_fixes", 0))
+        except (TypeError, ValueError):
+            max_catalog_fixes = 0
+        try:
+            max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
+        except (TypeError, ValueError):
+            max_quantity_adjustments = 0
+        return {
+            "action_type": "create_missing",
+            "intent": str(rcm.get("intent") or REVIEW_CREATE_MISSING_INTENT),
+            "intent_label": "Missing item creation",
+            "source_artifact_id": rcm.get("source_artifact_id"),
+            "source_final_audit": raw_audit,
+            "source_final_audit_name": source_final_audit_name or "—",
+            "safe_count": safe_count,
+            "blocked_count": blocked_count,
+            "affected_base_names": affected_base_names,
+            "preview_base_names": preview_base_names,
+            "has_more_base_names": has_more_base_names,
+            "more_base_names_count": more_base_names_count,
+            "scope_label": "Safe missing QBO candidates only",
+            "mapping_source": mapping_source,
+            "create_qty_policy": qty_policy,
+            "create_qty_policy_label": "Set initial QtyOnHand from EPOS expected (no separate adjustment in this run).",
+            "max_catalog_fixes": max_catalog_fixes,
+            "max_quantity_adjustments": max_quantity_adjustments,
+        }
+
     review_retry = opts.get("review_retry")
     if not isinstance(review_retry, dict) or not review_retry:
         return None
@@ -3059,7 +3112,7 @@ def _run_detail_review_retry_context(job: RunJob) -> dict[str, object] | None:
     except (TypeError, ValueError):
         max_quantity_adjustments = 0
     return {
-        "is_review_retry": True,
+        "action_type": "retry",
         "intent": intent,
         "intent_label": intent_label,
         "source_artifact_id": review_retry.get("source_artifact_id"),
@@ -4384,6 +4437,107 @@ def company_inventory_missing_preview(request, company_key):
         "epos_qbo/company_inventory_missing_preview.html",
         template_context,
     )
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_missing_create_confirm(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    missing_preview_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+    preview = build_missing_item_creation_preview(context=context)
+    if preview.safe_count <= 0:
+        messages.info(request, "No safe missing-item candidates to create in the latest final audit.")
+        return redirect(missing_preview_url)
+
+    safe_rows = [r for r in preview.rows if r.is_safe]
+    preview_limit = 25
+    run = context.artifact.run_job if context.artifact and context.artifact.run_job_id else None
+    source_run_label = run.friendly_id if run else ""
+    template_context = {
+        "company": company,
+        "preview": preview,
+        "safe_rows": safe_rows,
+        "preview_safe_rows": safe_rows[:preview_limit],
+        "preview_limit": preview_limit,
+        "safe_total": len(safe_rows),
+        "review_url": review_url,
+        "missing_preview_url": missing_preview_url,
+        "final_audit_filename": context.final_audit_path.name,
+        "source_run_label": source_run_label,
+        "confirm_post_url": reverse(
+            "epos_qbo:company_inventory_missing_create",
+            kwargs={"company_key": company.company_key},
+        ),
+    }
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Confirm missing items", "url": None},
+            ],
+            back_url=missing_preview_url,
+            back_label="Missing preview",
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_missing_create_confirm.html", template_context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_missing_create(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    missing_preview_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+    preview = build_missing_item_creation_preview(context=context)
+    job = queue_missing_item_creation_job(
+        company=company,
+        artifact=context.artifact,
+        final_audit_path=context.final_audit_path,
+        preview=preview,
+        requested_by=request.user,
+    )
+    if job is None:
+        messages.warning(
+            request,
+            "No safe missing-item candidates to queue. Refresh the preview and try again if the audit changed.",
+        )
+        return redirect(missing_preview_url)
+
+    dispatch_next_queued_job()
+    messages.success(
+        request,
+        f"Missing item creation queued for {preview.safe_count} safe candidate(s).",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job.id)
 
 
 @login_required

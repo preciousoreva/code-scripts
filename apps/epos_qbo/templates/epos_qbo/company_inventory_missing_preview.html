@@ -60,6 +60,15 @@
         </div>
     </div>
 
+    {% if preview.safe_count > 0 %}
+    <div class="flex flex-wrap items-center gap-3">
+        <a href="{% url 'epos_qbo:company_inventory_missing_create_confirm' company.company_key %}" class="btn btn-primary">
+            Review item creation
+        </a>
+        <p class="text-xs text-slate-500 dark:text-slate-400">Confirms and queues a job; nothing is created in QuickBooks from this page alone.</p>
+    </div>
+    {% endif %}
+
     {% if preview.rows %}
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">

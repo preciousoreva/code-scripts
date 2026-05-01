@@ -15,12 +15,14 @@ from apps.epos_qbo.services import inventory_review_actions as actions
 from apps.epos_qbo.services.inventory_review import parse_inventory_review_csv
 from apps.epos_qbo.services.inventory_review_actions import (
     REASON_GROUP_MISSING,
+    REVIEW_CREATE_MISSING_INTENT,
     MissingPreview,
     build_missing_item_creation_preview,
     get_catalog_cleanup_rows,
     get_quantity_adjustment_rows,
     get_review_rows_by_reason,
 )
+from code_scripts.inventory_review_missing_candidates import _normalize_base_name
 
 
 FINAL_AUDIT_ROWS = [
@@ -98,9 +100,9 @@ class ServiceLevelTests(TestCase):
         self.assertNotIn("Synced Widget", catalog_products | quantity_products | missing_products)
 
     def test_normalize_base_name_strips_pack_suffix(self):
-        self.assertEqual(actions._normalize_base_name("AQUAFINA 50CL*12"), "AQUAFINA 50CL")
-        self.assertEqual(actions._normalize_base_name(" Cheese  Balls 13g "), "Cheese Balls 13g")
-        self.assertEqual(actions._normalize_base_name(""), "")
+        self.assertEqual(_normalize_base_name("AQUAFINA 50CL*12"), "AQUAFINA 50CL")
+        self.assertEqual(_normalize_base_name(" Cheese  Balls 13g "), "Cheese Balls 13g")
+        self.assertEqual(_normalize_base_name(""), "")
 
     def test_missing_preview_classifies_invalid_pack_and_unmapped(self):
         with TemporaryDirectory() as td:
@@ -120,11 +122,14 @@ class ServiceLevelTests(TestCase):
                 parse_result=parsed,
             )
 
-            preview = build_missing_item_creation_preview(
-                context=context,
-                mapping_loader=lambda _company: (PRODUCT_MAPPING, ""),
-                qbo_base_loader=lambda _company: ({"aquafina 50cl"}, ""),
-            )
+            with mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                return_value=(PRODUCT_MAPPING, ""),
+            ), mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                return_value=({"aquafina 50cl"}, ""),
+            ):
+                preview = build_missing_item_creation_preview(context=context)
 
         self.assertIsInstance(preview, MissingPreview)
         by_product = {row.product: row for row in preview.rows}
@@ -406,10 +411,10 @@ class InventoryReviewActionViewTests(TestCase):
             self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
 
             with mock.patch(
-                "apps.epos_qbo.services.inventory_review_actions._load_category_mapping_safe",
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
                 return_value=(PRODUCT_MAPPING, ""),
             ), mock.patch(
-                "apps.epos_qbo.services.inventory_review_actions._load_qbo_base_name_keys",
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
                 return_value=({"aquafina 50cl"}, ""),
             ):
                 response = self.client.get(
@@ -426,8 +431,153 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertIn("31N1 CHILDREN BAND", html)
         self.assertIn("AQUAFINA 50CL*12", html)
         self.assertNotIn("Total:", html)
+        self.assertIn("Review item creation", html)
+        self.assertIn(
+            reverse(
+                "epos_qbo:company_inventory_missing_create_confirm",
+                kwargs={"company_key": "company_a"},
+            ),
+            html,
+        )
         # No new RunJobs must be created from a preview GET.
         self.assertEqual(RunJob.objects.count(), baseline_jobs + 1)
+
+    def test_missing_preview_hides_review_item_creation_when_no_safe_candidates(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            def _empty_safe(*_args, **_kwargs):
+                return {
+                    "rows": [],
+                    "safe_count": 0,
+                    "blocked_count": 0,
+                    "mapping_loaded": True,
+                    "mapping_error": "",
+                    "qbo_base_names_loaded": True,
+                    "qbo_base_names_error": "",
+                }
+
+            with mock.patch(
+                "apps.epos_qbo.services.inventory_review_actions.classify_missing_items_for_audit_file",
+                side_effect=_empty_safe,
+            ):
+                response = self.client.get(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_preview",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertNotIn("Review item creation", html)
+
+    def test_missing_create_confirm_renders_warning_and_first_safe_row(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            with mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                return_value=(PRODUCT_MAPPING, ""),
+            ), mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                return_value=({"aquafina 50cl"}, ""),
+            ):
+                response = self.client.get(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_create_confirm",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Confirm Missing Item Creation", html)
+        self.assertIn("queue a real inventory item creation job", html)
+        self.assertIn("Safe candidates", html)
+        self.assertIn("Blocked candidates", html)
+        self.assertIn("31N1 CHILDREN BAND", html)
+        self.assertIn("Confirm and queue", html)
+
+    def test_missing_create_post_queues_job_with_review_create_metadata(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            with mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                return_value=(PRODUCT_MAPPING, ""),
+            ), mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                return_value=({"aquafina 50cl"}, ""),
+            ), mock.patch(
+                "apps.epos_qbo.views.dispatch_next_queued_job",
+                return_value=(None, "queued"),
+            ):
+                response = self.client.post(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_create",
+                        kwargs={"company_key": "company_a"},
+                    ),
+                    {"product": "FAKE", "products[]": "EVIL"},
+                )
+
+        self.assertEqual(response.status_code, 302)
+        queued = RunJob.objects.filter(company_key="company_a", status=RunJob.STATUS_QUEUED).first()
+        self.assertIsNotNone(queued)
+        opts = queued.inventory_options_json or {}
+        rcm = opts.get("review_create_missing_items") or {}
+        self.assertEqual(rcm.get("intent"), REVIEW_CREATE_MISSING_INTENT)
+        self.assertEqual(rcm.get("safe_count"), 1)
+        self.assertEqual(rcm.get("blocked_count"), 2)
+        self.assertEqual(rcm.get("row_count"), 3)
+        self.assertEqual(rcm.get("mapping_source"), "Product.Mapping.csv")
+        self.assertEqual(rcm.get("create_qty_policy"), "initial_qty_from_epos")
+        bases = opts.get("base_names") or []
+        self.assertEqual(bases, ["31N1 CHILDREN BAND"])
+        self.assertNotIn("FAKE", bases)
+        self.assertEqual(opts.get("max_catalog_fixes"), 0)
+        self.assertEqual(opts.get("max_quantity_adjustments"), 0)
+
+    def test_missing_create_post_does_not_queue_when_no_safe_candidates(self):
+        self._login()
+        baseline_queued = RunJob.objects.filter(status=RunJob.STATUS_QUEUED).count()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            def _no_safe(_company_key, _path):
+                return {
+                    "rows": [],
+                    "safe_count": 0,
+                    "blocked_count": 2,
+                    "mapping_loaded": True,
+                    "mapping_error": "",
+                    "qbo_base_names_loaded": True,
+                    "qbo_base_names_error": "",
+                }
+
+            with mock.patch(
+                "apps.epos_qbo.services.inventory_review_actions.classify_missing_items_for_audit_file",
+                side_effect=_no_safe,
+            ):
+                response = self.client.post(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_create",
+                        kwargs={"company_key": "company_a"},
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            RunJob.objects.filter(status=RunJob.STATUS_QUEUED).count(),
+            baseline_queued,
+        )
 
     def test_missing_preview_rejects_inventory_disabled_company(self):
         self._login()

@@ -60,6 +60,16 @@ urlpatterns = [
         views.company_inventory_missing_preview,
         name="company_inventory_missing_preview",
     ),
+    path(
+        "companies/<slug:company_key>/inventory/review/missing-create/confirm/",
+        views.company_inventory_missing_create_confirm,
+        name="company_inventory_missing_create_confirm",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/missing-create/",
+        views.company_inventory_missing_create,
+        name="company_inventory_missing_create",
+    ),
     path("companies/<slug:company_key>/", views.company_detail, name="company-detail"),
     path("companies/<slug:company_key>/toggle-active/", views.company_toggle_active, name="company-toggle-active"),
     path("companies/<slug:company_key>/advanced", views.company_advanced, name="company-advanced"),

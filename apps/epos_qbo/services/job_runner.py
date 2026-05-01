@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -134,6 +135,9 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
         cmd.extend(["--max-catalog-fixes", str(max_catalog_fixes)])
     if max_quantity_adjustments is not None:
         cmd.extend(["--max-quantity-adjustments", str(max_quantity_adjustments)])
+
+    if isinstance(opts.get("review_create_missing_items"), dict) and opts.get("review_create_missing_items"):
+        cmd.append("--review-create-missing-items")
 
     if opts.get("max_qty_delta") is not None:
         cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
@@ -343,6 +347,10 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
     env["OIAT_RUN_JOB_ID"] = str(job.id)
     env["OIAT_RUN_SCOPE"] = str(job.scope)
     env["OIAT_RUN_STARTED_AT"] = timezone.now().isoformat()
+    job_opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    rcm = job_opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        env["OIAT_REVIEW_CREATE_MISSING_JSON"] = json.dumps(rcm, separators=(",", ":"))
     # Prefer explicit env override; otherwise fall back to Django settings.
     if not env.get("OIAT_PORTAL_BASE_URL"):
         base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or "").strip().rstrip("/")
