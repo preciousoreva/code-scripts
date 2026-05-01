@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone as dt_timezone
 
 from django.contrib.auth import get_user_model
@@ -7,6 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
+from apps.epos_qbo.services.inventory_review_actions import RETRY_INTENT_CATALOG, RETRY_INTENT_QUANTITY
 
 
 class RunJobFriendlyIdTests(TestCase):
@@ -233,3 +235,82 @@ class RunsAndRunDetailRenderingTests(TestCase):
         job = RunJob.objects.create(scope=RunJob.SCOPE_SINGLE, company_key="company_a", status=RunJob.STATUS_SUCCEEDED)
         html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
         self.assertIn("Company: ACME LTD.", html)
+
+    def test_run_detail_without_review_retry_does_not_show_inventory_review_retry_card(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            inventory_options_json={"product_filter": "SOME PRODUCT"},
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertNotIn("Inventory Review Retry", html)
+
+    def test_run_detail_review_retry_shows_catalog_cleanup_metadata(self):
+        affected = [f"CHEESE ITEM {i:02d}" for i in range(12)]
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_QUEUED,
+            inventory_options_json={
+                "base_names": affected,
+                "max_catalog_fixes": 12,
+                "max_quantity_adjustments": 0,
+                "review_retry": {
+                    "intent": RETRY_INTENT_CATALOG,
+                    "source_artifact_id": 42,
+                    "source_final_audit": "/data/reports/inventory_pipeline/2026-04-29/final_audit_company_a.csv",
+                    "affected_base_names": affected,
+                    "row_count": 12,
+                },
+            },
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Inventory Review Retry", html)
+        self.assertIn("Catalog cleanup retry", html)
+        self.assertIn("This run was queued from the Inventory Review page", html)
+        self.assertIn("Selected base names only", html)
+        self.assertIn("final_audit_company_a.csv", html)
+        self.assertIn("CHEESE ITEM 00", html)
+        self.assertIn("and 2 more", html)
+        self.assertIn("Catalog fixes: 12", html)
+        self.assertIn("Quantity adjustments: 0", html)
+        self.assertRegex(
+            html,
+            re.compile(
+                r"Affected items</dt>\s*<dd class=\"font-medium text-slate-900 dark:text-slate-100\">12</dd>"
+            ),
+        )
+
+    def test_run_detail_review_retry_shows_quantity_adjustment_metadata(self):
+        affected = ["WIDGET A", "WIDGET B"]
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_QUEUED,
+            inventory_options_json={
+                "base_names": affected,
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 3,
+                "review_retry": {
+                    "intent": RETRY_INTENT_QUANTITY,
+                    "source_artifact_id": 7,
+                    "source_final_audit": "/tmp/other_final.csv",
+                    "affected_base_names": affected,
+                    "row_count": 2,
+                },
+            },
+        )
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+        self.assertIn("Quantity adjustment retry", html)
+        self.assertIn("other_final.csv", html)
+        self.assertIn("WIDGET A", html)
+        self.assertIn("Catalog fixes: 0", html)
+        self.assertIn("Quantity adjustments: 3", html)
+        self.assertIn("WIDGET B", html)
+        self.assertRegex(
+            html,
+            re.compile(
+                r"Affected items</dt>\s*<dd class=\"font-medium text-slate-900 dark:text-slate-100\">2</dd>"
+            ),
+        )

@@ -56,6 +56,8 @@ from .services.inventory_categories import load_inventory_categories_by_company
 from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
 from .services.inventory_review_actions import (
     REASON_GROUP_MISSING,
+    RETRY_INTENT_CATALOG,
+    RETRY_INTENT_QUANTITY,
     build_missing_item_creation_preview,
     get_catalog_cleanup_rows,
     get_quantity_adjustment_rows,
@@ -2657,6 +2659,7 @@ def run_detail(request, job_id):
         "exit_code_reference": EXIT_CODE_REFERENCE,
         "run_attention_message": _run_attention_message(job, artifacts_list),
         "run_upload_summary_message": run_upload_summary_message,
+        "review_retry_context": _run_detail_review_retry_context(job),
     }
     context.update(_nav_context())
     context.update(
@@ -3017,6 +3020,60 @@ def _run_detail_upload_summary_message(artifacts_list: list[RunArtifact]) -> str
     if total_uploaded == 0 and total_skipped > 0:
         return RUN_DETAIL_ALL_SKIPPED_MESSAGE.format(skipped=total_skipped)
     return None
+
+
+REVIEW_RETRY_INTENT_LABELS = {
+    RETRY_INTENT_CATALOG: "Catalog cleanup retry",
+    RETRY_INTENT_QUANTITY: "Quantity adjustment retry",
+}
+
+
+def _run_detail_review_retry_context(job: RunJob) -> dict[str, object] | None:
+    """Build template context for Inventory Review retry runs; None if not a review retry."""
+    opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    review_retry = opts.get("review_retry")
+    if not isinstance(review_retry, dict) or not review_retry:
+        return None
+    intent = str(review_retry.get("intent") or "").strip()
+    intent_label = REVIEW_RETRY_INTENT_LABELS.get(intent, intent.replace("_", " ").strip() or "Inventory review retry")
+    raw_audit = str(review_retry.get("source_final_audit") or "").strip()
+    source_final_audit_name = Path(raw_audit).name if raw_audit else ""
+    affected_raw = review_retry.get("affected_base_names")
+    if not isinstance(affected_raw, list):
+        affected_raw = opts.get("base_names") if isinstance(opts.get("base_names"), list) else []
+    affected_base_names = [str(x).strip() for x in affected_raw if str(x).strip()]
+    preview_limit = 10
+    preview_base_names = affected_base_names[:preview_limit]
+    has_more_base_names = len(affected_base_names) > preview_limit
+    more_base_names_count = max(0, len(affected_base_names) - preview_limit)
+    try:
+        affected_count = int(review_retry.get("row_count"))
+    except (TypeError, ValueError):
+        affected_count = len(affected_base_names)
+    try:
+        max_catalog_fixes = int(opts.get("max_catalog_fixes", 0))
+    except (TypeError, ValueError):
+        max_catalog_fixes = 0
+    try:
+        max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
+    except (TypeError, ValueError):
+        max_quantity_adjustments = 0
+    return {
+        "is_review_retry": True,
+        "intent": intent,
+        "intent_label": intent_label,
+        "source_artifact_id": review_retry.get("source_artifact_id"),
+        "source_final_audit": raw_audit,
+        "source_final_audit_name": source_final_audit_name or "—",
+        "affected_count": affected_count,
+        "affected_base_names": affected_base_names,
+        "preview_base_names": preview_base_names,
+        "has_more_base_names": has_more_base_names,
+        "more_base_names_count": more_base_names_count,
+        "max_catalog_fixes": max_catalog_fixes,
+        "max_quantity_adjustments": max_quantity_adjustments,
+        "scope_label": "Selected base names only",
+    }
 
 
 def _artifact_report_path_value(artifact: RunArtifact, report_key: str) -> str:

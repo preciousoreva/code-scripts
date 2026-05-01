@@ -13,6 +13,51 @@
         <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">Internal ID: {{ job.id }}</p>
     </div>
 
+    {% if review_retry_context %}
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm space-y-4">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory Review Retry</h2>
+        <p class="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">This run was queued from the Inventory Review page and is scoped to the listed base names.</p>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ review_retry_context.intent_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Affected items</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ review_retry_context.affected_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ review_retry_context.scope_label }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Source final audit</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100 break-all">{{ review_retry_context.source_final_audit_name }}</dd>
+            </div>
+        </dl>
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-1">Limits</p>
+            <ul class="list-disc list-inside text-slate-900 dark:text-slate-100 space-y-0.5">
+                <li>Catalog fixes: {{ review_retry_context.max_catalog_fixes }}</li>
+                <li>Quantity adjustments: {{ review_retry_context.max_quantity_adjustments }}</li>
+            </ul>
+        </div>
+        {% if review_retry_context.preview_base_names %}
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-2">Affected base names</p>
+            <ul class="border border-slate-200 dark:border-slate-600 rounded-lg divide-y divide-slate-100 dark:divide-slate-700 bg-slate-50/50 dark:bg-slate-900/30">
+                {% for name in review_retry_context.preview_base_names %}
+                <li class="px-3 py-1.5 text-slate-900 dark:text-slate-100">{{ name }}</li>
+                {% endfor %}
+            </ul>
+            {% if review_retry_context.has_more_base_names %}
+            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">and {{ review_retry_context.more_base_names_count }} more</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
     <section
         class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
         <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>
