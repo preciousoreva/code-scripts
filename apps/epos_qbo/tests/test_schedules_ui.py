@@ -228,17 +228,13 @@ class SchedulesUiTests(TestCase):
         self.assertContains(response, "Recent Schedule Activity")
         self.assertNotContains(response, "Recent Scheduled Events")
         html = response.content.decode("utf-8")
-        self.assertEqual(html.count('<th class="text-left px-4 py-3 font-medium">Workflow</th>'), 1)
-        self.assertIn(">Enabled</td>", html)
-        self.assertIn(">Disabled</td>", html)
-        self.assertNotIn("Active Schedules", html)
-        self.assertNotIn("Disabled Schedules", html)
-        self.assertNotIn("Completed One-time Runs", html)
+        self.assertEqual(html.count('<th class="text-left px-4 py-3 font-medium">Workflow</th>'), 2)
+        self.assertIn("Active Schedules", html)
+        self.assertIn("Inactive Schedules", html)
+        self.assertIn("Schedules currently enabled and eligible to run.", html)
+        self.assertIn("Disabled, completed, or system-managed schedules.", html)
         self.assertNotIn("bg-slate-300", html)
         self.assertNotIn("bg-gray-300", html)
-        section_header_class = 'colspan="5" class="bg-slate-50'
-        self.assertIn(section_header_class, html)
-        self.assertEqual(html.count(section_header_class), 2)
 
     def test_schedules_page_displays_one_time_completed_schedule(self):
         completed_at = timezone.make_aware(datetime(2026, 2, 20, 18, 5, 0), dt_timezone.utc)
@@ -269,7 +265,6 @@ class SchedulesUiTests(TestCase):
         self.assertContains(response, "Ran once")
         self.assertContains(response, "Disabled automatically")
         self.assertNotContains(response, "Completed One-time Runs")
-        self.assertContains(response, "Disabled</td>")
         self.assertContains(response, "—")
 
     def test_recurring_next_run_displays_in_schedule_timezone(self):
@@ -413,6 +408,79 @@ class SchedulesUiTests(TestCase):
         response = self.client.post(reverse("epos_qbo:schedule-run-now", args=[schedule.id]))
         self.assertEqual(response.status_code, 302)
         self.assertEqual(RunJob.objects.filter(scheduled_by=schedule).count(), 1)
+
+    def test_active_normal_schedule_shows_run_now(self):
+        schedule = RunSchedule.objects.create(
+            name="Daily Sales Sync",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            next_fire_at=self.fixed_now + timedelta(hours=1),
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, reverse("epos_qbo:schedule-run-now", args=[schedule.id]))
+        self.assertContains(response, ">Run Now<")
+
+    def test_disabled_normal_schedule_hides_run_now_but_keeps_enable(self):
+        schedule = RunSchedule.objects.create(
+            name="Daily Sales Sync",
+            enabled=False,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="0 19 * * *",
+            timezone_name="Africa/Lagos",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, reverse("epos_qbo:schedule-run-now", args=[schedule.id]))
+        self.assertContains(response, reverse("epos_qbo:schedule-toggle", args=[schedule.id]))
+        html = response.content.decode("utf-8")
+        self.assertIn("Enable", html)
+
+    def test_system_managed_schedule_hides_actions_menu_and_run_now(self):
+        schedule = RunSchedule.objects.create(
+            name="System Fallback Schedule",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="*/5 * * * *",
+            timezone_name="UTC",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            is_system_managed=True,
+        )
+
+        response = self.client.get(reverse("epos_qbo:schedules"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, reverse("epos_qbo:schedule-run-now", args=[schedule.id]))
+        html = response.content.decode("utf-8")
+        self.assertIn(">—</span>", html)
+
+    def test_run_now_rejects_system_managed_schedule(self):
+        schedule = RunSchedule.objects.create(
+            name="System schedule",
+            enabled=True,
+            scope=RunJob.SCOPE_ALL,
+            cron_expr="*/5 * * * *",
+            timezone_name="UTC",
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+            is_system_managed=True,
+        )
+
+        response = self.client.post(
+            reverse("epos_qbo:schedule-run-now", args=[schedule.id]),
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "System-managed schedules cannot be run manually.")
+        self.assertEqual(RunJob.objects.filter(scheduled_by=schedule).count(), 0)
 
     def test_system_schedule_cannot_be_deleted(self):
         schedule = RunSchedule.objects.create(
