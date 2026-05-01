@@ -115,7 +115,7 @@
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-6">
             {% for reason in review.reason_counts %}
-            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/40 p-3">
+            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/50 p-3">
                 <p class="text-xs text-slate-500 dark:text-slate-400">{{ reason.label }}</p>
                 <p class="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ reason.count }}</p>
             </div>
@@ -161,7 +161,7 @@
                 </thead>
                 <tbody class="divide-y divide-slate-100 dark:divide-slate-700" data-review-table>
                     {% for row in review.rows %}
-                    <tr data-review-row data-search="{{ row.search_text }}" data-reason="{{ row.reason_group_slug }}" class="hover:bg-slate-50 dark:hover:bg-slate-700/40">
+                    <tr data-review-row data-search="{{ row.search_text }}" data-reason="{{ row.reason_group_slug }}" class="hover:bg-slate-50 dark:hover:bg-slate-700/50">
                         <td class="px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56">{{ row.product }}</td>
                         <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-52">
                             <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">{{ row.reason_group }}</span>
