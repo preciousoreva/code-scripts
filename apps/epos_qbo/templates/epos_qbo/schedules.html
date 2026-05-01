@@ -331,7 +331,7 @@
                                             <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ row.status_subtext }}</div>
                                             {% endif %}
                                             {% if schedule.is_system_managed %}
-                                            <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
+                                            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap leading-none bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/30" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
                                             {% endif %}
                                         </div>
                                     </td>
@@ -526,8 +526,8 @@
 
             {% for section in schedule_sections %}
             {% if section.title == "Disabled" %}
-            <section class="rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50/60 dark:bg-slate-900/10 overflow-hidden">
-                <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-600 bg-slate-50/80 dark:bg-slate-800/30">
+            <section class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 overflow-hidden">
+                <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60">
                     <div class="flex items-start justify-between gap-3">
                         <div>
                             <div class="flex items-center gap-2">
@@ -549,7 +549,7 @@
                             <col class="w-[18%]">
                             <col class="w-[10%]">
                         </colgroup>
-                        <thead class="bg-slate-50 dark:bg-slate-700/30 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-600">
+                        <thead class="bg-slate-50 dark:bg-slate-800/50 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-700">
                             <tr>
                                 <th class="text-left px-4 py-3 font-medium">Workflow</th>
                                 <th class="text-left px-4 py-3 font-medium">Status</th>
@@ -562,7 +562,7 @@
                             {% if section.rows %}
                                 {% for row in section.rows %}
                                 {% with schedule=row.schedule %}
-                                <tr class="border-b border-slate-200/60 dark:border-slate-700/60 bg-white/30 dark:bg-slate-900/10">
+                                <tr class="border-b border-slate-200/60 dark:border-slate-700 bg-slate-50/40 dark:bg-slate-800/20">
                                     <td class="px-4 py-3 align-top">
                                         <div class="font-medium text-slate-800 dark:text-slate-200 break-words">{{ row.display_name }}</div>
                                         <div class="text-xs font-normal leading-snug text-slate-500 dark:text-slate-400 mt-1 break-words">
@@ -585,7 +585,7 @@
                                             <div class="text-[11px] text-slate-500 dark:text-slate-400">{{ row.status_subtext }}</div>
                                             {% endif %}
                                             {% if schedule.is_system_managed %}
-                                            <span class="inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
+                                            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap leading-none bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/30" title="Controlled by fallback env: OIAT_SCHEDULER_ENABLE_ENV_FALLBACK, SCHEDULE_CRON, SCHEDULE_TZ">System-managed <iconify-icon icon="solar:info-circle-linear" width="12" class="opacity-80 shrink-0" aria-hidden="true"></iconify-icon></span>
                                             {% endif %}
                                         </div>
                                     </td>
