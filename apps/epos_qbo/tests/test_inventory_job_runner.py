@@ -92,6 +92,27 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("4", cmd)
 
+    def test_build_command_for_job_supports_base_name_scope_and_zero_caps(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["Pack Conflict", "BENSON & HEDGES CIGARETTES"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 2,
+            },
+        )
+        cmd = build_command_for_job(job)
+        flat = " ".join(cmd)
+        self.assertIn("code_scripts.inventory_pipeline", flat)
+        self.assertIn("--base-name", cmd)
+        self.assertIn("Pack Conflict", cmd)
+        self.assertIn("BENSON & HEDGES CIGARETTES", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("0", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("2", cmd)
+
     def test_default_inventory_schedule_builds_all_products_pipeline_command(self):
         schedule = RunSchedule.objects.create(
             name="Weekly Inventory Sync",

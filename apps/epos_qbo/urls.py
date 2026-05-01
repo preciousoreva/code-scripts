@@ -41,9 +41,19 @@ urlpatterns = [
         name="company_inventory_retry_catalog_cleanup",
     ),
     path(
+        "companies/<slug:company_key>/inventory/review/retry-catalog-cleanup/confirm/",
+        views.company_inventory_retry_catalog_cleanup_confirm,
+        name="company_inventory_retry_catalog_cleanup_confirm",
+    ),
+    path(
         "companies/<slug:company_key>/inventory/review/retry-quantity-adjustments/",
         views.company_inventory_retry_quantity_adjustments,
         name="company_inventory_retry_quantity_adjustments",
+    ),
+    path(
+        "companies/<slug:company_key>/inventory/review/retry-quantity-adjustments/confirm/",
+        views.company_inventory_retry_quantity_adjustments_confirm,
+        name="company_inventory_retry_quantity_adjustments_confirm",
     ),
     path(
         "companies/<slug:company_key>/inventory/review/missing-preview/",

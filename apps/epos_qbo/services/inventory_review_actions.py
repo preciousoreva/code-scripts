@@ -239,21 +239,36 @@ def _build_retry_inventory_options(
     """Build inventory_options_json for a review-triggered retry RunJob.
 
     We DON'T pass user-supplied product names through to the pipeline CLI as a
-    free-text filter — the inventory pipeline filter is a single substring
-    match, not a list, so a multi-product retry would be ambiguous. Instead we
-    queue a full pipeline run and stamp retry context into ``review_retry`` so
-    the run can be attributed back to the user action that started it.
+    free-text filter. Instead, we derive exact base names from the trusted
+    final audit and emit them via ``base_names`` so the inventory pipeline can
+    scope work without relying on ambiguous substring matching.
     """
 
-    return {
+    affected_base_names = _affected_base_names(rows)
+    options: dict[str, Any] = {
+        # Scoped execution inputs for the unified inventory pipeline runner.
+        # These are derived from the trusted latest final-audit artifact (not user input).
+        "base_names": affected_base_names,
+        # Attribution/UX metadata (does not drive selection).
         "review_retry": {
             "intent": str(intent),
             "source_artifact_id": int(artifact.id) if artifact.id else None,
             "source_final_audit": str(artifact.source_path or ""),
-            "affected_base_names": _affected_base_names(rows),
+            "affected_base_names": affected_base_names,
             "row_count": int(len(rows)),
-        }
+        },
     }
+
+    # Phase caps: ensure the queued retry doesn't accidentally run unrelated write phases.
+    # Job runner supports 0 as "disable phase".
+    if intent == RETRY_INTENT_CATALOG:
+        options["max_catalog_fixes"] = int(len(rows))
+        options["max_quantity_adjustments"] = 0
+    elif intent == RETRY_INTENT_QUANTITY:
+        options["max_catalog_fixes"] = 0
+        options["max_quantity_adjustments"] = int(len(rows))
+
+    return options
 
 
 def queue_retry_run_job(

@@ -104,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qbo-export-path", default=None)
     parser.add_argument("--category", dest="categories", action="append", default=[])
     parser.add_argument("--product", dest="product_filter", default=None)
+    parser.add_argument(
+        "--base-name",
+        dest="base_names",
+        action="append",
+        default=[],
+        help="Restrict pipeline to exact normalized base names (repeatable).",
+    )
     parser.add_argument("--max-catalog-fixes", type=int, default=None)
     parser.add_argument("--max-quantity-adjustments", type=int, default=None)
     parser.add_argument("--max-qty-delta", type=float, default=None)
@@ -201,14 +208,16 @@ def _run_audit_phase(
     phase: str,
     categories: list[str],
     product_filter: str | None,
+    base_names: list[str] | None = None,
     quantity_apply_stats: dict[str, Any] | None = None,
 ) -> AuditResult:
     epos = load_epos_stock_snapshot(
         str(stock_path),
         product_filter=product_filter,
         categories=categories,
+        base_names=base_names,
     )
-    qbo = load_qbo_inventory_snapshot(str(qbo_path))
+    qbo = load_qbo_inventory_snapshot(str(qbo_path), base_names=base_names)
     report = build_audit_report(epos, qbo, tolerance=0.0)
     out_path = _audit_output_path(cfg.company_key, phase)
     _write_audit_csv(out_path, report)
@@ -1211,6 +1220,8 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     max_quantity_adjustments = _optional_non_negative_int(args.max_quantity_adjustments)
     categories = [str(c).strip() for c in list(args.categories or []) if str(c).strip()]
     product_filter = (args.product_filter or "").strip() or None
+    base_names = [str(v).strip() for v in list(getattr(args, "base_names", []) or []) if str(v).strip()]
+    base_names = base_names or None
     txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
     child_reports: dict[str, str] = {}
 
@@ -1256,6 +1267,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         phase="initial",
         categories=categories,
         product_filter=product_filter,
+        base_names=base_names,
     )
     child_reports["initial_audit"] = str(initial.report_path)
 
@@ -1290,6 +1302,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         phase="post_catalog",
         categories=categories,
         product_filter=product_filter,
+        base_names=base_names,
     )
     child_reports["post_catalog_audit"] = str(post_catalog.report_path)
 
@@ -1314,6 +1327,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             phase="final",
             categories=categories,
             product_filter=product_filter,
+            base_names=base_names,
             quantity_apply_stats={
                 "mode": "apply",
                 "posted": int(quantity_result["posted"]),

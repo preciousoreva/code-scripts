@@ -230,10 +230,80 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Resolve Review Items", html)
-        self.assertIn("Queue catalog cleanup retry (1)", html)
-        self.assertIn("Queue quantity adjustment retry (1)", html)
+        self.assertIn("Review and queue catalog cleanup (1)", html)
+        self.assertIn("Review and queue quantity adjustments (1)", html)
         self.assertIn("Preview item creation (3)", html)
         self.assertIn("Retry actions queue real inventory pipeline jobs.", html)
+        self.assertIn(
+            reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
+                kwargs={"company_key": "company_a"},
+            ),
+            html,
+        )
+        self.assertIn(
+            reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
+                kwargs={"company_key": "company_a"},
+            ),
+            html,
+        )
+
+    def test_catalog_cleanup_confirm_page_renders_preview_and_confirm_post(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            response = self.client.get(
+                reverse(
+                    "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
+                    kwargs={"company_key": "company_a"},
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Confirm Catalog Cleanup Retry", html)
+        self.assertIn("This will queue a real inventory pipeline job.", html)
+        self.assertIn("Affected items", html)
+        self.assertIn("Pack Conflict", html)
+        self.assertIn(
+            reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup",
+                kwargs={"company_key": "company_a"},
+            ),
+            html,
+        )
+        self.assertIn("Confirm and queue catalog cleanup", html)
+
+    def test_quantity_adjustments_confirm_page_renders_preview_and_confirm_post(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            response = self.client.get(
+                reverse(
+                    "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
+                    kwargs={"company_key": "company_a"},
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Confirm Quantity Adjustment Retry", html)
+        self.assertIn("This will queue a real inventory pipeline job.", html)
+        self.assertIn("Affected items", html)
+        self.assertIn("BENSON &amp; HEDGES CIGARETTES", html)
+        self.assertIn(
+            reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments",
+                kwargs={"company_key": "company_a"},
+            ),
+            html,
+        )
+        self.assertIn("Confirm and queue quantity adjustments", html)
 
     def test_retry_catalog_cleanup_rejects_inventory_disabled_company(self):
         self._login()
@@ -286,6 +356,10 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(review_retry.get("intent"), actions.RETRY_INTENT_CATALOG)
         self.assertEqual(review_retry.get("row_count"), 1)
         self.assertIn("Pack Conflict", review_retry.get("affected_base_names", []))
+        opts = retry_job.inventory_options_json or {}
+        self.assertIn("Pack Conflict", opts.get("base_names", []))
+        self.assertEqual(opts.get("max_catalog_fixes"), 1)
+        self.assertEqual(opts.get("max_quantity_adjustments"), 0)
 
     def test_retry_quantity_adjustments_uses_only_trusted_audit_rows(self):
         """The view must ignore POST product names and only use parsed audit rows."""
@@ -319,6 +393,10 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertIn("BENSON & HEDGES CIGARETTES", affected)
         self.assertNotIn("ATTACKER PRODUCT", affected)
         self.assertNotIn("MALICIOUS", affected)
+        opts = retry_job.inventory_options_json or {}
+        self.assertIn("BENSON & HEDGES CIGARETTES", opts.get("base_names", []))
+        self.assertEqual(opts.get("max_catalog_fixes"), 0)
+        self.assertEqual(opts.get("max_quantity_adjustments"), 1)
 
     def test_missing_preview_renders_and_writes_no_jobs(self):
         self._login()

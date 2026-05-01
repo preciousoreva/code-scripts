@@ -694,6 +694,7 @@ def load_epos_stock_snapshot(
     qty_col: str = _DEFAULT_STOCK_QTY_COL,
     product_filter: Optional[str] = None,
     categories: Optional[list[str]] = None,
+    base_names: Optional[list[str]] = None,
     category_col: str = _DEFAULT_STOCK_CATEGORY_COL,
 ) -> pd.DataFrame:
     df = pd.read_csv(stock_csv_path)
@@ -781,6 +782,11 @@ def load_epos_stock_snapshot(
     if product_filter:
         out = out[literal_product_filter_mask(out, product_filter, raw_col="raw_name")].copy()
 
+    if base_names:
+        requested = {_normalize_name_key(_collapse_spaces(v)) for v in base_names if str(v).strip()}
+        if requested:
+            out = out[out["base_name_norm"].isin(requested)].copy()
+
     # Group to normalized base_name (case-insensitive matching), while
     # preserving original display casing for reports.
     grouped = (
@@ -803,7 +809,7 @@ def load_epos_stock_snapshot(
     return grouped
 
 
-def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
+def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[str]] = None) -> pd.DataFrame:
     df = pd.read_csv(qbo_csv_path)
     if "Name" not in df.columns:
         raise ValueError(f"Missing column 'Name' in QBO export CSV. Present: {list(df.columns)}")
@@ -846,6 +852,11 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str) -> pd.DataFrame:
     inv["qbo_has_pack"] = had_pack
     inv["qbo_qty_on_hand"] = inv.get("QtyOnHand", 0).map(_safe_float)
     inv["qbo_is_base_item"] = [not v for v in had_pack]
+
+    if base_names:
+        requested = {_normalize_name_key(_collapse_spaces(v)) for v in base_names if str(v).strip()}
+        if requested:
+            inv = inv[inv["base_name_norm"].isin(requested)].copy()
 
     # Group by base_name to detect ambiguity; keep ids list for base-names
     def _join_ids(series: Iterable[Any]) -> str:

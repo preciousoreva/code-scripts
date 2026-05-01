@@ -105,6 +105,14 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
 
     if product_filter:
         cmd.extend(["--product", product_filter])
+    base_names = opts.get("base_names") or []
+    if isinstance(base_names, str):
+        base_names = [base_names]
+    if isinstance(base_names, list):
+        for base_name in base_names:
+            value = str(base_name or "").strip()
+            if value:
+                cmd.extend(["--base-name", value])
     categories = opts.get("categories") or []
     if isinstance(categories, str):
         categories = [categories]
@@ -145,9 +153,9 @@ def _positive_inventory_limit(value: object, option_name: str) -> int | None:
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"inventory_pipeline requires positive {option_name}") from exc
-    if parsed < 1:
-        raise ValueError(f"inventory_pipeline requires positive {option_name}")
+        raise ValueError(f"inventory_pipeline requires non-negative {option_name}") from exc
+    if parsed < 0:
+        raise ValueError(f"inventory_pipeline requires non-negative {option_name}")
     return parsed
 
 

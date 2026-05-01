@@ -3959,7 +3959,9 @@ def company_inventory_review(request, company_key):
         "quantity_adjustment_count": 0,
         "missing_count": 0,
         "retry_catalog_cleanup_url": "",
+        "retry_catalog_cleanup_confirm_url": "",
         "retry_quantity_adjustments_url": "",
+        "retry_quantity_adjustments_confirm_url": "",
         "missing_preview_url": "",
     }
     if inventory_enabled and rows:
@@ -3972,8 +3974,16 @@ def company_inventory_review(request, company_key):
                 "epos_qbo:company_inventory_retry_catalog_cleanup",
                 kwargs={"company_key": company.company_key},
             ),
+            "retry_catalog_cleanup_confirm_url": reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
+                kwargs={"company_key": company.company_key},
+            ),
             "retry_quantity_adjustments_url": reverse(
                 "epos_qbo:company_inventory_retry_quantity_adjustments",
+                kwargs={"company_key": company.company_key},
+            ),
+            "retry_quantity_adjustments_confirm_url": reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
                 kwargs={"company_key": company.company_key},
             ),
             "missing_preview_url": reverse(
@@ -4056,6 +4066,154 @@ def _inventory_review_action_context(request, company_key: str):
         messages.error(request, "The final audit CSV could not be parsed.")
         return company, None, redirect(review_url)
     return company, context, None
+
+
+def _inventory_retry_confirm_context(
+    *,
+    company,
+    context,
+    action_title: str,
+    action_label: str,
+    warning_text: str,
+    rows: list[dict],
+    preview_limit: int = 25,
+) -> dict:
+    run = context.artifact.run_job if context.artifact and context.artifact.run_job_id else None
+    run_label = run.friendly_id if run else ""
+    return {
+        "company": company,
+        "action_title": action_title,
+        "action_label": action_label,
+        "warning_text": warning_text,
+        "row_count": len(rows),
+        "rows": rows,
+        "preview_rows": rows[:preview_limit],
+        "preview_limit": int(preview_limit),
+        "final_audit_filename": context.final_audit_path.name,
+        "source_run_label": run_label,
+    }
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_retry_catalog_cleanup_confirm(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    rows = get_catalog_cleanup_rows(context.rows)
+    if not rows:
+        messages.info(request, "No duplicate/base conflicts found in the latest final audit.")
+        return redirect(review_url)
+
+    template_context = _inventory_retry_confirm_context(
+        company=company,
+        context=context,
+        action_title="Confirm Catalog Cleanup Retry",
+        action_label="Catalog cleanup retry",
+        warning_text=(
+            "This will queue a real inventory pipeline job. When the job runs, it may update "
+            "QuickBooks inventory by consolidating/inactivating duplicate or pack-variant items "
+            "and adjusting base quantities. No changes are made until you confirm."
+        ),
+        rows=rows,
+    )
+    template_context.update(
+        {
+            "review_url": review_url,
+            "confirm_post_url": reverse(
+                "epos_qbo:company_inventory_retry_catalog_cleanup",
+                kwargs={"company_key": company.company_key},
+            ),
+            "confirm_button_text": "Confirm and queue catalog cleanup",
+        }
+    )
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Confirm retry", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_retry_confirm.html", template_context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_retry_quantity_adjustments_confirm(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    rows = get_quantity_adjustment_rows(context.rows)
+    if not rows:
+        messages.info(request, "No exact-match quantity adjustments needed in the latest final audit.")
+        return redirect(review_url)
+
+    template_context = _inventory_retry_confirm_context(
+        company=company,
+        context=context,
+        action_title="Confirm Quantity Adjustment Retry",
+        action_label="Quantity adjustment retry",
+        warning_text=(
+            "This will queue a real inventory pipeline job. When the job runs, it may post "
+            "QuickBooks InventoryAdjustment entries so QBO QtyOnHand matches EPOS. EPOS is the "
+            "source of truth. No changes are made until you confirm."
+        ),
+        rows=rows,
+    )
+    template_context.update(
+        {
+            "review_url": review_url,
+            "confirm_post_url": reverse(
+                "epos_qbo:company_inventory_retry_quantity_adjustments",
+                kwargs={"company_key": company.company_key},
+            ),
+            "confirm_button_text": "Confirm and queue quantity adjustments",
+        }
+    )
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Confirm retry", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_retry_confirm.html", template_context)
 
 
 @login_required
