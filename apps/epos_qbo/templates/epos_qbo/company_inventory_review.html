@@ -115,14 +115,14 @@
 
     {% if review.reason_counts %}
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
-        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+        <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700">
             <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Reason Counts</h2>
         </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 p-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3 p-5">
             {% for reason in review.reason_counts %}
-            <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 px-4 py-3 flex items-center justify-between gap-4">
-                <p class="text-sm text-slate-600 dark:text-slate-300">{{ reason.label }}</p>
-                <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">{{ reason.count }}</p>
+            <div class="rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900/30 p-3">
+                <p class="text-xs text-slate-500 dark:text-slate-400">{{ reason.label }}</p>
+                <p class="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ reason.count }}</p>
             </div>
             {% endfor %}
         </div>
@@ -131,8 +131,8 @@
 
     {% if review.db_items or review.rows %}
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-        <div class="px-6 py-5 border-b border-slate-200 dark:border-slate-700">
-            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
                 <div>
                     <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Items Needing Review</h2>
                     {% with shown_count=review.db_items|length %}
@@ -141,7 +141,7 @@
                 </div>
                 <div class="flex flex-col sm:flex-row gap-2">
                     <label for="inventory-review-search" class="sr-only">Search product</label>
-                    <input id="inventory-review-search" data-review-search type="text" placeholder="Search product..." class="h-9 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500">
+                    <input id="inventory-review-search" data-review-search type="text" placeholder="Search product..." class="h-9 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500">
                     <label for="inventory-review-reason" class="sr-only">Filter reason</label>
                     <select id="inventory-review-reason" data-review-reason class="h-9 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500">
                         <option value="">All reasons</option>
@@ -154,7 +154,7 @@
         </div>
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
-                <thead class="bg-slate-50 dark:bg-slate-900/60">
+                <thead class="bg-slate-50 dark:bg-slate-700/50">
                     <tr>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Product</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Reason / Status</th>
@@ -162,98 +162,92 @@
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">QBO Qty</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Delta</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Review Status</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Occurrences</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last Seen</th>
                         <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Suggested Next Step</th>
-                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Source / Run</th>
-                        <th class="px-4 py-3 text-right text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Action</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100 dark:divide-slate-700" data-review-table>
                     {% if review.db_items %}
                         {% for item in review.db_items %}
-                        <tr data-review-row data-search="{{ item.product_name|lower }} {{ item.reason|lower }} {{ item.category|lower }}" data-reason="{{ item.reason_group }}" class="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/40 align-top">
+                        <tr data-review-row data-search="{{ item.product_name|lower }} {{ item.reason|lower }} {{ item.category|lower }}" data-reason="{{ item.reason_group }}" class="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/40">
                             <td class="px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56">{{ item.product_name }}</td>
                             <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-60">
-                                <div class="flex flex-wrap items-center gap-1.5">
-                                    {% if item.reason_group == "missing_from_qbo" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Missing from QuickBooks</span>
-                                    {% elif item.reason_group == "duplicate_base_conflict" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Duplicate/base conflicts</span>
-                                    {% elif item.reason_group == "pack_variant_issue" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Pack/base variant issues</span>
-                                    {% elif item.reason_group == "needs_adjustment" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Needs adjustment</span>
-                                    {% else %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600">Other</span>
-                                    {% endif %}
-                                    {% if item.review_status == "acknowledged" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">Acknowledged</span>
-                                    {% elif item.review_status == "ignored" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400">Ignored</span>
-                                    {% elif item.review_status == "manually_resolved" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300">Manually resolved</span>
-                                    {% elif item.review_status == "resolved_by_rerun" %}
-                                    <span class="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300">Resolved by rerun</span>
-                                    {% endif %}
-                                </div>
+                                {% if item.reason_group == "missing_from_qbo" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Missing from QuickBooks</span>
+                                {% elif item.reason_group == "duplicate_base_conflict" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Duplicate/base conflicts</span>
+                                {% elif item.reason_group == "pack_variant_issue" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Pack/base variant issues</span>
+                                {% elif item.reason_group == "needs_adjustment" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Needs adjustment</span>
+                                {% else %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600">Other</span>
+                                {% endif %}
                                 <p class="mt-1 text-xs text-slate-500 dark:text-slate-400 break-words">{{ item.reason|default:"—" }}</p>
                             </td>
                             <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ item.epos_expected_qty|default:"—" }}</td>
                             <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ item.qbo_qty|default:"—" }}</td>
                             <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ item.delta|default:"—" }}</td>
                             <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ item.category|default:"—" }}</td>
-                            <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-72 leading-relaxed">{{ item.suggested_next_step|default:"—" }}</td>
+                            <td class="px-4 py-3 text-sm">
+                                {% if item.review_status == "open" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">Open</span>
+                                {% elif item.review_status == "acknowledged" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600">Acknowledged</span>
+                                {% elif item.review_status == "ignored" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600">Ignored</span>
+                                {% elif item.review_status == "manually_resolved" %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Manually resolved</span>
+                                {% else %}
+                                <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700">Resolved by rerun</span>
+                                {% endif %}
+                            </td>
+                            <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap">{{ item.occurrence_count }}</td>
                             <td class="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                <div>{{ item.last_seen_at|date:"Y-m-d H:i" }}</div>
                                 {% if item.run_job_id %}
                                 <a href="{% url 'epos_qbo:run-detail' item.run_job_id %}" class="text-blue-600 dark:text-blue-400 hover:underline font-medium">{{ item.last_seen_run_label|default:"Run" }}</a>
                                 {% elif item.last_seen_run_label %}
-                                <span class="text-slate-700 dark:text-slate-200 font-medium">{{ item.last_seen_run_label }}</span>
-                                {% else %}
-                                <span class="text-slate-400 dark:text-slate-500">—</span>
+                                <div class="text-slate-500 dark:text-slate-400">{{ item.last_seen_run_label }}</div>
                                 {% endif %}
-                                <p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
-                                    Seen {{ item.occurrence_count }}x
-                                    {% if item.last_seen_at %} · Last seen {{ item.last_seen_at|date:"Y-m-d H:i" }}{% endif %}
-                                </p>
                             </td>
-                            <td class="px-4 py-3 text-right whitespace-nowrap">
-                                <details class="relative inline-block text-left" data-review-actions>
-                                    <summary class="list-none cursor-pointer inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700/60 text-xs text-slate-600 dark:text-slate-300">
-                                        <iconify-icon icon="solar:menu-dots-bold" width="14"></iconify-icon>
-                                        <span>Action</span>
-                                    </summary>
-                                    <div class="absolute right-0 mt-1 w-44 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg z-10 py-1">
-                                        {% if item.review_status != "acknowledged" and item.review_status != "ignored" %}
-                                        <form method="post" action="{% url 'epos_qbo:inventory-review-item-acknowledge' company.company_key item.id %}">
-                                            {% csrf_token %}
-                                            <button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">Acknowledge</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if item.review_status != "ignored" %}
-                                        <form method="post" action="{% url 'epos_qbo:inventory-review-item-ignore' company.company_key item.id %}">
-                                            {% csrf_token %}
-                                            <button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">Ignore</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if item.review_status != "manually_resolved" %}
-                                        <form method="post" action="{% url 'epos_qbo:inventory-review-item-mark-resolved' company.company_key item.id %}">
-                                            {% csrf_token %}
-                                            <button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-900/30">Mark resolved</button>
-                                        </form>
-                                        {% endif %}
-                                        {% if item.review_status != "open" %}
-                                        <form method="post" action="{% url 'epos_qbo:inventory-review-item-reopen' company.company_key item.id %}">
-                                            {% csrf_token %}
-                                            <button type="submit" class="block w-full text-left px-3 py-1.5 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800">Reopen</button>
-                                        </form>
-                                        {% endif %}
-                                    </div>
-                                </details>
+                            <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-72">{{ item.suggested_next_step|default:"—" }}</td>
+                            <td class="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                                <div class="flex flex-wrap gap-2">
+                                    {% if item.review_status != "acknowledged" and item.review_status != "ignored" %}
+                                    <form method="post" action="{% url 'epos_qbo:inventory-review-item-acknowledge' company.company_key item.id %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="inline-flex items-center px-2 py-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200">Acknowledge</button>
+                                    </form>
+                                    {% endif %}
+                                    {% if item.review_status != "ignored" %}
+                                    <form method="post" action="{% url 'epos_qbo:inventory-review-item-ignore' company.company_key item.id %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="inline-flex items-center px-2 py-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200">Ignore</button>
+                                    </form>
+                                    {% endif %}
+                                    {% if item.review_status != "manually_resolved" %}
+                                    <form method="post" action="{% url 'epos_qbo:inventory-review-item-mark-resolved' company.company_key item.id %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="inline-flex items-center px-2 py-1 rounded-md border border-emerald-200 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-700 dark:text-emerald-200">Mark resolved</button>
+                                    </form>
+                                    {% endif %}
+                                    {% if item.review_status != "open" %}
+                                    <form method="post" action="{% url 'epos_qbo:inventory-review-item-reopen' company.company_key item.id %}">
+                                        {% csrf_token %}
+                                        <button type="submit" class="inline-flex items-center px-2 py-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200">Reopen</button>
+                                    </form>
+                                    {% endif %}
+                                </div>
                             </td>
                         </tr>
                         {% endfor %}
                     {% else %}
                     {% for row in review.rows %}
-                    <tr data-review-row data-search="{{ row.search_text }}" data-reason="{{ row.reason_group_slug }}" class="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/40 align-top">
+                    <tr data-review-row data-search="{{ row.search_text }}" data-reason="{{ row.reason_group_slug }}" class="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/40">
                         <td class="px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56">{{ row.product }}</td>
                         <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-52">
                             <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-100 dark:border-amber-800">{{ row.reason_group }}</span>
@@ -263,20 +257,22 @@
                         <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.qbo_qty|default:"—" }}</td>
                         <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.delta|default:"—" }}</td>
                         <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">{{ row.category|default:"—" }}</td>
-                        <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-72 leading-relaxed">{{ row.suggested_next_step }}</td>
-                        <td class="px-4 py-3 text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">—</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">—</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap">—</td>
+                        <td class="px-4 py-3 text-sm text-slate-700 dark:text-slate-300 min-w-72">{{ row.suggested_next_step }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap">
                             {% if review.run_detail_url %}
                             <a href="{{ review.run_detail_url }}" class="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium">{{ review.run_label }}</a>
                             {% else %}
-                            <span class="text-slate-700 dark:text-slate-200 font-medium">{{ review.run_label|default:"—" }}</span>
+                            {{ review.run_label|default:"—" }}
                             {% endif %}
                         </td>
-                        <td class="px-4 py-3 text-right text-xs text-slate-400 dark:text-slate-500">—</td>
                     </tr>
                     {% endfor %}
                     {% endif %}
                     <tr data-review-empty class="hidden">
-                        <td colspan="9" class="px-4 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No inventory review rows match the current filters.</td>
+                        <td colspan="11" class="px-4 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No inventory review rows match the current filters.</td>
                     </tr>
                 </tbody>
             </table>
@@ -313,13 +309,6 @@
     }
     if (search) search.addEventListener('input', applyFilters);
     if (reason) reason.addEventListener('change', applyFilters);
-
-    // Close any open action dropdown when clicking outside.
-    document.addEventListener('click', function (event) {
-        root.querySelectorAll('details[data-review-actions][open]').forEach(function (el) {
-            if (!el.contains(event.target)) el.removeAttribute('open');
-        });
-    });
 })();
 </script>
 {% endblock %}
