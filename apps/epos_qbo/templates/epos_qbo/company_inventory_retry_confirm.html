@@ -102,17 +102,20 @@
         </div>
     </div>
 
-    <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-        <a href="{{ review_url }}" class="btn btn-secondary">
-            Cancel
-        </a>
-        <form method="post" action="{{ confirm_post_url }}">
-            {% csrf_token %}
-            <button type="submit" class="btn btn-primary">
-                <iconify-icon icon="solar:check-circle-linear" width="16"></iconify-icon>
-                {{ confirm_button_text }}
-            </button>
-        </form>
+    <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
+        <p class="text-sm text-slate-700 dark:text-slate-200 mb-4">This is the final step — submitting below queues the inventory job immediately (same as confirming a run).</p>
+        <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <a href="{{ review_url }}" class="btn btn-secondary whitespace-nowrap justify-center sm:justify-start">
+                Cancel
+            </a>
+            <form method="post" action="{{ confirm_post_url }}" class="w-full sm:w-auto">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-primary w-full sm:w-auto justify-center whitespace-nowrap">
+                    <iconify-icon icon="solar:check-circle-linear" width="16"></iconify-icon>
+                    {{ confirm_button_text }}
+                </button>
+            </form>
+        </div>
     </div>
 </div>
 {% endblock %}

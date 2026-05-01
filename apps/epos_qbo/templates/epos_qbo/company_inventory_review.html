@@ -121,11 +121,11 @@
                     <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Duplicate/base conflicts</p>
                     <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.catalog_cleanup_count }}</p>
                 </div>
-                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Queues an inventory pipeline retry for these latest-audit conflict rows. This may update QuickBooks inventory when the job runs.</p>
-                <div class="pt-3">
-                    <a href="{{ review.actions.retry_catalog_cleanup_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10">
+                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Base items and pack variants both exist for the same product. These should be consolidated so QBO tracks one canonical inventory item.</p>
+                <div class="pt-3 self-end w-full">
+                    <a href="{{ review.actions.retry_catalog_cleanup_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
                         <iconify-icon icon="solar:restart-linear" width="16"></iconify-icon>
-                        Review and queue catalog cleanup ({{ review.actions.catalog_cleanup_count }})
+                        Review cleanup
                     </a>
                 </div>
             </div>
@@ -136,11 +136,11 @@
                     <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Quantity mismatches</p>
                     <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.quantity_adjustment_count }}</p>
                 </div>
-                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Queues an inventory pipeline retry for exact-match quantity mismatches. EPOS remains the source of truth. This may update QuickBooks inventory when the job runs.</p>
-                <div class="pt-3">
-                    <a href="{{ review.actions.retry_quantity_adjustments_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10">
+                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Exact QBO item matches were found, but QtyOnHand differs from EPOS. EPOS is the source of truth for inventory quantity.</p>
+                <div class="pt-3 self-end w-full">
+                    <a href="{{ review.actions.retry_quantity_adjustments_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
                         <iconify-icon icon="solar:tuning-square-linear" width="16"></iconify-icon>
-                        Review and queue quantity adjustments ({{ review.actions.quantity_adjustment_count }})
+                        Review adjustments
                     </a>
                 </div>
             </div>
@@ -151,11 +151,11 @@
                     <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Missing from QuickBooks</p>
                     <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ review.actions.missing_count }}</p>
                 </div>
-                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">Preview only. No QuickBooks items are created from this page.</p>
-                <div class="pt-3">
-                    <a href="{{ review.actions.missing_preview_url }}" class="btn btn-secondary w-full justify-center min-h-10">
+                <p class="mt-4 text-sm leading-6 text-slate-600 dark:text-slate-300">These EPOS products were not found as QBO inventory items. Item creation needs mapping/account review before anything is created.</p>
+                <div class="pt-3 self-end w-full">
+                    <a href="{{ review.actions.missing_preview_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
                     <iconify-icon icon="solar:eye-linear" width="16"></iconify-icon>
-                    Preview item creation ({{ review.actions.missing_count }})
+                    Preview items
                     </a>
                 </div>
             </div>

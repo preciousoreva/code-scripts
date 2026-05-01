@@ -230,9 +230,9 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Resolve Review Items", html)
-        self.assertIn("Review and queue catalog cleanup (1)", html)
-        self.assertIn("Review and queue quantity adjustments (1)", html)
-        self.assertIn("Preview item creation (3)", html)
+        self.assertIn("Review cleanup", html)
+        self.assertIn("Review adjustments", html)
+        self.assertIn("Preview items", html)
         self.assertIn("Retry actions queue real inventory pipeline jobs.", html)
         self.assertIn(
             reverse(
@@ -275,7 +275,7 @@ class InventoryReviewActionViewTests(TestCase):
             ),
             html,
         )
-        self.assertIn("Confirm and queue catalog cleanup", html)
+        self.assertIn("Confirm and queue", html)
 
     def test_quantity_adjustments_confirm_page_renders_preview_and_confirm_post(self):
         self._login()
@@ -303,7 +303,7 @@ class InventoryReviewActionViewTests(TestCase):
             ),
             html,
         )
-        self.assertIn("Confirm and queue quantity adjustments", html)
+        self.assertIn("Confirm and queue", html)
 
     def test_retry_catalog_cleanup_rejects_inventory_disabled_company(self):
         self._login()

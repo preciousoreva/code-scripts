@@ -4129,7 +4129,7 @@ def company_inventory_retry_catalog_cleanup_confirm(request, company_key):
                 "epos_qbo:company_inventory_retry_catalog_cleanup",
                 kwargs={"company_key": company.company_key},
             ),
-            "confirm_button_text": "Confirm and queue catalog cleanup",
+            "confirm_button_text": "Confirm and queue",
         }
     )
     template_context.update(_nav_context())
@@ -4190,7 +4190,7 @@ def company_inventory_retry_quantity_adjustments_confirm(request, company_key):
                 "epos_qbo:company_inventory_retry_quantity_adjustments",
                 kwargs={"company_key": company.company_key},
             ),
-            "confirm_button_text": "Confirm and queue quantity adjustments",
+            "confirm_button_text": "Confirm and queue",
         }
     )
     template_context.update(_nav_context())
