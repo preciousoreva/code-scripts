@@ -230,13 +230,10 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Resolve Review Items", html)
-        self.assertIn("Retry catalog cleanup (1)", html)
-        self.assertIn("Retry quantity adjustments (1)", html)
+        self.assertIn("Queue catalog cleanup retry (1)", html)
+        self.assertIn("Queue quantity adjustment retry (1)", html)
         self.assertIn("Preview item creation (3)", html)
-        self.assertIn(
-            "Actions use the latest final audit for this company.",
-            html,
-        )
+        self.assertIn("Retry actions queue real inventory pipeline jobs.", html)
 
     def test_retry_catalog_cleanup_rejects_inventory_disabled_company(self):
         self._login()
