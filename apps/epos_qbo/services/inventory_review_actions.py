@@ -42,6 +42,7 @@ from code_scripts.inventory_review_missing_candidates import (
     classify_missing_items_for_audit_file,
 )
 
+from ..business_date import get_target_trading_date
 from ..models import CompanyConfigRecord, RunArtifact, RunJob
 from .inventory_review import (
     InventoryReviewParseResult,
@@ -73,6 +74,49 @@ QUANTITY_ADJUSTMENT_ISSUE_TYPES = {"exact_name_match"}
 RETRY_INTENT_CATALOG = "review_retry_catalog_cleanup"
 RETRY_INTENT_QUANTITY = "review_retry_quantity_adjustments"
 REVIEW_CREATE_MISSING_INTENT = "review_create_missing_items"
+
+SNAPSHOT_PACK_GUARD_MESSAGE = (
+    "QBO snapshot could not be loaded; pack-variant safety checks may be incomplete. "
+    "Do not proceed until the snapshot is refreshed."
+)
+
+
+def resolve_txn_date_for_review_missing_item_creation(
+    *, company_key: str, artifact: RunArtifact
+) -> tuple[str, str]:
+    """Return (YYYY-MM-DD, source_label) for InvStartDate and inventory_pipeline --txn-date."""
+
+    def _is_iso(d: str) -> bool:
+        return len(d) == 10 and d[4] == "-" and d[7] == "-"
+
+    if artifact.target_date:
+        return artifact.target_date.isoformat(), "artifact.target_date"
+    job = getattr(artifact, "run_job", None)
+    if job is not None and job.target_date:
+        return job.target_date.isoformat(), "source_run.target_date"
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    for key, label in (
+        ("inv_txn_date", "summary.inv_txn_date"),
+        ("txn_date", "summary.txn_date"),
+    ):
+        raw = str(stats.get(key) or "").strip()[:10]
+        if _is_iso(raw):
+            return raw, label
+    qas = stats.get("quantity_adjustment_stats")
+    if isinstance(qas, dict):
+        raw = str(qas.get("txn_date") or "").strip()[:10]
+        if _is_iso(raw):
+            return raw, "summary.quantity_adjustment_stats.txn_date"
+    try:
+        from code_scripts.company_config import load_company_config
+
+        cfg = load_company_config(company_key)
+        floor = str(cfg.inv_start_date_floor or "").strip()[:10]
+        if _is_iso(floor):
+            return floor, "company_config.inv_start_date_floor"
+    except Exception:
+        pass
+    return get_target_trading_date().isoformat(), "business_date.get_target_trading_date"
 
 
 @dataclass(frozen=True)
@@ -364,16 +408,21 @@ def build_missing_item_creation_preview(
 
 def _build_missing_create_inventory_options(
     *,
+    company_key: str,
     artifact: RunArtifact,
     final_audit_path: Path,
     preview: MissingPreview,
 ) -> dict[str, Any]:
     safe_rows = [r for r in preview.rows if r.is_safe]
     base_names = [str(r.suggested_qbo_name or "").strip() for r in safe_rows if str(r.suggested_qbo_name or "").strip()]
+    txn_date, txn_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company_key, artifact=artifact
+    )
     return {
         "base_names": base_names,
         "max_catalog_fixes": 0,
         "max_quantity_adjustments": 0,
+        "txn_date": txn_date,
         "review_create_missing_items": {
             "intent": REVIEW_CREATE_MISSING_INTENT,
             "source_artifact_id": int(artifact.id) if artifact.id else None,
@@ -384,6 +433,8 @@ def _build_missing_create_inventory_options(
             "blocked_count": int(preview.blocked_count),
             "create_qty_policy": "initial_qty_from_epos",
             "mapping_source": "Product.Mapping.csv",
+            "item_inv_start_date": txn_date,
+            "txn_date_source": txn_source,
         },
     }
 
@@ -401,6 +452,7 @@ def queue_missing_item_creation_job(
     if preview.safe_count <= 0:
         return None
     inventory_options = _build_missing_create_inventory_options(
+        company_key=company.company_key,
         artifact=artifact,
         final_audit_path=final_audit_path,
         preview=preview,

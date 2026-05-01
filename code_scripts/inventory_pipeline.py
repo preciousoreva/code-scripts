@@ -1251,7 +1251,13 @@ def _run_review_create_missing_items_phase(
         if nm in safe_by_name:
             to_create.append(safe_by_name[nm])
 
-    txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
+    txn_date = (getattr(args, "txn_date", None) or "").strip()
+    if not txn_date:
+        txn_date = str(spec.get("item_inv_start_date") or "").strip()
+    if not txn_date:
+        txn_date = str(cfg.inv_start_date_floor or "")[:10].strip()
+    if not txn_date:
+        txn_date = datetime.now().strftime("%Y-%m-%d")
     dry_run = bool(args.dry_run)
     mapping_cache = load_category_account_mapping(cfg)
 
@@ -1446,6 +1452,7 @@ def _run_review_create_missing_items_phase(
         "product_details": [],
         "run_job_id": run_job_id,
         "run_url": run_url,
+        "inv_txn_date": txn_date,
         "review_create_missing_items": dict(spec),
         "review_missing_create_execution": {
             "created": created_count,
@@ -1730,6 +1737,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "run_job_id": run_job_id,
         "run_url": run_url,
         "finished_at": _now_utc_iso(),
+        "inv_txn_date": txn_date,
     }
     summary = _stable_summary_payload(summary)
     summary_json, summary_csv = _write_summary_reports(

@@ -47,6 +47,21 @@
                 <dt class="text-slate-500 dark:text-slate-400">Quantity policy</dt>
                 <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.create_qty_policy_label }}</dd>
             </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">InvStartDate (queued)</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">
+                    <span class="font-mono">{{ inventory_review_action.item_inv_start_date }}</span>
+                    {% if inventory_review_action.txn_date_source %}
+                    <span class="text-xs font-sans text-slate-500 dark:text-slate-400">({{ inventory_review_action.txn_date_source }})</span>
+                    {% endif %}
+                </dd>
+            </div>
+            {% if inventory_review_action.missing_create_report_url %}
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Per-item report</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100"><a href="{{ inventory_review_action.missing_create_report_url }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ inventory_review_action.missing_create_report_label }}</a> (CSV)</dd>
+            </div>
+            {% endif %}
         </dl>
         <div class="text-sm">
             <p class="text-slate-500 dark:text-slate-400 mb-1">Limits</p>

@@ -425,6 +425,7 @@ def ingest_inventory_pipeline_file(path: Path, run_job: RunJob | None = None) ->
         ),
         "unsupported_catalog_issues": _safe_int_dict(unsupported),
         "child_reports": {str(k): str(v) for k, v in child_reports.items()},
+        "inv_txn_date": str(data.get("inv_txn_date") or "")[:10],
     }
     processed_files = [
         value

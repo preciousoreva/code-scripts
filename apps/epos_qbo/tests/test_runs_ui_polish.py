@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone as dt_timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
 from apps.epos_qbo.services.inventory_review_actions import (
@@ -329,6 +334,7 @@ class RunsAndRunDetailRenderingTests(TestCase):
                 "base_names": affected,
                 "max_catalog_fixes": 0,
                 "max_quantity_adjustments": 0,
+                "txn_date": "2026-04-27",
                 "review_create_missing_items": {
                     "intent": REVIEW_CREATE_MISSING_INTENT,
                     "source_artifact_id": 9,
@@ -339,6 +345,8 @@ class RunsAndRunDetailRenderingTests(TestCase):
                     "blocked_count": 3,
                     "create_qty_policy": "initial_qty_from_epos",
                     "mapping_source": "Product.Mapping.csv",
+                    "item_inv_start_date": "2026-04-27",
+                    "txn_date_source": "test.fixture",
                 },
             },
         )
@@ -364,3 +372,51 @@ class RunsAndRunDetailRenderingTests(TestCase):
                 r"Blocked candidates</dt>\s*<dd class=\"font-medium text-slate-900 dark:text-slate-100\">3</dd>"
             ),
         )
+        self.assertIn("InvStartDate", html)
+        self.assertIn("2026-04-27", html)
+        self.assertIn("test.fixture", html)
+
+    def test_run_detail_review_create_missing_shows_per_item_report_link(self):
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            td_path = Path(td)
+            report_csv = td_path / "inventory_review_missing_create_company_a_120000.csv"
+            report_csv.write_text("suggested_qbo_name,outcome\nX,created\n", encoding="utf-8")
+            summary_json = td_path / "inventory_pipeline_company_a_120000.json"
+            summary_json.write_text("{}", encoding="utf-8")
+            job = RunJob.objects.create(
+                scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+                company_key="company_a",
+                status=RunJob.STATUS_SUCCEEDED,
+                inventory_options_json={
+                    "txn_date": "2026-04-26",
+                    "review_create_missing_items": {
+                        "intent": REVIEW_CREATE_MISSING_INTENT,
+                        "item_inv_start_date": "2026-04-26",
+                        "txn_date_source": "test",
+                    },
+                },
+            )
+            RunArtifact.objects.create(
+                kind=RunArtifact.KIND_INVENTORY_AUDIT,
+                run_job=job,
+                company_key="company_a",
+                processed_at=timezone.now(),
+                source_path=str(summary_json),
+                source_hash="x" * 64,
+                reliability_status=RunArtifact.RELIABILITY_HIGH,
+                upload_stats_json={
+                    "report_type": "inventory_pipeline",
+                    "summary_json": str(summary_json),
+                    "child_reports": {"review_missing_create_report": str(report_csv)},
+                },
+            )
+            with mock.patch(
+                "apps.epos_qbo.views._trusted_report_roots",
+                return_value=[td_path.resolve()],
+            ):
+                html = self.client.get(
+                    reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})
+                ).content.decode("utf-8")
+
+        self.assertIn("Per-item report", html)
+        self.assertIn("Missing item creation report", html)

@@ -59,12 +59,14 @@ from .services.inventory_review_actions import (
     RETRY_INTENT_CATALOG,
     RETRY_INTENT_QUANTITY,
     REVIEW_CREATE_MISSING_INTENT,
+    SNAPSHOT_PACK_GUARD_MESSAGE,
     build_missing_item_creation_preview,
     get_catalog_cleanup_rows,
     get_quantity_adjustment_rows,
     get_review_rows_by_reason,
     load_review_context,
     queue_missing_item_creation_job,
+    resolve_txn_date_for_review_missing_item_creation,
     retry_catalog_cleanup_for_review,
     retry_quantity_adjustments_for_review,
 )
@@ -134,10 +136,12 @@ RUN_ARTIFACT_REPORT_LABELS = {
     "initial_audit": "Initial Audit",
     "catalog_cleanup": "Catalog Cleanup",
     "post_catalog_audit": "Post Catalog Audit",
+    "review_missing_create_report": "Missing item creation report",
 }
 RUN_ARTIFACT_REPORT_ORDER = [
     "summary_csv",
     "summary_json",
+    "review_missing_create_report",
     "final_audit",
     "initial_audit",
     "catalog_cleanup",
@@ -3063,6 +3067,18 @@ def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object
             max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
         except (TypeError, ValueError):
             max_quantity_adjustments = 0
+        txn_date = str(opts.get("txn_date") or rcm.get("item_inv_start_date") or "").strip()
+        txn_date_source = str(rcm.get("txn_date_source") or "").strip()
+        missing_create_report_url = ""
+        missing_create_report_label = ""
+        for art in job.artifacts.order_by("-processed_at", "-imported_at"):
+            for link in _artifact_report_links(job, art):
+                if link.get("key") == "review_missing_create_report":
+                    missing_create_report_url = str(link.get("url") or "")
+                    missing_create_report_label = str(link.get("label") or "")
+                    break
+            if missing_create_report_url:
+                break
         return {
             "action_type": "create_missing",
             "intent": str(rcm.get("intent") or REVIEW_CREATE_MISSING_INTENT),
@@ -3079,9 +3095,13 @@ def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object
             "scope_label": "Safe missing QBO candidates only",
             "mapping_source": mapping_source,
             "create_qty_policy": qty_policy,
-            "create_qty_policy_label": "Set initial QtyOnHand from EPOS expected (no separate adjustment in this run).",
+            "create_qty_policy_label": "Initial QtyOnHand from EPOS expected (no separate adjustment in this run).",
             "max_catalog_fixes": max_catalog_fixes,
             "max_quantity_adjustments": max_quantity_adjustments,
+            "item_inv_start_date": txn_date or "—",
+            "txn_date_source": txn_date_source,
+            "missing_create_report_url": missing_create_report_url,
+            "missing_create_report_label": missing_create_report_label,
         }
 
     review_retry = opts.get("review_retry")
@@ -3135,7 +3155,13 @@ def _artifact_report_path_value(artifact: RunArtifact, report_key: str) -> str:
         return str(artifact.source_path or "").strip()
     if report_key in {"summary_json", "summary_csv"}:
         return str(stats.get(report_key) or "").strip()
-    if report_key in {"final_audit", "initial_audit", "catalog_cleanup", "post_catalog_audit"}:
+    if report_key in {
+        "final_audit",
+        "initial_audit",
+        "catalog_cleanup",
+        "post_catalog_audit",
+        "review_missing_create_report",
+    }:
         child_reports = stats.get("child_reports") if isinstance(stats.get("child_reports"), dict) else {}
         value = str(child_reports.get(report_key) or "").strip()
         if value:
@@ -4406,11 +4432,19 @@ def company_inventory_missing_preview(request, company_key):
         "epos_qbo:company_inventory_review",
         kwargs={"company_key": company.company_key},
     )
+    item_inv_start_date, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
     template_context = {
         "company": company,
         "preview": preview,
         "review_url": review_url,
         "final_audit_filename": context.final_audit_path.name,
+        "item_inv_start_date": item_inv_start_date,
+        "txn_date_source": txn_date_source,
+        "missing_item_queue_allowed": missing_item_queue_allowed,
+        "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
     }
     template_context.update(_nav_context())
     template_context.update(
@@ -4455,6 +4489,10 @@ def company_inventory_missing_create_confirm(request, company_key):
         kwargs={"company_key": company.company_key},
     )
     preview = build_missing_item_creation_preview(context=context)
+    item_inv_start_date, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
     if preview.safe_count <= 0:
         messages.info(request, "No safe missing-item candidates to create in the latest final audit.")
         return redirect(missing_preview_url)
@@ -4478,6 +4516,10 @@ def company_inventory_missing_create_confirm(request, company_key):
             "epos_qbo:company_inventory_missing_create",
             kwargs={"company_key": company.company_key},
         ),
+        "item_inv_start_date": item_inv_start_date,
+        "txn_date_source": txn_date_source,
+        "missing_item_queue_allowed": missing_item_queue_allowed,
+        "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
     }
     template_context.update(_nav_context())
     template_context.update(
@@ -4518,6 +4560,12 @@ def company_inventory_missing_create(request, company_key):
         kwargs={"company_key": company.company_key},
     )
     preview = build_missing_item_creation_preview(context=context)
+    if str(preview.qbo_base_names_error or "").strip():
+        messages.error(request, SNAPSHOT_PACK_GUARD_MESSAGE)
+        return redirect(
+            "epos_qbo:company_inventory_missing_create_confirm",
+            company_key=company.company_key,
+        )
     job = queue_missing_item_creation_job(
         company=company,
         artifact=context.artifact,

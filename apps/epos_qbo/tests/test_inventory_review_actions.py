@@ -218,6 +218,7 @@ class InventoryReviewActionViewTests(TestCase):
                 "epos_negative_units_clamped": 0,
                 "final_status_counts": {"in_sync": 3, "missing_in_qbo": 4, "needs_adjustment": 2},
                 "child_reports": {"final_audit": str(final_audit)},
+                "inv_txn_date": "2026-04-29",
             },
         )
         return job, artifact
@@ -502,6 +503,8 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertIn("Blocked candidates", html)
         self.assertIn("31N1 CHILDREN BAND", html)
         self.assertIn("Confirm and queue", html)
+        self.assertIn("InvStartDate", html)
+        self.assertIn("2026-04-29", html)
 
     def test_missing_create_post_queues_job_with_review_create_metadata(self):
         self._login()
@@ -543,6 +546,68 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertNotIn("FAKE", bases)
         self.assertEqual(opts.get("max_catalog_fixes"), 0)
         self.assertEqual(opts.get("max_quantity_adjustments"), 0)
+        self.assertEqual(opts.get("txn_date"), "2026-04-29")
+        self.assertEqual(rcm.get("item_inv_start_date"), "2026-04-29")
+        self.assertEqual(rcm.get("txn_date_source"), "summary.inv_txn_date")
+
+    def test_missing_create_post_rejects_when_qbo_snapshot_unavailable(self):
+        self._login()
+        baseline_queued = RunJob.objects.filter(status=RunJob.STATUS_QUEUED).count()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            with mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                return_value=(PRODUCT_MAPPING, ""),
+            ), mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                return_value=(set(), "QBO inventory snapshot not found"),
+            ):
+                response = self.client.post(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_create",
+                        kwargs={"company_key": "company_a"},
+                    ),
+                )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            RunJob.objects.filter(status=RunJob.STATUS_QUEUED).count(),
+            baseline_queued,
+        )
+
+    def test_missing_preview_disables_review_link_when_qbo_snapshot_unavailable(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            with mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                return_value=(PRODUCT_MAPPING, ""),
+            ), mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                return_value=(set(), "QBO inventory snapshot not found"),
+            ):
+                response = self.client.get(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_preview",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("QBO snapshot could not be loaded", html)
+        self.assertIn("pointer-events-none", html)
+        self.assertNotIn(
+            reverse(
+                "epos_qbo:company_inventory_missing_create_confirm",
+                kwargs={"company_key": "company_a"},
+            ),
+            html,
+        )
 
     def test_missing_create_post_does_not_queue_when_no_safe_candidates(self):
         self._login()

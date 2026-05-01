@@ -121,6 +121,7 @@ class InventoryPipelineBuildCommandTests(TestCase):
                 "base_names": ["WIDGET A"],
                 "max_catalog_fixes": 0,
                 "max_quantity_adjustments": 0,
+                "txn_date": "2026-04-28",
                 "review_create_missing_items": {
                     "intent": "review_create_missing_items",
                     "source_final_audit": "/tmp/final.csv",
@@ -128,6 +129,8 @@ class InventoryPipelineBuildCommandTests(TestCase):
                     "row_count": 1,
                     "safe_count": 1,
                     "blocked_count": 0,
+                    "item_inv_start_date": "2026-04-28",
+                    "txn_date_source": "test",
                 },
             },
         )
@@ -137,6 +140,8 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("WIDGET A", cmd)
         self.assertIn("--max-catalog-fixes", cmd)
         self.assertIn("0", cmd)
+        self.assertIn("--txn-date", cmd)
+        self.assertIn("2026-04-28", cmd)
 
     def test_default_inventory_schedule_builds_all_products_pipeline_command(self):
         schedule = RunSchedule.objects.create(

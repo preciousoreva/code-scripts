@@ -34,14 +34,21 @@
         Preview only. No QuickBooks items are created from this page yet. Each row's safety status reflects how a future create-item action would treat it.
     </div>
 
+    <div class="rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 p-4 text-sm text-slate-700 dark:text-slate-200">
+        <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Queued InvStartDate (preview)</p>
+        <p class="mt-1 font-mono text-slate-900 dark:text-slate-100">{{ item_inv_start_date }}</p>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Source: {{ txn_date_source }}. This date will be used when you confirm and queue (passed as <span class="font-mono">--txn-date</span>).</p>
+    </div>
+
     {% if preview.mapping_error %}
     <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
         Product mapping warning: {{ preview.mapping_error }}
     </div>
     {% endif %}
     {% if preview.qbo_base_names_error %}
-    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
-        QBO snapshot warning: {{ preview.qbo_base_names_error }} Pack-variant guard cannot run reliably until this is resolved.
+    <div class="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/25 p-4 text-sm text-red-900 dark:text-red-200">
+        <p class="font-medium">{{ snapshot_pack_guard_message }}</p>
+        <p class="mt-2 text-xs text-red-800 dark:text-red-300">Detail: {{ preview.qbo_base_names_error }}</p>
     </div>
     {% endif %}
 
@@ -60,12 +67,17 @@
         </div>
     </div>
 
-    {% if preview.safe_count > 0 %}
+    {% if preview.safe_count > 0 and missing_item_queue_allowed %}
     <div class="flex flex-wrap items-center gap-3">
         <a href="{% url 'epos_qbo:company_inventory_missing_create_confirm' company.company_key %}" class="btn btn-primary">
             Review item creation
         </a>
         <p class="text-xs text-slate-500 dark:text-slate-400">Confirms and queues a job; nothing is created in QuickBooks from this page alone.</p>
+    </div>
+    {% elif preview.safe_count > 0 %}
+    <div class="flex flex-wrap items-center gap-3">
+        <span class="btn btn-primary opacity-50 cursor-not-allowed pointer-events-none" aria-disabled="true">Review item creation</span>
+        <p class="text-xs text-red-700 dark:text-red-300">Unavailable until the QBO inventory snapshot loads. Refresh inventory data, then reopen this preview.</p>
     </div>
     {% endif %}
 

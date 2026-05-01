@@ -37,6 +37,19 @@
         </div>
     </div>
 
+    {% if preview.qbo_base_names_error %}
+    <div class="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/25 p-4 text-sm text-red-900 dark:text-red-200">
+        <p class="font-medium">{{ snapshot_pack_guard_message }}</p>
+        <p class="mt-2 text-xs text-red-800 dark:text-red-300">Detail: {{ preview.qbo_base_names_error }}</p>
+    </div>
+    {% endif %}
+
+    <div class="rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 p-4 text-sm text-slate-700 dark:text-slate-200">
+        <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">InvStartDate / item creation date (queued)</p>
+        <p class="mt-1 font-mono text-slate-900 dark:text-slate-100">{{ item_inv_start_date }}</p>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Source: {{ txn_date_source }}. Passed to QuickBooks as <span class="font-mono">InvStartDate</span> on new Inventory items.</p>
+    </div>
+
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Safe candidates to create</p>
@@ -107,10 +120,17 @@
 
     <div class="flex flex-wrap items-center gap-3 justify-end">
         <a href="{{ missing_preview_url }}" class="btn btn-secondary">Cancel</a>
+        {% if missing_item_queue_allowed %}
         <form method="post" action="{{ confirm_post_url }}" class="inline">
             {% csrf_token %}
             <button type="submit" class="btn btn-primary">Confirm and queue</button>
         </form>
+        {% else %}
+        <button type="button" class="btn btn-primary opacity-50 cursor-not-allowed" disabled aria-disabled="true">Confirm and queue</button>
+        {% endif %}
     </div>
+    {% if not missing_item_queue_allowed %}
+    <p class="text-xs text-red-700 dark:text-red-300 text-right">Confirm and queue is disabled until the QBO inventory snapshot is available.</p>
+    {% endif %}
 </div>
 {% endblock %}
