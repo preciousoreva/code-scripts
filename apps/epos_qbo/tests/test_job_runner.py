@@ -155,6 +155,69 @@ class QueueDispatchTests(TestCase):
 
 
 class MonitorProcessTests(TestCase):
+    @patch("apps.epos_qbo.services.inventory_review_slack.send_inventory_review_action_failed_notification")
+    @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
+    @patch("apps.epos_qbo.services.job_runner.release_run_lock")
+    @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
+    def test_monitor_calls_review_failure_slack_when_inventory_pipeline_exits_nonzero(
+        self,
+        attach_recent_artifacts_to_job_mock,
+        release_run_lock_mock,
+        dispatch_next_queued_job_mock,
+        review_failed_slack_mock,
+    ):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_RUNNING,
+            inventory_options_json={
+                "review_retry": {
+                    "intent": "review_retry_catalog_cleanup",
+                    "source_final_audit": "/tmp/x.csv",
+                    "row_count": 1,
+                },
+            },
+        )
+        attach_recent_artifacts_to_job_mock.return_value = 0
+        popen = Mock()
+        popen.wait.return_value = 3
+        log_handle = Mock()
+
+        _monitor_process(job.id, popen, log_handle)
+
+        review_failed_slack_mock.assert_called_once()
+        failed_job = review_failed_slack_mock.call_args[0][0]
+        self.assertEqual(failed_job.id, job.id)
+        self.assertEqual(failed_job.status, RunJob.STATUS_FAILED)
+
+    @patch("apps.epos_qbo.services.inventory_review_slack.send_inventory_review_action_failed_notification")
+    @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
+    @patch("apps.epos_qbo.services.job_runner.release_run_lock")
+    @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
+    def test_monitor_skips_review_failure_slack_on_success(
+        self,
+        attach_recent_artifacts_to_job_mock,
+        release_run_lock_mock,
+        dispatch_next_queued_job_mock,
+        review_failed_slack_mock,
+    ):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_RUNNING,
+            inventory_options_json={
+                "review_retry": {"intent": "review_retry_catalog_cleanup", "row_count": 1},
+            },
+        )
+        attach_recent_artifacts_to_job_mock.return_value = 0
+        popen = Mock()
+        popen.wait.return_value = 0
+        log_handle = Mock()
+
+        _monitor_process(job.id, popen, log_handle)
+
+        review_failed_slack_mock.assert_not_called()
+
     @patch("apps.epos_qbo.services.job_runner.dispatch_next_queued_job")
     @patch("apps.epos_qbo.services.job_runner.release_run_lock")
     @patch("apps.epos_qbo.services.job_runner.attach_recent_artifacts_to_job")
@@ -216,6 +279,33 @@ class StartRunJobEnvTests(TestCase):
         self.assertEqual(env["OIAT_RUN_SCOPE"], RunJob.SCOPE_INVENTORY_PIPELINE)
         self.assertIn("OIAT_RUN_STARTED_AT", env)
         self.assertEqual(env["OIAT_PORTAL_BASE_URL"], "https://portal.example.com")
+
+    @override_settings(OIAT_PORTAL_BASE_URL="https://portal.example.com")
+    @patch("apps.epos_qbo.services.job_runner.threading.Thread")
+    @patch("apps.epos_qbo.services.job_runner.subprocess.Popen")
+    def test_start_run_job_sets_inventory_review_action_json_for_review_retry(self, popen_mock, thread_mock):
+        popen_mock.return_value.pid = 12345
+        thread_mock.return_value.start.return_value = None
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "review_retry": {
+                    "intent": "review_retry_catalog_cleanup",
+                    "source_final_audit": "/tmp/inventory_audit_company_a_final.csv",
+                    "row_count": 4,
+                },
+            },
+        )
+        with patch("builtins.open", create=True) as open_mock:
+            open_mock.return_value = Mock()
+            start_run_job(job, ["python", "-c", "print('hi')"])
+
+        _, kwargs = popen_mock.call_args
+        env = kwargs["env"]
+        self.assertIn("OIAT_INVENTORY_REVIEW_ACTION_JSON", env)
+        self.assertIn("review_retry", env["OIAT_INVENTORY_REVIEW_ACTION_JSON"])
+        self.assertIn("inventory_audit_company_a_final.csv", env["OIAT_INVENTORY_REVIEW_ACTION_JSON"])
 
     @override_settings(OIAT_PORTAL_BASE_URL="https://portal.example.com")
     @patch("apps.epos_qbo.services.job_runner.threading.Thread")

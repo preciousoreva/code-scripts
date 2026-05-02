@@ -54,6 +54,7 @@ from .services.config_sync import (
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
 from .services.inventory_categories import load_inventory_categories_by_company
+from .services.inventory_review_slack import send_inventory_review_action_queued
 from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
 from .services.inventory_review_actions import (
     REASON_GROUP_MISSING,
@@ -4394,6 +4395,8 @@ def company_inventory_retry_catalog_cleanup(request, company_key):
         return redirect(review_url)
 
     dispatch_next_queued_job()
+    job = RunJob.objects.get(pk=job_id)
+    send_inventory_review_action_queued(company=company, job=job, request=request)
     messages.success(
         request,
         f"Catalog cleanup retry queued for {result['row_count']} item(s).",
@@ -4428,6 +4431,8 @@ def company_inventory_retry_quantity_adjustments(request, company_key):
         return redirect(review_url)
 
     dispatch_next_queued_job()
+    job = RunJob.objects.get(pk=job_id)
+    send_inventory_review_action_queued(company=company, job=job, request=request)
     messages.success(
         request,
         f"Quantity adjustment retry queued for {result['row_count']} item(s).",
@@ -4630,6 +4635,7 @@ def company_inventory_missing_create(request, company_key):
         return redirect(redirect_back)
 
     dispatch_next_queued_job()
+    send_inventory_review_action_queued(company=company, job=job, request=request)
     scope_note = ""
     if cat_label != "All categories":
         scope_note = f" ({cat_label})"

@@ -342,3 +342,84 @@ class ReviewMissingCreatePhaseTests(TestCase):
             create_mock.assert_called_once()
             self.assertEqual(create_mock.call_args[0][0], "SAFE1")
             adj_mock.assert_not_called()
+
+    def test_review_action_envelope_completion_slack_message(self):
+        """Portal jobs pass OIAT_INVENTORY_REVIEW_ACTION_JSON; completion uses review formatter."""
+        with TemporaryDirectory() as td:
+            td_path = Path(td)
+            audit = td_path / "final.csv"
+            audit.write_text("base_name,status\n", encoding="utf-8")
+            spec = {
+                "source_final_audit": str(audit),
+                "affected_base_names": ["SAFE1"],
+                "item_inv_start_date": "2026-04-30",
+            }
+            data = _classify_rows(with_safe=True, include_blocked=True)
+            empty_df = pd.DataFrame(columns=["base_name_norm"])
+            review_env = {
+                "kind": "review_create_missing",
+                "intent": "review_create_missing_items",
+                "source_final_audit_name": "final.csv",
+                "safe_count": 1,
+                "blocked_count": 1,
+                "category_label": "All categories",
+                "txn_date": "2026-04-30",
+            }
+
+            with mock.patch(
+                "code_scripts.inventory_pipeline.load_category_account_mapping",
+                return_value={"Beer": {"asset": "A", "income": "I", "expense": "E"}},
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.classify_missing_items_for_audit_file",
+                return_value=data,
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.verify_realm_match",
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.TokenManager",
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.GlobalRunLock"
+            ) as lock_cls, mock.patch(
+                "code_scripts.inventory_pipeline._resolve_qbo_snapshot",
+                return_value=td_path / "qbo.csv",
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.load_qbo_inventory_item_rows",
+                return_value=empty_df,
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.get_or_create_item_category_id",
+                return_value="cat-9",
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.create_inventory_item",
+                return_value="new-id",
+            ), mock.patch(
+                "code_scripts.qbo_upload.build_account_refs_for_category",
+                return_value={
+                    "IncomeAccountRef": {"value": "1"},
+                    "AssetAccountRef": {"value": "2"},
+                    "ExpenseAccountRef": {"value": "3"},
+                },
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.post_inventory_adjustment"
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.mark_qbo_snapshot_stale",
+            ), mock.patch(
+                "code_scripts.inventory_pipeline.send_slack_success",
+            ) as slack_mock:
+                lock_inst = lock_cls.return_value
+                lock_inst.acquire.return_value = mock.Mock(acquired=True, reason="")
+                cfg = self._cfg()
+                cfg.slack_webhook_url = "https://hooks.slack.com/services/FAKE"
+                args = self._args(txn_date="2026-04-30", summary_dir=td_path, dry_run=False)
+                args.no_slack = False
+                _run_review_create_missing_items_phase(
+                    args,
+                    cfg,
+                    spec,
+                    started_at="2026-05-01T00:00:00+00:00",
+                    review_action_env=review_env,
+                )
+
+            slack_mock.assert_called_once()
+            msg = slack_mock.call_args.args[0]
+            self.assertIn("Missing item creation", msg)
+            self.assertIn("Created: 1", msg)
+            self.assertIn("Inventory Review Action Completed", msg)

@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import pandas as pd
 
@@ -73,7 +73,12 @@ from code_scripts.qbo_upload import (
     load_category_account_mapping,
 )
 from code_scripts.run_lock import GlobalRunLock
-from code_scripts.slack_notify import notify_inventory_pipeline_start, send_slack_success
+from code_scripts.slack_notify import (
+    format_inventory_review_action_missing_create_completed,
+    format_inventory_review_action_pipeline_completed,
+    notify_inventory_pipeline_start,
+    send_slack_success,
+)
 from code_scripts.token_manager import verify_realm_match
 
 
@@ -143,6 +148,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _now_utc_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _load_review_action_envelope() -> dict[str, Any] | None:
+    raw = os.environ.get("OIAT_INVENTORY_REVIEW_ACTION_JSON", "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return cast(dict[str, Any], data) if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        return None
 
 
 def _optional_non_negative_int(value: int | None) -> int | None:
@@ -1232,6 +1248,7 @@ def _run_review_create_missing_items_phase(
     spec: dict[str, Any],
     *,
     started_at: str,
+    review_action_env: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute review-triggered creation of safe missing QBO Inventory items only."""
 
@@ -1476,10 +1493,16 @@ def _run_review_create_missing_items_phase(
 
     webhook = getattr(cfg, "slack_webhook_url", None)
     if webhook and not args.no_slack:
-        send_slack_success(
-            f"Review missing Inventory items: created={created_count} skipped={skipped_count} failed={failed_count} ({cfg.display_name})",
-            webhook,
-        )
+        if review_action_env:
+            send_slack_success(
+                format_inventory_review_action_missing_create_completed(review_action_env, summary),
+                webhook,
+            )
+        else:
+            send_slack_success(
+                f"Review missing Inventory items: created={created_count} skipped={skipped_count} failed={failed_count} ({cfg.display_name})",
+                webhook,
+            )
 
     return summary
 
@@ -1488,6 +1511,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     started_at = _now_utc_iso()
     cfg = load_company_config(args.company)
     ensure_company_runtime_compatible(cfg)
+    review_action_env = _load_review_action_envelope()
 
     if getattr(args, "review_create_missing_items", False):
         raw_spec = os.environ.get("OIAT_REVIEW_CREATE_MISSING_JSON", "").strip()
@@ -1498,7 +1522,9 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         spec = json.loads(raw_spec)
         if not isinstance(spec, dict):
             raise RuntimeError("OIAT_REVIEW_CREATE_MISSING_JSON must be a JSON object.")
-        return _run_review_create_missing_items_phase(args, cfg, spec, started_at=started_at)
+        return _run_review_create_missing_items_phase(
+            args, cfg, spec, started_at=started_at, review_action_env=review_action_env
+        )
 
     max_catalog_fixes = _optional_non_negative_int(args.max_catalog_fixes)
     max_quantity_adjustments = _optional_non_negative_int(args.max_quantity_adjustments)
@@ -1529,7 +1555,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     print("=" * 68)
 
     webhook = getattr(cfg, "slack_webhook_url", None)
-    if webhook and not args.no_slack:
+    if webhook and not args.no_slack and not review_action_env:
         notify_inventory_pipeline_start(
             company_name=cfg.display_name,
             company_key=cfg.company_key,
@@ -1753,7 +1779,13 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     print("=" * 68)
 
     if webhook and not args.no_slack:
-        send_slack_success(_format_slack_summary(summary), webhook)
+        if review_action_env:
+            send_slack_success(
+                format_inventory_review_action_pipeline_completed(review_action_env, summary),
+                webhook,
+            )
+        else:
+            send_slack_success(_format_slack_summary(summary), webhook)
 
     return summary
 

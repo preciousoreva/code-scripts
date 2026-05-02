@@ -16,6 +16,8 @@ from django.utils import timezone
 
 from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 
+from code_scripts.slack_notify import build_inventory_review_action_envelope
+
 from .. import portal_settings
 from ..models import RunJob, RunLock, RunSchedule, RunScheduleEvent
 from .artifact_ingestion import attach_recent_artifacts_to_job
@@ -316,6 +318,13 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
                 attached_artifacts,
                 attach_elapsed_ms,
             )
+            if exit_code != 0 and job.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+                try:
+                    from .inventory_review_slack import send_inventory_review_action_failed_notification
+
+                    send_inventory_review_action_failed_notification(job)
+                except Exception as slack_exc:
+                    logger.warning("Inventory review action failure Slack skipped: %s", slack_exc)
         except Exception as exc:
             # Log error but don't crash - try to mark job as failed if status update failed
             logger.error(f"Failed to update RunJob {job_id} status after process exit: {exc}", exc_info=True)
@@ -351,6 +360,9 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
     rcm = job_opts.get("review_create_missing_items")
     if isinstance(rcm, dict) and rcm:
         env["OIAT_REVIEW_CREATE_MISSING_JSON"] = json.dumps(rcm, separators=(",", ":"))
+    action_env = build_inventory_review_action_envelope(job_opts)
+    if action_env:
+        env["OIAT_INVENTORY_REVIEW_ACTION_JSON"] = json.dumps(action_env, separators=(",", ":"))
     # Prefer explicit env override; otherwise fall back to Django settings.
     if not env.get("OIAT_PORTAL_BASE_URL"):
         base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or "").strip().rstrip("/")

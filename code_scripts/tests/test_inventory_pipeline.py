@@ -1282,5 +1282,17 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertEqual(summary["skipped_unsupported"], 0)
 
 
+class InventoryReviewActionEnvelopeLoaderTests(unittest.TestCase):
+    def test_load_review_action_envelope_from_env_json(self):
+        payload = {"kind": "review_retry", "intent": "review_retry_quantity_adjustments"}
+        raw = json.dumps(payload)
+        with mock.patch.dict(os.environ, {"OIAT_INVENTORY_REVIEW_ACTION_JSON": raw}, clear=False):
+            self.assertEqual(inventory_pipeline._load_review_action_envelope(), payload)
+
+    def test_load_review_action_envelope_empty_returns_none(self):
+        with mock.patch.dict(os.environ, {"OIAT_INVENTORY_REVIEW_ACTION_JSON": ""}, clear=False):
+            self.assertIsNone(inventory_pipeline._load_review_action_envelope())
+
+
 if __name__ == "__main__":
     unittest.main()

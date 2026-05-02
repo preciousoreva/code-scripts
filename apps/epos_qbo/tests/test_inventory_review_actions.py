@@ -677,6 +677,209 @@ class InventoryReviewActionViewTests(TestCase):
             baseline_queued,
         )
 
+    def test_catalog_cleanup_post_sends_one_queued_slack_notification(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            cfg = mock.Mock()
+            cfg.slack_webhook_url = "https://hooks.slack.com/services/FAKE"
+            with mock.patch(
+                "apps.epos_qbo.views.dispatch_next_queued_job",
+                return_value=(None, "queued"),
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.load_company_config",
+                return_value=cfg,
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.send_slack_success",
+            ) as slack_mock:
+                response = self.client.post(
+                    reverse(
+                        "epos_qbo:company_inventory_retry_catalog_cleanup",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 302)
+        slack_mock.assert_called_once()
+        msg = slack_mock.call_args.args[0]
+        self.assertIn("Catalog cleanup retry", msg)
+        self.assertIn("Affected items: 1", msg)
+        self.assertIn("op", msg)
+        self.assertIn("Source audit:", msg)
+        self.assertIn("inventory_pipeline_company_a_", msg)
+
+    def test_quantity_adjustment_post_sends_one_queued_slack_notification(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            cfg = mock.Mock()
+            cfg.slack_webhook_url = "https://hooks.slack.com/services/FAKE"
+            with mock.patch(
+                "apps.epos_qbo.views.dispatch_next_queued_job",
+                return_value=(None, "queued"),
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.load_company_config",
+                return_value=cfg,
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.send_slack_success",
+            ) as slack_mock:
+                response = self.client.post(
+                    reverse(
+                        "epos_qbo:company_inventory_retry_quantity_adjustments",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+
+        self.assertEqual(response.status_code, 302)
+        slack_mock.assert_called_once()
+        msg = slack_mock.call_args.args[0]
+        self.assertIn("Quantity adjustment retry", msg)
+        self.assertIn("Affected items: 1", msg)
+        self.assertIn("op", msg)
+
+    def test_missing_create_post_sends_one_queued_slack_notification(self):
+        self._login()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            cfg = mock.Mock()
+            cfg.slack_webhook_url = "https://hooks.slack.com/services/FAKE"
+            with mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                return_value=(PRODUCT_MAPPING, ""),
+            ), mock.patch(
+                "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                return_value=({"aquafina 50cl"}, ""),
+            ), mock.patch(
+                "apps.epos_qbo.views.dispatch_next_queued_job",
+                return_value=(None, "queued"),
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.load_company_config",
+                return_value=cfg,
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.send_slack_success",
+            ) as slack_mock:
+                response = self.client.post(
+                    reverse(
+                        "epos_qbo:company_inventory_missing_create",
+                        kwargs={"company_key": "company_a"},
+                    ),
+                    {"inventory_start_date": "2026-04-29"},
+                )
+
+        self.assertEqual(response.status_code, 302)
+        slack_mock.assert_called_once()
+        msg = slack_mock.call_args.args[0]
+        self.assertIn("Missing item creation", msg)
+        self.assertIn("Safe candidates: 2", msg)
+        self.assertIn("Blocked: 2", msg)
+        self.assertIn("InvStartDate: 2026-04-29", msg)
+        self.assertIn("op", msg)
+
+    def test_confirm_and_preview_get_send_no_slack(self):
+        self._login()
+        cfg = mock.Mock()
+        cfg.slack_webhook_url = "https://hooks.slack.com/services/FAKE"
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = _write_final_audit(Path(td))
+            self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+            with mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.load_company_config",
+                return_value=cfg,
+            ), mock.patch(
+                "apps.epos_qbo.services.inventory_review_slack.send_slack_success",
+            ) as slack_mock:
+                self.client.get(
+                    reverse(
+                        "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+                self.client.get(
+                    reverse(
+                        "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
+                        kwargs={"company_key": "company_a"},
+                    )
+                )
+                with mock.patch(
+                    "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                    return_value=(PRODUCT_MAPPING, ""),
+                ), mock.patch(
+                    "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                    return_value=({"aquafina 50cl"}, ""),
+                ):
+                    self.client.get(
+                        reverse(
+                            "epos_qbo:company_inventory_missing_preview",
+                            kwargs={"company_key": "company_a"},
+                        )
+                    )
+
+        slack_mock.assert_not_called()
+
+    def test_validation_failure_and_empty_queue_send_no_slack(self):
+        self._login()
+        cfg = mock.Mock()
+        cfg.slack_webhook_url = "https://hooks.slack.com/services/FAKE"
+
+        with mock.patch(
+            "apps.epos_qbo.services.inventory_review_slack.load_company_config",
+            return_value=cfg,
+        ), mock.patch(
+            "apps.epos_qbo.services.inventory_review_slack.send_slack_success",
+        ) as slack_mock:
+            with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+                final_audit = _write_final_audit(Path(td))
+                self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
+
+                with mock.patch(
+                    "code_scripts.inventory_review_missing_candidates.load_category_mapping_for_company_key",
+                    return_value=(PRODUCT_MAPPING, ""),
+                ), mock.patch(
+                    "code_scripts.inventory_review_missing_candidates.load_qbo_base_name_keys_for_company_key",
+                    return_value=({"aquafina 50cl"}, ""),
+                ):
+                    self.client.post(
+                        reverse(
+                            "epos_qbo:company_inventory_missing_create",
+                            kwargs={"company_key": "company_a"},
+                        ),
+                        {"inventory_start_date": "2099-01-01"},
+                    )
+
+        slack_mock.assert_not_called()
+
+        with mock.patch(
+            "apps.epos_qbo.services.inventory_review_slack.load_company_config",
+            return_value=cfg,
+        ), mock.patch(
+            "apps.epos_qbo.services.inventory_review_slack.send_slack_success",
+        ) as slack_mock2:
+            with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+                rows = [r for r in FINAL_AUDIT_ROWS if "Pack Conflict" not in r]
+                minimal = Path(td) / "minimal.csv"
+                minimal.write_text("\n".join(rows), encoding="utf-8")
+                self._create_inventory_artifact(company_key="company_a", final_audit=minimal)
+
+                with mock.patch(
+                    "apps.epos_qbo.views.dispatch_next_queued_job",
+                    return_value=(None, "queued"),
+                ):
+                    self.client.post(
+                        reverse(
+                            "epos_qbo:company_inventory_retry_catalog_cleanup",
+                            kwargs={"company_key": "company_a"},
+                        )
+                    )
+
+        slack_mock2.assert_not_called()
+
     def test_missing_preview_disables_review_link_when_qbo_snapshot_unavailable(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
