@@ -35,6 +35,16 @@
                 <dt class="text-slate-500 dark:text-slate-400">Scope</dt>
                 <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.scope_label }}</dd>
             </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Category scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.category_scope_label }}</dd>
+            </div>
+            {% if inventory_review_action.total_candidates_in_scope is not None %}
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Candidates in scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.total_candidates_in_scope }}</dd>
+            </div>
+            {% endif %}
             <div class="sm:col-span-2">
                 <dt class="text-slate-500 dark:text-slate-400">Source final audit</dt>
                 <dd class="font-medium text-slate-900 dark:text-slate-100 break-all">{{ inventory_review_action.source_final_audit_name }}</dd>

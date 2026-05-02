@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from math import ceil
 from pathlib import Path
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -61,19 +62,26 @@ from .services.inventory_review_actions import (
     REVIEW_CREATE_MISSING_INTENT,
     SNAPSHOT_PACK_GUARD_MESSAGE,
     build_missing_item_creation_preview,
+    coalesce_picker_date_from_get,
+    collect_category_options,
+    filter_missing_preview_by_category,
     get_catalog_cleanup_rows,
     get_quantity_adjustment_rows,
     get_review_rows_by_reason,
+    inv_start_date_floor_iso,
     load_review_context,
     queue_missing_item_creation_job,
+    resolve_category_scope_labels,
     resolve_txn_date_for_review_missing_item_creation,
     retry_catalog_cleanup_for_review,
     retry_quantity_adjustments_for_review,
+    validate_inventory_start_date_for_missing_queue,
 )
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
     get_business_day_cutoff,
+    get_business_timezone,
     get_business_timezone_display,
     get_target_trading_date,
 )
@@ -3069,6 +3077,11 @@ def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object
             max_quantity_adjustments = 0
         txn_date = str(opts.get("txn_date") or rcm.get("item_inv_start_date") or "").strip()
         txn_date_source = str(rcm.get("txn_date_source") or "").strip()
+        category_scope_label = str(rcm.get("category_label") or "").strip() or "All categories"
+        try:
+            total_in_scope = int(rcm.get("total_candidates_in_scope"))
+        except (TypeError, ValueError):
+            total_in_scope = safe_count + blocked_count
         missing_create_report_url = ""
         missing_create_report_label = ""
         for art in job.artifacts.order_by("-processed_at", "-imported_at"):
@@ -3093,6 +3106,8 @@ def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object
             "has_more_base_names": has_more_base_names,
             "more_base_names_count": more_base_names_count,
             "scope_label": "Safe missing QBO candidates only",
+            "category_scope_label": category_scope_label,
+            "total_candidates_in_scope": total_in_scope,
             "mapping_source": mapping_source,
             "create_qty_policy": qty_policy,
             "create_qty_policy_label": "Initial QtyOnHand from EPOS expected (no separate adjustment in this run).",
@@ -4420,6 +4435,34 @@ def company_inventory_retry_quantity_adjustments(request, company_key):
     return redirect("epos_qbo:run-detail", job_id=job_id)
 
 
+def _inventory_missing_preview_url(
+    company_key: str, *, category: str | None = None, txn_date: str | None = None
+) -> str:
+    base = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company_key},
+    )
+    params: dict[str, str] = {}
+    if category:
+        params["category"] = category
+    if txn_date:
+        params["txn_date"] = txn_date
+    if params:
+        return f"{base}?{urlencode(params)}"
+    return base
+
+
+def _missing_preview_date_input_bounds(*, company_key: str) -> tuple[str, str | None]:
+    """Return (max_date_iso_today_in_business_tz, min_date_iso_from_company_floor_or_None)."""
+
+    tz = get_business_timezone()
+    now = timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    today_iso = now.astimezone(tz).date().isoformat()
+    return today_iso, inv_start_date_floor_iso(company_key)
+
+
 @login_required
 @require_GET
 def company_inventory_missing_preview(request, company_key):
@@ -4427,24 +4470,58 @@ def company_inventory_missing_preview(request, company_key):
     if error_redirect is not None:
         return error_redirect
 
-    preview = build_missing_item_creation_preview(context=context)
+    preview_full = build_missing_item_creation_preview(context=context)
+    category_param = str(request.GET.get("category") or "").strip()
+    preview = filter_missing_preview_by_category(preview_full, category_param)
+
+    resolved_iso, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    picker_date = coalesce_picker_date_from_get(
+        company_key=company.company_key,
+        get_value=request.GET.get("txn_date"),
+        resolved_iso=resolved_iso,
+    )
+    category_options = collect_category_options(preview_full.rows)
+    _, queue_category_label = resolve_category_scope_labels(
+        preview_full=preview_full,
+        category_scope=category_param,
+    )
+    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
+    date_max_iso, date_min_iso = _missing_preview_date_input_bounds(company_key=company.company_key)
+
     review_url = reverse(
         "epos_qbo:company_inventory_review",
         kwargs={"company_key": company.company_key},
     )
-    item_inv_start_date, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
-        company_key=company.company_key, artifact=context.artifact
+    confirm_post_url = reverse(
+        "epos_qbo:company_inventory_missing_create",
+        kwargs={"company_key": company.company_key},
     )
-    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
+    category_filter_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+
     template_context = {
         "company": company,
         "preview": preview,
+        "preview_full": preview_full,
         "review_url": review_url,
         "final_audit_filename": context.final_audit_path.name,
-        "item_inv_start_date": item_inv_start_date,
+        "resolved_item_inv_start_date": resolved_iso,
+        "item_inv_start_date": picker_date,
+        "picker_date": picker_date,
         "txn_date_source": txn_date_source,
         "missing_item_queue_allowed": missing_item_queue_allowed,
         "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
+        "confirm_post_url": confirm_post_url,
+        "category_options": category_options,
+        "selected_category": category_param,
+        "queue_category_label": queue_category_label,
+        "date_input_max": date_max_iso,
+        "date_input_min": date_min_iso,
+        "category_filter_url": category_filter_url,
     }
     template_context.update(_nav_context())
     template_context.update(
@@ -4460,7 +4537,7 @@ def company_inventory_missing_preview(request, company_key):
                     ),
                 },
                 {"label": "Inventory Review", "url": review_url},
-                {"label": "Missing Preview", "url": None},
+                {"label": "Missing QuickBooks Items", "url": None},
             ],
             back_url=review_url,
             back_label="Inventory Review",
@@ -4477,71 +4554,15 @@ def company_inventory_missing_preview(request, company_key):
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_GET
 def company_inventory_missing_create_confirm(request, company_key):
-    company, context, error_redirect = _inventory_review_action_context(request, company_key)
-    if error_redirect is not None:
-        return error_redirect
-    review_url = reverse(
-        "epos_qbo:company_inventory_review",
-        kwargs={"company_key": company.company_key},
-    )
-    missing_preview_url = reverse(
-        "epos_qbo:company_inventory_missing_preview",
-        kwargs={"company_key": company.company_key},
-    )
-    preview = build_missing_item_creation_preview(context=context)
-    item_inv_start_date, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
-        company_key=company.company_key, artifact=context.artifact
-    )
-    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
-    if preview.safe_count <= 0:
-        messages.info(request, "No safe missing-item candidates to create in the latest final audit.")
-        return redirect(missing_preview_url)
+    """Compatibility URL: confirmation now happens on the Missing Preview page."""
 
-    safe_rows = [r for r in preview.rows if r.is_safe]
-    preview_limit = 25
-    run = context.artifact.run_job if context.artifact and context.artifact.run_job_id else None
-    source_run_label = run.friendly_id if run else ""
-    template_context = {
-        "company": company,
-        "preview": preview,
-        "safe_rows": safe_rows,
-        "preview_safe_rows": safe_rows[:preview_limit],
-        "preview_limit": preview_limit,
-        "safe_total": len(safe_rows),
-        "review_url": review_url,
-        "missing_preview_url": missing_preview_url,
-        "final_audit_filename": context.final_audit_path.name,
-        "source_run_label": source_run_label,
-        "confirm_post_url": reverse(
-            "epos_qbo:company_inventory_missing_create",
-            kwargs={"company_key": company.company_key},
-        ),
-        "item_inv_start_date": item_inv_start_date,
-        "txn_date_source": txn_date_source,
-        "missing_item_queue_allowed": missing_item_queue_allowed,
-        "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
-    }
-    template_context.update(_nav_context())
-    template_context.update(
-        _breadcrumb_context(
-            [
-                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
-                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
-                {
-                    "label": company.display_name,
-                    "url": reverse(
-                        "epos_qbo:company-detail",
-                        kwargs={"company_key": company.company_key},
-                    ),
-                },
-                {"label": "Inventory Review", "url": review_url},
-                {"label": "Confirm missing items", "url": None},
-            ],
-            back_url=missing_preview_url,
-            back_label="Missing preview",
-        )
+    target = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company_key},
     )
-    return render(request, "epos_qbo/company_inventory_missing_create_confirm.html", template_context)
+    if request.GET:
+        return redirect(f"{target}?{request.GET.urlencode()}")
+    return redirect(target)
 
 
 @login_required
@@ -4551,39 +4572,70 @@ def company_inventory_missing_create(request, company_key):
     company, context, error_redirect = _inventory_review_action_context(request, company_key)
     if error_redirect is not None:
         return error_redirect
-    review_url = reverse(
-        "epos_qbo:company_inventory_review",
-        kwargs={"company_key": company.company_key},
-    )
     missing_preview_url = reverse(
         "epos_qbo:company_inventory_missing_preview",
         kwargs={"company_key": company.company_key},
     )
-    preview = build_missing_item_creation_preview(context=context)
-    if str(preview.qbo_base_names_error or "").strip():
+
+    preview_full = build_missing_item_creation_preview(context=context)
+    category_param = str(request.POST.get("category_scope") or "").strip()
+    preview_scoped = filter_missing_preview_by_category(preview_full, category_param)
+
+    resolved_iso, resolved_src = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    txn_date, date_err, txn_src = validate_inventory_start_date_for_missing_queue(
+        company_key=company.company_key,
+        posted=request.POST.get("inventory_start_date"),
+        resolved_iso=resolved_iso,
+        resolved_source=resolved_src,
+    )
+
+    posted_date_raw = str(request.POST.get("inventory_start_date") or "").strip()
+    redirect_back = _inventory_missing_preview_url(
+        company.company_key,
+        category=category_param or None,
+        txn_date=posted_date_raw or None,
+    )
+
+    if date_err:
+        messages.error(request, date_err)
+        return redirect(redirect_back)
+
+    if str(preview_full.qbo_base_names_error or "").strip():
         messages.error(request, SNAPSHOT_PACK_GUARD_MESSAGE)
-        return redirect(
-            "epos_qbo:company_inventory_missing_create_confirm",
-            company_key=company.company_key,
-        )
+        return redirect(redirect_back)
+
+    cat_key, cat_label = resolve_category_scope_labels(
+        preview_full=preview_full,
+        category_scope=category_param,
+    )
+
     job = queue_missing_item_creation_job(
         company=company,
         artifact=context.artifact,
         final_audit_path=context.final_audit_path,
-        preview=preview,
+        preview=preview_scoped,
         requested_by=request.user,
+        txn_date=txn_date,
+        txn_date_source=txn_src,
+        category_filter_key=cat_key,
+        category_label=cat_label,
     )
     if job is None:
         messages.warning(
             request,
-            "No safe missing-item candidates to queue. Refresh the preview and try again if the audit changed.",
+            "No safe missing-item candidates to queue in the selected scope. Refresh the preview and try again if the audit changed.",
         )
-        return redirect(missing_preview_url)
+        return redirect(redirect_back)
 
     dispatch_next_queued_job()
+    scope_note = ""
+    if cat_label != "All categories":
+        scope_note = f" ({cat_label})"
     messages.success(
         request,
-        f"Missing item creation queued for {preview.safe_count} safe candidate(s).",
+        f"Missing item creation queued for {preview_scoped.safe_count} safe candidate(s){scope_note} using InvStartDate {txn_date}.",
     )
     return redirect("epos_qbo:run-detail", job_id=job.id)
 

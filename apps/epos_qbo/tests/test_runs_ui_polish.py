@@ -340,9 +340,12 @@ class RunsAndRunDetailRenderingTests(TestCase):
                     "source_artifact_id": 9,
                     "source_final_audit": "/data/reports/final_audit_company_a.csv",
                     "affected_base_names": affected,
-                    "row_count": 15,
+                    "row_count": 12,
                     "safe_count": 12,
                     "blocked_count": 3,
+                    "total_candidates_in_scope": 15,
+                    "category_filter": None,
+                    "category_label": "All categories",
                     "create_qty_policy": "initial_qty_from_epos",
                     "mapping_source": "Product.Mapping.csv",
                     "item_inv_start_date": "2026-04-27",
@@ -375,6 +378,9 @@ class RunsAndRunDetailRenderingTests(TestCase):
         self.assertIn("InvStartDate", html)
         self.assertIn("2026-04-27", html)
         self.assertIn("test.fixture", html)
+        self.assertIn("Category scope", html)
+        self.assertIn("All categories", html)
+        self.assertIn("Candidates in scope", html)
 
     def test_run_detail_review_create_missing_shows_per_item_report_link(self):
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:

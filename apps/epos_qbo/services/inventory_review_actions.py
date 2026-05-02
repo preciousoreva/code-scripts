@@ -32,10 +32,14 @@ classifier.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
 from django.http import Http404
+from django.utils import timezone
+
+from apps.epos_qbo.business_date import get_business_timezone, get_target_trading_date
 
 from code_scripts.inventory_review_missing_candidates import (
     _normalize_base_name,
@@ -412,12 +416,16 @@ def _build_missing_create_inventory_options(
     artifact: RunArtifact,
     final_audit_path: Path,
     preview: MissingPreview,
+    txn_date: str,
+    txn_date_source: str,
+    category_filter_key: str | None,
+    category_label: str,
 ) -> dict[str, Any]:
     safe_rows = [r for r in preview.rows if r.is_safe]
     base_names = [str(r.suggested_qbo_name or "").strip() for r in safe_rows if str(r.suggested_qbo_name or "").strip()]
-    txn_date, txn_source = resolve_txn_date_for_review_missing_item_creation(
-        company_key=company_key, artifact=artifact
-    )
+    queued_safe = len(base_names)
+    total_scope = len(preview.rows)
+    blocked_scope = int(preview.blocked_count)
     return {
         "base_names": base_names,
         "max_catalog_fixes": 0,
@@ -428,15 +436,186 @@ def _build_missing_create_inventory_options(
             "source_artifact_id": int(artifact.id) if artifact.id else None,
             "source_final_audit": str(final_audit_path),
             "affected_base_names": base_names,
-            "row_count": int(len(preview.rows)),
-            "safe_count": int(preview.safe_count),
-            "blocked_count": int(preview.blocked_count),
+            "row_count": int(queued_safe),
+            "safe_count": int(queued_safe),
+            "blocked_count": blocked_scope,
+            "total_candidates_in_scope": int(total_scope),
+            "category_filter": category_filter_key,
+            "category_label": category_label,
             "create_qty_policy": "initial_qty_from_epos",
             "mapping_source": "Product.Mapping.csv",
             "item_inv_start_date": txn_date,
-            "txn_date_source": txn_source,
+            "txn_date_source": txn_date_source,
         },
     }
+
+
+def normalize_category_for_match(value: str | None) -> str:
+    """Normalize category labels for comparison (case-insensitive, whitespace-collapsed)."""
+
+    if not value:
+        return ""
+    return " ".join(str(value).strip().split()).casefold()
+
+
+def collect_category_options(rows: list[MissingPreviewRow]) -> list[tuple[str, str]]:
+    """Unique categories as (normalized_key, display_label), sorted by display label."""
+
+    seen: dict[str, str] = {}
+    for row in rows:
+        label = str(row.category or "").strip()
+        if not label:
+            continue
+        key = normalize_category_for_match(label)
+        if key not in seen:
+            seen[key] = label
+    return sorted(seen.items(), key=lambda kv: kv[1].casefold())
+
+
+def filter_missing_preview_by_category(
+    preview: MissingPreview,
+    category_scope: str | None,
+) -> MissingPreview:
+    """Restrict preview rows to a single category (display string must match normalized category)."""
+
+    raw = (category_scope or "").strip()
+    if not raw:
+        return preview
+    target = normalize_category_for_match(raw)
+    if not target:
+        return preview
+    filtered = [r for r in preview.rows if normalize_category_for_match(r.category) == target]
+    safe_n = sum(1 for r in filtered if r.is_safe)
+    blocked_n = len(filtered) - safe_n
+    return MissingPreview(
+        rows=filtered,
+        safe_count=safe_n,
+        blocked_count=blocked_n,
+        mapping_loaded=preview.mapping_loaded,
+        mapping_error=preview.mapping_error,
+        qbo_base_names_loaded=preview.qbo_base_names_loaded,
+        qbo_base_names_error=preview.qbo_base_names_error,
+    )
+
+
+def resolve_category_scope_labels(
+    *,
+    preview_full: MissingPreview,
+    category_scope: str | None,
+) -> tuple[str | None, str]:
+    """Return (stored_category_filter_key_or_None, human category_label for RunJob UX)."""
+
+    raw = (category_scope or "").strip()
+    if not raw:
+        return None, "All categories"
+    target = normalize_category_for_match(raw)
+    for row in preview_full.rows:
+        if normalize_category_for_match(row.category) == target:
+            display = str(row.category).strip() or raw
+            return target, display
+    return target, raw
+
+
+def _parse_iso_date(value: str) -> date | None:
+    v = str(value or "").strip()[:10]
+    if len(v) != 10 or v[4] != "-" or v[7] != "-":
+        return None
+    try:
+        return date(int(v[:4]), int(v[5:7]), int(v[8:10]))
+    except ValueError:
+        return None
+
+
+def coalesce_picker_date_from_get(
+    *,
+    company_key: str,
+    get_value: str | None,
+    resolved_iso: str,
+) -> str:
+    """Use GET txn_date only when it parses and satisfies floor/max constraints."""
+
+    raw = str(get_value or "").strip()
+    if not raw:
+        return resolved_iso
+    parsed = _parse_iso_date(raw)
+    if parsed is None:
+        return resolved_iso
+    tz = get_business_timezone()
+    now = timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    today = now.astimezone(tz).date()
+    if parsed > today:
+        return resolved_iso
+    floor_s = inv_start_date_floor_iso(company_key)
+    if floor_s:
+        fd = _parse_iso_date(floor_s)
+        if fd and parsed < fd:
+            return resolved_iso
+    return parsed.isoformat()
+
+
+def inv_start_date_floor_iso(company_key: str) -> str | None:
+    """Return YYYY-MM-DD floor from company config when configured."""
+
+    try:
+        from code_scripts.company_config import load_company_config
+
+        cfg = load_company_config(company_key)
+        floor = str(cfg.inv_start_date_floor or "").strip()[:10]
+        if len(floor) == 10 and floor[4] == "-" and floor[7] == "-":
+            return floor
+    except Exception:
+        pass
+    return None
+
+
+def validate_inventory_start_date_for_missing_queue(
+    *,
+    company_key: str,
+    posted: str | None,
+    resolved_iso: str,
+    resolved_source: str,
+) -> tuple[str | None, str | None, str]:
+    """Validate POSTed inventory start date.
+
+    Returns ``(txn_date_iso, error_message_or_None, txn_date_source)``.
+    """
+
+    raw_post = str(posted or "").strip()
+    parsed_post = _parse_iso_date(raw_post) if raw_post else None
+    resolved_d = _parse_iso_date(resolved_iso)
+    if resolved_d is None:
+        resolved_d = get_target_trading_date()
+
+    if not raw_post:
+        return resolved_iso, None, resolved_source
+
+    if parsed_post is None:
+        return None, "Enter a valid inventory start date (YYYY-MM-DD).", resolved_source
+
+    tz = get_business_timezone()
+    now = timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    today = now.astimezone(tz).date()
+    if parsed_post > today:
+        return None, "Inventory start date cannot be in the future.", resolved_source
+
+    floor_s = inv_start_date_floor_iso(company_key)
+    if floor_s:
+        floor_d = _parse_iso_date(floor_s)
+        if floor_d and parsed_post < floor_d:
+            return (
+                None,
+                f"Inventory start date cannot be earlier than {floor_s} (company configuration).",
+                resolved_source,
+            )
+
+    txn_src = resolved_source
+    if parsed_post != resolved_d:
+        txn_src = "operator_selected"
+    return parsed_post.isoformat(), None, txn_src
 
 
 def queue_missing_item_creation_job(
@@ -446,6 +625,10 @@ def queue_missing_item_creation_job(
     final_audit_path: Path,
     preview: MissingPreview,
     requested_by,
+    txn_date: str,
+    txn_date_source: str,
+    category_filter_key: str | None,
+    category_label: str,
 ) -> RunJob | None:
     """Queue inventory pipeline run that only creates safe missing Inventory items."""
 
@@ -456,6 +639,10 @@ def queue_missing_item_creation_job(
         artifact=artifact,
         final_audit_path=final_audit_path,
         preview=preview,
+        txn_date=txn_date,
+        txn_date_source=txn_date_source,
+        category_filter_key=category_filter_key,
+        category_label=category_label,
     )
     if not inventory_options.get("base_names"):
         return None
