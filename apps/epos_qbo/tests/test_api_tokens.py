@@ -71,6 +71,15 @@ class ApiTokensPageTests(TestCase):
         # Critical state should still render an action-required explanation
         self.assertContains(response, "No QuickBooks tokens are stored")
 
+    def test_missing_realm_id_renders_config_required_state(self):
+        """A company with no realm_id should show a config-required state (not 'missing tokens')."""
+        self.company.config_json["qbo"].pop("realm_id", None)
+        self.company.save(update_fields=["config_json"])
+        self._login()
+        response = self.client.get(reverse("epos_qbo:api-tokens"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Realm ID not configured")
+
     def test_healthy_state_omits_explanation_panel(self):
         """Healthy connected cards should not render the redundant green explanation."""
         self._login()

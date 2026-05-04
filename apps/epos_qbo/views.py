@@ -356,11 +356,11 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
             "severity": "critical",
             "status_color": "red",
             "token_unknown": True,
-            "connection_state": "missing_tokens",
+            "connection_state": "missing_realm_id",
             "access_state": "unknown",
-            "display_label": "QBO re-authentication required",
-            "display_subtext": guidance,
-            "status_message": "QBO re-authentication required",
+            "display_label": "Realm ID not configured",
+            "display_subtext": "Add the Realm ID in company settings to connect QuickBooks.",
+            "status_message": "Realm ID not configured",
             "days_remaining": None,
             "expiring_soon": False,
             "expires_at": None,
@@ -370,8 +370,8 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
                 {
                     "severity": "red",
                     "icon": "solar:shield-warning-linear",
-                    "message": "QBO re-authentication required",
-                    "action": "refresh_token",
+                    "message": "Realm ID not configured",
+                    "action": "configure_realm_id",
                 }
             ],
         }
@@ -4884,6 +4884,7 @@ CONNECTION_STATE_LABELS = {
     "connected": "Connected",
     "refresh_expiring": "Refresh token expiring soon",
     "refresh_expired": "Refresh token expired",
+    "missing_realm_id": "Realm ID not configured",
     "missing_refresh_token": "Missing refresh token",
     "missing_tokens": "Missing tokens",
 }
@@ -4898,6 +4899,7 @@ CONNECTION_STATE_EXPLAIN = {
         "Refresh token has expired. Sync will fail until you re-authorize QuickBooks "
         "for this company."
     ),
+    "missing_realm_id": "No Realm ID is configured for this company. Add the Realm ID in the company settings.",
     "missing_refresh_token": (
         "No refresh token is stored for this company. Re-authorize QuickBooks to "
         "establish a connection."
@@ -4958,19 +4960,14 @@ def _safe_fingerprint(value: str | None) -> str | None:
     return f"{text[:6]}…"
 
 
-def _build_token_page_context(company: CompanyConfigRecord) -> dict:
+def _build_token_page_context(company: CompanyConfigRecord, *, tokens: dict | None) -> dict:
     cfg = company.config_json or {}
     qbo = cfg.get("qbo") or {}
     realm_id = qbo.get("realm_id")
     raw_environment = qbo.get("environment") or "production"
     environment = normalize_qbo_environment(raw_environment, default="production")
-
-    tokens = None
-    if realm_id:
-        try:
-            tokens = load_tokens(company.company_key, realm_id)
-        except Exception:  # pragma: no cover - defensive
-            tokens = None
+    if not realm_id:
+        tokens = None
 
     health = _company_token_health(company, tokens=tokens)
 
@@ -5110,7 +5107,28 @@ def api_tokens_page(request):
         pass
 
     companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
-    company_views = [_build_token_page_context(c) for c in companies]
+    pairs: list[tuple[str, str]] = []
+    for c in companies:
+        cfg = c.config_json or {}
+        qbo = cfg.get("qbo") or {}
+        realm_id = qbo.get("realm_id")
+        if realm_id:
+            pairs.append((c.company_key, realm_id))
+
+    tokens_by_pair = {}
+    if pairs:
+        try:
+            tokens_by_pair = load_tokens_batch(pairs)
+        except Exception:  # pragma: no cover - defensive
+            tokens_by_pair = {}
+
+    company_views = []
+    for c in companies:
+        cfg = c.config_json or {}
+        qbo = cfg.get("qbo") or {}
+        realm_id = qbo.get("realm_id")
+        tokens = tokens_by_pair.get((c.company_key, realm_id)) if realm_id else None
+        company_views.append(_build_token_page_context(c, tokens=tokens))
 
     summary = {
         "total": len(company_views),

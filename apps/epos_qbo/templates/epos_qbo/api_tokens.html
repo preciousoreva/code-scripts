@@ -107,23 +107,23 @@
                 </div>
             </header>
 
-            <div class="p-6">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-8">
+            <div class="p-6 sm:p-7">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
                     <!-- Connection details -->
                     <section>
                         <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">Connection details</h3>
                         <dl class="space-y-3 text-sm">
-                            <div class="flex justify-between gap-4">
+                            <div class="grid grid-cols-[7.5rem,1fr] gap-x-4 items-start">
                                 <dt class="text-slate-500 dark:text-slate-400">Realm ID</dt>
-                                <dd class="font-mono text-xs text-slate-900 dark:text-slate-100 text-right break-all">{{ c.realm_id|default:"—" }}</dd>
+                                <dd class="min-w-0 font-mono text-xs text-slate-900 dark:text-slate-100 text-right break-all">{{ c.realm_id|default:"—" }}</dd>
                             </div>
-                            <div class="flex justify-between gap-4">
+                            <div class="grid grid-cols-[7.5rem,1fr] gap-x-4 items-start">
                                 <dt class="text-slate-500 dark:text-slate-400">Environment</dt>
-                                <dd class="text-slate-900 dark:text-slate-100 font-medium">{{ c.environment_label }}</dd>
+                                <dd class="min-w-0 text-slate-900 dark:text-slate-100 font-medium text-right">{{ c.environment_label }}</dd>
                             </div>
-                            <div class="flex justify-between gap-4">
+                            <div class="grid grid-cols-[7.5rem,1fr] gap-x-4 items-start">
                                 <dt class="text-slate-500 dark:text-slate-400">Last updated</dt>
-                                <dd class="text-right text-slate-900 dark:text-slate-100">
+                                <dd class="min-w-0 text-right text-slate-900 dark:text-slate-100">
                                     {% if c.updated_at_human %}
                                     <span class="block">{{ c.updated_at_human }}</span>
                                     {% if c.updated_at_relative %}
@@ -138,7 +138,7 @@
                     <!-- Token state -->
                     <section>
                         <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">Token state</h3>
-                        <div class="space-y-5 text-sm">
+                        <div class="space-y-6 text-sm">
                             <div>
                                 <div class="flex justify-between gap-4">
                                     <p class="text-slate-500 dark:text-slate-400">Access token</p>
@@ -149,7 +149,7 @@
                                     Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} ({{ c.access_expires_relative }}){% endif %}
                                 </p>
                                 {% endif %}
-                                <p class="mt-2 text-xs text-slate-500 dark:text-slate-400 italic">Short-lived; auto-refreshes during sync.</p>
+                                <p class="mt-1.5 text-[11px] text-slate-400 dark:text-slate-400">Short-lived; auto-refreshes during sync.</p>
                             </div>
                             <div>
                                 <div class="flex justify-between gap-4">
@@ -161,7 +161,7 @@
                                 {% if c.refresh_expires_relative %}
                                 <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 text-right">{{ c.refresh_expires_relative }}</p>
                                 {% endif %}
-                                <p class="mt-2 text-xs text-slate-500 dark:text-slate-400 italic">Long-lived; required to keep the connection alive.</p>
+                                <p class="mt-1.5 text-[11px] text-slate-400 dark:text-slate-400">Long-lived; required to keep the connection alive.</p>
                             </div>
                         </div>
                     </section>
