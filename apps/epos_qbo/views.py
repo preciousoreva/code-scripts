@@ -4984,11 +4984,6 @@ def _build_token_page_context(company: CompanyConfigRecord) -> dict:
     access_state = health.get("access_state") or "unknown"
 
     explanation = CONNECTION_STATE_EXPLAIN.get(state, health.get("display_subtext") or "")
-    if state == "connected" and access_state == "expired":
-        explanation = (
-            "Access token has expired but the refresh token is healthy — "
-            "the next sync will automatically obtain a new access token."
-        )
 
     environment_mismatch = bool(
         token_environment
@@ -5000,11 +4995,18 @@ def _build_token_page_context(company: CompanyConfigRecord) -> dict:
         status_color = "red"
         explanation = (
             "Stored token environment does not match this company's configured environment. "
-            "Re-authorize QuickBooks in the correct environment before running sync."
+            "The connection must be re-authorized in the correct environment before running sync."
         )
     else:
         state_label = CONNECTION_STATE_LABELS.get(state, health.get("display_label") or "Unknown")
         status_color = health.get("status_color") or "slate"
+
+    show_explanation = environment_mismatch or state in {
+        "missing_tokens",
+        "missing_refresh_token",
+        "refresh_expired",
+        "refresh_expiring",
+    }
 
     return {
         "company_key": company.company_key,
@@ -5026,6 +5028,7 @@ def _build_token_page_context(company: CompanyConfigRecord) -> dict:
         "updated_at_relative": _format_relative(updated_at),
         "client_fingerprint": fingerprint,
         "explanation": explanation,
+        "show_explanation": show_explanation,
         "has_tokens": bool(tokens),
         "has_realm_id": bool(realm_id),
         "environment_mismatch": environment_mismatch,

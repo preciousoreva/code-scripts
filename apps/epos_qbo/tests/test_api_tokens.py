@@ -68,6 +68,33 @@ class ApiTokensPageTests(TestCase):
             response = self.client.get(reverse("epos_qbo:api-tokens"))
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Missing tokens")
+        # Critical state should still render an action-required explanation
+        self.assertContains(response, "No QuickBooks tokens are stored")
+
+    def test_healthy_state_omits_explanation_panel(self):
+        """Healthy connected cards should not render the redundant green explanation."""
+        self._login()
+        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._healthy_tokens()):
+            response = self.client.get(reverse("epos_qbo:api-tokens"))
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        # The duplicated healthy phrase must not appear inline per company.
+        self.assertNotIn("Safe to run sync", html)
+        self.assertNotIn(
+            "Access token has expired but the refresh token is healthy",
+            html,
+        )
+
+    def test_refresh_expiring_state_shows_explanation_panel(self):
+        self._login()
+        now_ts = int(timezone.now().timestamp())
+        tokens = self._healthy_tokens()
+        tokens["refresh_expires_at"] = now_ts + 60 * 60 * 24  # 1 day left
+        with mock.patch("apps.epos_qbo.views.load_tokens", return_value=tokens):
+            response = self.client.get(reverse("epos_qbo:api-tokens"))
+        self.assertEqual(response.status_code, 200)
+        # Operator-facing action-required text should appear.
+        self.assertContains(response, "Re-authorize QuickBooks before it expires")
 
     def test_page_does_not_leak_tokens(self):
         self._login()
