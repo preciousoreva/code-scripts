@@ -7,7 +7,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="space-y-8">
+    <div class="space-y-7">
     <div>
         <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ page_title }}</h1>
         <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">{{ page_subtitle }}</p>
@@ -28,36 +28,43 @@
     {% endif %}
 
     <!-- Explainer -->
-    <section class="bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+    <section x-data="{ showInfo: false }" class="bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 rounded-xl p-4">
         <div class="flex items-start gap-3">
             <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 shrink-0">
                 <iconify-icon icon="solar:info-circle-linear" width="20"></iconify-icon>
             </div>
-            <div class="text-sm text-slate-700 dark:text-slate-300 space-y-1">
-                <p><span class="font-medium text-slate-900 dark:text-slate-100">Access tokens</span> expire often (about an hour) and refresh automatically during sync — they're not something to worry about.</p>
-                <p><span class="font-medium text-slate-900 dark:text-slate-100">Refresh tokens</span> are the long-lived credential keeping QuickBooks connected. If a refresh token expires or becomes invalid, you must re-authorize QuickBooks for that company.</p>
+            <div class="min-w-0">
+                <p class="text-sm text-slate-700 dark:text-slate-300">
+                    Access tokens auto-refresh during sync. Refresh tokens keep the connection alive.
+                </p>
+                <button type="button" class="mt-2 text-xs font-medium text-blue-700 dark:text-blue-300 hover:underline"
+                    @click="showInfo = !showInfo" x-text="showInfo ? 'Hide details' : 'Details'"></button>
+                <div x-show="showInfo" x-cloak class="mt-2 text-sm text-slate-700 dark:text-slate-300 space-y-1">
+                    <p><span class="font-medium text-slate-900 dark:text-slate-100">Access tokens</span> expire often (about an hour) and refresh automatically during sync — they're not something to worry about.</p>
+                    <p><span class="font-medium text-slate-900 dark:text-slate-100">Refresh tokens</span> are the long-lived credential keeping QuickBooks connected. If a refresh token expires or becomes invalid, you must re-authorize QuickBooks for that company.</p>
+                </div>
             </div>
         </div>
     </section>
 
     <!-- Summary cards -->
     <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-3.5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Connected</p>
             <p class="mt-2 text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{{ summary.connected }}</p>
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Healthy connections</p>
         </div>
-        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-3.5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Expiring soon</p>
             <p class="mt-2 text-2xl font-semibold text-amber-600 dark:text-amber-400">{{ summary.expiring }}</p>
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Refresh token approaching expiry</p>
         </div>
-        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-3.5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Needs re-auth</p>
             <p class="mt-2 text-2xl font-semibold text-red-600 dark:text-red-400">{{ summary.needs_reauth }}</p>
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Action required</p>
         </div>
-        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-3.5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Missing</p>
             <p class="mt-2 text-2xl font-semibold text-slate-700 dark:text-slate-200">{{ summary.missing }}</p>
             <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">No tokens stored</p>
@@ -108,70 +115,37 @@
             </header>
 
             <div class="p-6">
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-12">
-                    <!-- Connection details -->
-                    <section>
-                        <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">Connection details</h3>
-                        <div class="space-y-5">
-                            <div>
-                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Realm ID</p>
-                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100 font-mono break-all">
-                                    {{ c.realm_id|default:"—" }}
-                                </p>
-                            </div>
-                            <div>
-                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Environment</p>
-                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{{ c.environment_label }}</p>
-                            </div>
-                            <div>
-                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Last updated</p>
-                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-                                    {% if c.updated_at_human %}{{ c.updated_at_human }}{% else %}—{% endif %}
-                                </p>
-                                {% if c.updated_at_relative %}
-                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ c.updated_at_relative }}</p>
-                                {% endif %}
-                            </div>
-                        </div>
-                    </section>
-
-                    <!-- Token state -->
-                    <section>
-                        <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">Token state</h3>
-                        <div class="space-y-5">
-                            <div>
-                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Access token</p>
-                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-                                    {{ c.access_state_label }}
-                                </p>
-                                {% if c.access_expires_at_human %}
-                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                    Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} · {{ c.access_expires_relative }}{% endif %}
-                                </p>
-                                {% endif %}
-                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Short-lived; auto-refreshes during sync.</p>
-                            </div>
-                            <div>
-                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Refresh token</p>
-                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-                                    {% if c.refresh_expires_at_human %}
-                                        Healthy
-                                    {% else %}
-                                        {% if c.has_tokens %}No expiry recorded{% else %}Not stored{% endif %}
-                                    {% endif %}
-                                </p>
-                                {% if c.refresh_expires_at_human %}
-                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                    Expires {{ c.refresh_expires_at_human }}{% if c.refresh_expires_relative %} · {{ c.refresh_expires_relative }}{% endif %}
-                                </p>
-                                {% elif c.refresh_expires_relative %}
-                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ c.refresh_expires_relative }}</p>
-                                {% endif %}
-                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Long-lived; required to keep the connection alive.</p>
-                            </div>
-                        </div>
-                    </section>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                    <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/20 p-4">
+                        <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Access token</p>
+                        <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{{ c.access_state_label }}</p>
+                        {% if c.access_expires_at_human %}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} · {{ c.access_expires_relative }}{% endif %}
+                        </p>
+                        {% endif %}
+                    </div>
+                    <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/20 p-4">
+                        <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Refresh token</p>
+                        <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                            {% if c.needs_reauth %}Needs re-auth{% elif c.expiring_soon %}Expiring soon{% else %}Healthy{% endif %}
+                        </p>
+                        {% if c.refresh_expires_at_human %}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            Expires {{ c.refresh_expires_at_human }}{% if c.refresh_expires_relative %} · {{ c.refresh_expires_relative }}{% endif %}
+                        </p>
+                        {% else %}
+                        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {% if c.has_tokens %}No expiry recorded{% else %}Not stored{% endif %}
+                        </p>
+                        {% endif %}
+                    </div>
                 </div>
+                {% if c.updated_at_human %}
+                <p class="mt-4 text-xs text-slate-500 dark:text-slate-400">
+                    Last updated {{ c.updated_at_human }}{% if c.updated_at_relative %} · {{ c.updated_at_relative }}{% endif %}
+                </p>
+                {% endif %}
 
                 <!-- Action-required explanation (only when not healthy) -->
                 {% if c.show_explanation and c.explanation %}
