@@ -115,41 +115,40 @@
             </header>
 
             <div class="px-6 py-6 sm:px-7 sm:py-7">
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-8 sm:gap-10">
-                    <div class="space-y-0">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 sm:gap-x-10 gap-y-6 sm:gap-y-0 sm:items-start">
+                    <div>
                         <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Access token</p>
-                        <p class="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ c.access_state_label }}</p>
+                        <p class="mt-2.5 sm:mt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ c.access_state_label }}</p>
                         {% if c.access_expires_at_human %}
-                        <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        <p class="mt-2 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                             Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} · {{ c.access_expires_relative }}{% endif %}
                         </p>
                         {% endif %}
                     </div>
-                    <div class="space-y-0 sm:border-l sm:border-slate-200 dark:sm:border-slate-700 sm:pl-10">
+                    <div class="sm:border-l sm:border-slate-200 dark:sm:border-slate-700 sm:pl-10">
                         <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Refresh token</p>
-                        <p class="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        <p class="mt-2.5 sm:mt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
                             {% if c.needs_reauth %}Needs re-auth{% elif c.expiring_soon %}Expiring soon{% else %}Healthy{% endif %}
                         </p>
                         {% if c.refresh_expires_at_human %}
-                        <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        <p class="mt-2 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                             Expires {{ c.refresh_expires_at_human }}{% if c.refresh_expires_relative %} · {{ c.refresh_expires_relative }}{% endif %}
                         </p>
                         {% else %}
-                        <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        <p class="mt-2 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                             {% if c.has_tokens %}No expiry recorded{% else %}Not stored{% endif %}
                         </p>
                         {% endif %}
                     </div>
+                    {% if c.updated_at_human %}
+                    <div class="sm:col-span-2 mt-6 pt-5 border-t border-slate-200 dark:border-slate-700">
+                        <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last updated</p>
+                        <p class="mt-2.5 text-sm font-medium text-slate-900 dark:text-slate-100">
+                            {{ c.updated_at_human }}{% if c.updated_at_relative %}<span class="text-slate-500 dark:text-slate-400 font-normal"> · {{ c.updated_at_relative }}</span>{% endif %}
+                        </p>
+                    </div>
+                    {% endif %}
                 </div>
-
-                {% if c.updated_at_human %}
-                <div class="mt-9 pt-7 border-t border-slate-100 dark:border-slate-700">
-                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last updated</p>
-                    <p class="mt-2 text-sm font-medium text-slate-900 dark:text-slate-100">
-                        {{ c.updated_at_human }}{% if c.updated_at_relative %}<span class="text-slate-500 dark:text-slate-400 font-normal"> · {{ c.updated_at_relative }}</span>{% endif %}
-                    </p>
-                </div>
-                {% endif %}
 
                 {% if c.show_explanation and c.explanation %}
                 <div class="mt-6 rounded-xl px-4 py-3.5
