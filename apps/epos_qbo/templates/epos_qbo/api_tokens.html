@@ -83,8 +83,8 @@
     <section class="mt-10 space-y-6" x-data="{ open: {} }">
         {% for c in company_views %}
         <article class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-            <header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between px-6 py-5 sm:px-7 border-b border-slate-200 dark:border-slate-700">
-                <div class="flex items-start gap-4 min-w-0">
+            <header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between px-6 py-6 sm:px-7 sm:py-6 border-b border-slate-200 dark:border-slate-700">
+                <div class="flex items-center gap-4 min-w-0">
                     <div class="flex items-center justify-center w-11 h-11 rounded-xl
                         {% if c.status_color == 'emerald' %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400
                         {% elif c.status_color == 'amber' %}bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400
@@ -92,7 +92,7 @@
                         {% else %}bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400{% endif %} shrink-0">
                         <iconify-icon icon="solar:buildings-2-linear" width="22"></iconify-icon>
                     </div>
-                    <div class="min-w-0 pt-0.5">
+                    <div class="min-w-0">
                         <h2 class="text-base sm:text-lg font-semibold text-slate-900 dark:text-slate-100 truncate">{{ c.display_name }}</h2>
                         <p class="text-xs text-slate-500 dark:text-slate-400 font-mono truncate mt-0.5">{{ c.company_key }}</p>
                     </div>
@@ -114,7 +114,7 @@
                 </div>
             </header>
 
-            <div class="p-6 sm:px-7">
+            <div class="px-6 py-6 sm:px-7 sm:py-7">
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-8 sm:gap-10">
                     <div class="space-y-0">
                         <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Access token</p>
@@ -143,16 +143,12 @@
                 </div>
 
                 {% if c.updated_at_human %}
-                <div class="mt-8 pt-6 border-t border-slate-100 dark:border-slate-700">
+                <div class="mt-9 pt-7 border-t border-slate-100 dark:border-slate-700">
                     <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last updated</p>
                     <p class="mt-2 text-sm font-medium text-slate-900 dark:text-slate-100">
                         {{ c.updated_at_human }}{% if c.updated_at_relative %}<span class="text-slate-500 dark:text-slate-400 font-normal"> · {{ c.updated_at_relative }}</span>{% endif %}
                     </p>
                 </div>
-                {% endif %}
-
-                {% if c.realm_id %}
-                <p class="mt-4 text-[11px] text-slate-400 dark:text-slate-500 font-mono truncate" title="{{ c.realm_id }}">Realm {{ c.realm_id }}</p>
                 {% endif %}
 
                 {% if c.show_explanation and c.explanation %}
@@ -168,7 +164,7 @@
                 {% endif %}
             </div>
 
-            <div class="px-6 py-5 sm:px-7 border-t border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/25">
+            <div class="border-t border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/20 px-6 py-4 sm:px-7">
                 {% if perms.epos_qbo.can_trigger_runs %}
                 <div class="space-y-3">
                     <div class="flex flex-wrap items-center gap-2">
@@ -188,7 +184,7 @@
                                 Refresh access token
                             </button>
                         </form>
-                        <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm">
+                        <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700">
                             <iconify-icon icon="solar:bug-linear" width="14"></iconify-icon>
                             <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
                         </button>
@@ -200,7 +196,7 @@
                 {% else %}
                 <div class="space-y-3">
                     <div class="flex flex-wrap items-center gap-2">
-                        <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm">
+                        <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700">
                             <iconify-icon icon="solar:bug-linear" width="14"></iconify-icon>
                             <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
                         </button>
