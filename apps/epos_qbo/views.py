@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
+
+import requests
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from math import ceil
 from pathlib import Path
@@ -24,7 +27,17 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from oiat_portal.paths import OPS_REPORTS_DIR
-from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
+from code_scripts.token_manager import (
+    ensure_db_initialized,
+    get_access_token,
+    load_tokens,
+    load_tokens_batch,
+    refresh_access_token,
+)
+from code_scripts.company_config import (
+    get_qbo_api_base_url,
+    normalize_qbo_environment,
+)
 
 from .forms import (
     CompanyAdvancedForm,
@@ -4858,3 +4871,344 @@ def tools_verify_mapping_api(request):
         return JsonResponse({"success": False, "error": combined or "Verification failed."}, status=502)
 
     return JsonResponse({"success": True, "output": output})
+
+
+# ---------------------------------------------------------------------------
+# API Tokens / QuickBooks Connections page
+# ---------------------------------------------------------------------------
+
+_TOKEN_PAGE_LOGGER = logging.getLogger("epos_qbo.api_tokens")
+QBO_TEST_QUERY_TIMEOUT = 15
+
+CONNECTION_STATE_LABELS = {
+    "connected": "Connected",
+    "refresh_expiring": "Refresh token expiring soon",
+    "refresh_expired": "Refresh token expired",
+    "missing_refresh_token": "Missing refresh token",
+    "missing_tokens": "Missing tokens",
+}
+
+CONNECTION_STATE_EXPLAIN = {
+    "connected": "Safe to run sync. QuickBooks credentials are healthy.",
+    "refresh_expiring": (
+        "Sync still works, but the long-lived refresh token will expire soon. "
+        "Re-authorize QuickBooks before it expires to avoid disruption."
+    ),
+    "refresh_expired": (
+        "Refresh token has expired. Sync will fail until you re-authorize QuickBooks "
+        "for this company."
+    ),
+    "missing_refresh_token": (
+        "No refresh token is stored for this company. Re-authorize QuickBooks to "
+        "establish a connection."
+    ),
+    "missing_tokens": (
+        "No QuickBooks tokens are stored for this company yet. "
+        "Run the OAuth flow to connect."
+    ),
+}
+
+ACCESS_STATE_LABELS = {
+    "active": "Active",
+    "expired": "Expired (will refresh on next sync)",
+    "unknown": "Unknown",
+}
+
+
+def _format_local_datetime(epoch_seconds: int | float | None) -> str | None:
+    if not epoch_seconds:
+        return None
+    try:
+        ts = float(epoch_seconds)
+    except (TypeError, ValueError):
+        return None
+    try:
+        dt = datetime.fromtimestamp(ts, tz=dt_timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    try:
+        local_dt = dt.astimezone(get_business_timezone())
+    except Exception:
+        local_dt = dt
+    return local_dt.strftime("%Y-%m-%d %H:%M %Z").strip()
+
+
+def _format_relative(epoch_seconds: int | float | None) -> str | None:
+    if not epoch_seconds:
+        return None
+    try:
+        target = int(epoch_seconds)
+    except (TypeError, ValueError):
+        return None
+    now_ts = int(timezone.now().timestamp())
+    delta = target - now_ts
+    if delta == 0:
+        return "now"
+    if delta > 0:
+        return f"in {_format_duration(delta)}"
+    return f"{_format_duration(-delta)} ago"
+
+
+def _safe_fingerprint(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = str(value)
+    if len(text) <= 8:
+        return text
+    return f"{text[:6]}…"
+
+
+def _build_token_page_context(company: CompanyConfigRecord) -> dict:
+    cfg = company.config_json or {}
+    qbo = cfg.get("qbo") or {}
+    realm_id = qbo.get("realm_id")
+    raw_environment = qbo.get("environment") or "production"
+    environment = normalize_qbo_environment(raw_environment, default="production")
+
+    tokens = None
+    if realm_id:
+        try:
+            tokens = load_tokens(company.company_key, realm_id)
+        except Exception:  # pragma: no cover - defensive
+            tokens = None
+
+    health = _company_token_health(company, tokens=tokens)
+
+    access_expires_at = (tokens or {}).get("expires_at")
+    refresh_expires_at = (tokens or {}).get("refresh_expires_at")
+    updated_at = (tokens or {}).get("updated_at")
+    fingerprint = _safe_fingerprint((tokens or {}).get("client_fingerprint"))
+    token_environment = (tokens or {}).get("environment")
+
+    state = health.get("connection_state") or "missing_tokens"
+    access_state = health.get("access_state") or "unknown"
+
+    explanation = CONNECTION_STATE_EXPLAIN.get(state, health.get("display_subtext") or "")
+    if state == "connected" and access_state == "expired":
+        explanation = (
+            "Access token has expired but the refresh token is healthy — "
+            "the next sync will automatically obtain a new access token."
+        )
+
+    environment_mismatch = bool(
+        token_environment
+        and normalize_qbo_environment(token_environment, default=environment) != environment
+    )
+
+    if environment_mismatch:
+        state_label = "Environment mismatch"
+        status_color = "red"
+        explanation = (
+            "Stored token environment does not match this company's configured environment. "
+            "Re-authorize QuickBooks in the correct environment before running sync."
+        )
+    else:
+        state_label = CONNECTION_STATE_LABELS.get(state, health.get("display_label") or "Unknown")
+        status_color = health.get("status_color") or "slate"
+
+    return {
+        "company_key": company.company_key,
+        "display_name": company.display_name,
+        "is_active": company.is_active,
+        "realm_id": realm_id or "",
+        "environment": environment,
+        "environment_label": "Production" if environment == "production" else "Sandbox",
+        "connection_state": state,
+        "connection_state_label": state_label,
+        "status_color": status_color,
+        "access_state": access_state,
+        "access_state_label": ACCESS_STATE_LABELS.get(access_state, "Unknown"),
+        "access_expires_at_human": _format_local_datetime(access_expires_at),
+        "access_expires_relative": _format_relative(access_expires_at),
+        "refresh_expires_at_human": _format_local_datetime(refresh_expires_at),
+        "refresh_expires_relative": _format_relative(refresh_expires_at),
+        "updated_at_human": _format_local_datetime(updated_at),
+        "updated_at_relative": _format_relative(updated_at),
+        "client_fingerprint": fingerprint,
+        "explanation": explanation,
+        "has_tokens": bool(tokens),
+        "has_realm_id": bool(realm_id),
+        "environment_mismatch": environment_mismatch,
+        "needs_reauth": state in {"missing_tokens", "missing_refresh_token", "refresh_expired"} or environment_mismatch,
+        "expiring_soon": state == "refresh_expiring",
+    }
+
+
+def _qbo_test_query(company_key: str, realm_id: str, environment: str) -> tuple[bool, str]:
+    """Run a harmless CompanyInfo query and return (ok, message)."""
+    try:
+        access_token = get_access_token(company_key, realm_id)
+    except RuntimeError as exc:
+        return False, _humanize_token_error(str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        return False, f"Failed to obtain access token: {exc}"
+
+    base_url = get_qbo_api_base_url(environment)
+    url = f"{base_url}/v3/company/{realm_id}/query"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    params = {"query": "select CompanyName from CompanyInfo", "minorversion": "70"}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=QBO_TEST_QUERY_TIMEOUT)
+    except requests.Timeout:
+        return False, "QuickBooks API call timed out."
+    except requests.RequestException as exc:
+        return False, f"Network error contacting QuickBooks: {exc}"
+
+    if resp.status_code == 200:
+        try:
+            payload = resp.json()
+            company_name = (
+                payload.get("QueryResponse", {})
+                .get("CompanyInfo", [{}])[0]
+                .get("CompanyName")
+            )
+        except (ValueError, IndexError, AttributeError):
+            company_name = None
+        if company_name:
+            return True, f"Connection OK — QuickBooks returned “{company_name}”."
+        return True, "Connection OK — QuickBooks responded successfully."
+
+    if resp.status_code == 401:
+        return False, "QuickBooks rejected the access token (401). Try refreshing the token or re-authorize."
+    if resp.status_code == 403:
+        return False, "QuickBooks denied access (403). Check that this realm is authorized for the configured app."
+    return False, f"QuickBooks returned HTTP {resp.status_code}."
+
+
+def _humanize_token_error(error_text: str) -> str:
+    text = (error_text or "").lower()
+    if "invalid_grant" in text:
+        return "Refresh token is invalid or expired. Re-authorize QuickBooks for this company."
+    if "invalid_client" in text:
+        return "QBO client ID/secret mismatch. Check the server environment configuration."
+    if "no tokens found" in text:
+        return "No tokens stored for this company. Run the OAuth flow to connect QuickBooks."
+    if "no refresh_token" in text:
+        return "No refresh token stored. Re-authorize QuickBooks for this company."
+    if "realm id mismatch" in text:
+        return "Realm ID mismatch — stored tokens belong to a different QuickBooks company. Re-authorize."
+    if "qbo environment mismatch" in text or "different qbo environment" in text:
+        return "QBO environment mismatch — stored tokens were created for a different environment."
+    if "different intuit client" in text:
+        return "Stored tokens were created with a different Intuit client ID. Re-run the OAuth flow."
+    return error_text or "Token operation failed."
+
+
+@login_required
+def api_tokens_page(request):
+    """QuickBooks Connections page: per-company token health and actions."""
+    try:
+        ensure_db_initialized()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    company_views = [_build_token_page_context(c) for c in companies]
+
+    summary = {
+        "total": len(company_views),
+        "connected": sum(1 for c in company_views if c["connection_state"] == "connected" and not c["environment_mismatch"]),
+        "expiring": sum(1 for c in company_views if c["expiring_soon"]),
+        "needs_reauth": sum(1 for c in company_views if c["needs_reauth"]),
+        "missing": sum(1 for c in company_views if c["connection_state"] in {"missing_tokens", "missing_refresh_token"}),
+    }
+
+    context = {
+        "page_title": "QuickBooks Connections",
+        "page_subtitle": "Monitor, refresh, and test QuickBooks Online API tokens for each configured company.",
+        "company_views": company_views,
+        "summary": summary,
+        "has_companies": bool(company_views),
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "QuickBooks Connections", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/api_tokens.html", context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def api_tokens_test(request, company_key: str):
+    """Run a harmless QBO query to verify the connection."""
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key, is_active=True)
+    cfg = company.config_json or {}
+    qbo = cfg.get("qbo") or {}
+    realm_id = qbo.get("realm_id")
+    environment = normalize_qbo_environment(qbo.get("environment"), default="production")
+
+    if not realm_id:
+        messages.error(request, f"{company.display_name}: realm ID is not configured.")
+        return redirect("epos_qbo:api-tokens")
+
+    tokens = load_tokens(company.company_key, realm_id)
+    if not tokens:
+        messages.error(
+            request,
+            f"{company.display_name}: no QuickBooks tokens stored. Run the OAuth flow to connect.",
+        )
+        return redirect("epos_qbo:api-tokens")
+
+    ok, message = _qbo_test_query(company.company_key, realm_id, environment)
+    if ok:
+        messages.success(request, f"{company.display_name}: {message}")
+    else:
+        _TOKEN_PAGE_LOGGER.warning(
+            "QBO test connection failed for %s: %s", company.company_key, message
+        )
+        messages.error(request, f"{company.display_name}: {message}")
+    return redirect("epos_qbo:api-tokens")
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def api_tokens_refresh(request, company_key: str):
+    """Force a refresh of the access token and verify it."""
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key, is_active=True)
+    cfg = company.config_json or {}
+    qbo = cfg.get("qbo") or {}
+    realm_id = qbo.get("realm_id")
+    environment = normalize_qbo_environment(qbo.get("environment"), default="production")
+
+    if not realm_id:
+        messages.error(request, f"{company.display_name}: realm ID is not configured.")
+        return redirect("epos_qbo:api-tokens")
+
+    try:
+        refresh_access_token(company.company_key, realm_id)
+    except RuntimeError as exc:
+        friendly = _humanize_token_error(str(exc))
+        _TOKEN_PAGE_LOGGER.warning(
+            "QBO refresh failed for %s: %s", company.company_key, friendly
+        )
+        messages.error(request, f"{company.display_name}: {friendly}")
+        return redirect("epos_qbo:api-tokens")
+    except Exception as exc:  # pragma: no cover - defensive
+        messages.error(request, f"{company.display_name}: refresh failed ({exc}).")
+        return redirect("epos_qbo:api-tokens")
+
+    ok, message = _qbo_test_query(company.company_key, realm_id, environment)
+    if ok:
+        messages.success(
+            request,
+            f"{company.display_name}: tokens refreshed. {message}",
+        )
+    else:
+        messages.warning(
+            request,
+            f"{company.display_name}: tokens refreshed, but health check reported: {message}",
+        )
+    return redirect("epos_qbo:api-tokens")

@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block title %}QuickBooks Connections • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <div>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ page_title }}</h1>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">{{ page_subtitle }}</p>
+    </div>
+
+    {% if messages %}
+    <div class="space-y-2">
+        {% for message in messages %}
+        <div class="rounded-md border px-4 py-3 text-sm
+            {% if message.tags == 'success' %}border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-800 dark:text-emerald-200
+            {% elif message.tags == 'warning' %}border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200
+            {% elif message.tags == 'error' %}border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200
+            {% else %}border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-slate-200{% endif %}">
+            {{ message }}
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Explainer -->
+    <section class="bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+        <div class="flex items-start gap-3">
+            <div class="flex items-center justify-center w-9 h-9 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 shrink-0">
+                <iconify-icon icon="solar:info-circle-linear" width="20"></iconify-icon>
+            </div>
+            <div class="text-sm text-slate-700 dark:text-slate-300 space-y-1">
+                <p><span class="font-medium text-slate-900 dark:text-slate-100">Access tokens</span> expire often (about an hour) and refresh automatically during sync — they're not something to worry about.</p>
+                <p><span class="font-medium text-slate-900 dark:text-slate-100">Refresh tokens</span> are the long-lived credential keeping QuickBooks connected. If a refresh token expires or becomes invalid, you must re-authorize QuickBooks for that company.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Summary cards -->
+    <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Connected</p>
+            <p class="mt-2 text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{{ summary.connected }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Healthy connections</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Expiring soon</p>
+            <p class="mt-2 text-2xl font-semibold text-amber-600 dark:text-amber-400">{{ summary.expiring }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Refresh token approaching expiry</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Needs re-auth</p>
+            <p class="mt-2 text-2xl font-semibold text-red-600 dark:text-red-400">{{ summary.needs_reauth }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Action required</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-4 shadow-sm">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Missing</p>
+            <p class="mt-2 text-2xl font-semibold text-slate-700 dark:text-slate-200">{{ summary.missing }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">No tokens stored</p>
+        </div>
+    </section>
+
+    <!-- Company cards -->
+    {% if not has_companies %}
+    <section class="bg-white dark:bg-slate-800 border border-dashed border-slate-300 dark:border-slate-600 rounded-xl p-10 text-center">
+        <iconify-icon icon="solar:buildings-2-linear" width="40" class="text-slate-400 dark:text-slate-500"></iconify-icon>
+        <h2 class="mt-3 text-lg font-medium text-slate-900 dark:text-slate-100">No active companies</h2>
+        <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">Create or activate a company configuration to manage QuickBooks tokens here.</p>
+        <a href="{% url 'epos_qbo:companies-list' %}" class="btn btn-secondary mt-4 inline-flex">Go to Companies</a>
+    </section>
+    {% else %}
+    <section class="space-y-4" x-data="{ open: {} }">
+        {% for c in company_views %}
+        <article class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl shadow-sm overflow-hidden">
+            <header class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-5 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-700">
+                <div class="flex items-start gap-3 min-w-0">
+                    <div class="flex items-center justify-center w-10 h-10 rounded-lg
+                        {% if c.status_color == 'emerald' %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400
+                        {% elif c.status_color == 'amber' %}bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400
+                        {% elif c.status_color == 'red' %}bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400
+                        {% else %}bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400{% endif %} shrink-0">
+                        <iconify-icon icon="solar:buildings-2-linear" width="20"></iconify-icon>
+                    </div>
+                    <div class="min-w-0">
+                        <h2 class="text-base sm:text-lg font-medium text-slate-900 dark:text-slate-100 truncate">{{ c.display_name }}</h2>
+                        <p class="text-xs text-slate-500 dark:text-slate-400 font-mono truncate">{{ c.company_key }}</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium
+                        {% if c.status_color == 'emerald' %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800
+                        {% elif c.status_color == 'amber' %}bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800
+                        {% elif c.status_color == 'red' %}bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800
+                        {% else %}bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600{% endif %}">
+                        <span class="w-1.5 h-1.5 rounded-full
+                            {% if c.status_color == 'emerald' %}bg-emerald-500{% elif c.status_color == 'amber' %}bg-amber-500{% elif c.status_color == 'red' %}bg-red-500{% else %}bg-slate-400{% endif %}"></span>
+                        {{ c.connection_state_label }}
+                    </span>
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide
+                        {% if c.environment == 'production' %}bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300{% else %}bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300{% endif %}">
+                        {{ c.environment_label }}
+                    </span>
+                </div>
+            </header>
+
+            <div class="px-5 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-3 gap-5">
+                <!-- Metadata -->
+                <dl class="space-y-3 text-sm">
+                    <div>
+                        <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Realm ID</dt>
+                        <dd class="mt-0.5 font-mono text-slate-800 dark:text-slate-200 break-all">{{ c.realm_id|default:"—" }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Environment</dt>
+                        <dd class="mt-0.5 text-slate-800 dark:text-slate-200">{{ c.environment_label }}</dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Last updated</dt>
+                        <dd class="mt-0.5 text-slate-800 dark:text-slate-200">
+                            {% if c.updated_at_human %}{{ c.updated_at_human }}{% if c.updated_at_relative %} <span class="text-xs text-slate-500 dark:text-slate-400">({{ c.updated_at_relative }})</span>{% endif %}{% else %}—{% endif %}
+                        </dd>
+                    </div>
+                </dl>
+
+                <!-- Token states -->
+                <div class="space-y-3 text-sm">
+                    <div>
+                        <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Access token</p>
+                        <p class="mt-0.5 text-slate-800 dark:text-slate-200">{{ c.access_state_label }}</p>
+                        {% if c.access_expires_at_human %}
+                        <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                            Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} ({{ c.access_expires_relative }}){% endif %}
+                        </p>
+                        {% endif %}
+                        <p class="mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">Short-lived; auto-refreshes during sync.</p>
+                    </div>
+                    <div>
+                        <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Refresh token</p>
+                        {% if c.refresh_expires_at_human %}
+                        <p class="mt-0.5 text-slate-800 dark:text-slate-200">Expires {{ c.refresh_expires_at_human }}</p>
+                        <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ c.refresh_expires_relative|default:"" }}</p>
+                        {% else %}
+                        <p class="mt-0.5 text-slate-800 dark:text-slate-200">{% if c.has_tokens %}No expiry recorded{% else %}Not stored{% endif %}</p>
+                        {% endif %}
+                        <p class="mt-0.5 text-[11px] text-slate-400 dark:text-slate-500">Long-lived; required to keep the connection alive.</p>
+                    </div>
+                </div>
+
+                <!-- Explanation + actions -->
+                <div class="space-y-4 text-sm">
+                    <div class="rounded-lg border px-3 py-2.5
+                        {% if c.status_color == 'emerald' %}border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-900/10 text-emerald-800 dark:text-emerald-200
+                        {% elif c.status_color == 'amber' %}border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-900/10 text-amber-800 dark:text-amber-200
+                        {% elif c.status_color == 'red' %}border-red-200 dark:border-red-800 bg-red-50/60 dark:bg-red-900/10 text-red-800 dark:text-red-200
+                        {% else %}border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300{% endif %}">
+                        <p class="text-sm leading-relaxed">{{ c.explanation }}</p>
+                    </div>
+
+                    {% if perms.epos_qbo.can_trigger_runs %}
+                    <div class="flex flex-wrap items-center gap-2">
+                        <form method="post" action="{% url 'epos_qbo:api-tokens-test' company_key=c.company_key %}">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-secondary btn-sm">
+                                <iconify-icon icon="solar:test-tube-linear" width="14"></iconify-icon>
+                                Test connection
+                            </button>
+                        </form>
+                        <form method="post" action="{% url 'epos_qbo:api-tokens-refresh' company_key=c.company_key %}">
+                            {% csrf_token %}
+                            <button type="submit"
+                                title="Uses the stored refresh token to obtain a new access token. Does not re-authorize QuickBooks."
+                                class="btn {% if c.needs_reauth %}btn-secondary{% else %}btn-primary{% endif %} btn-sm">
+                                <iconify-icon icon="solar:refresh-linear" width="14"></iconify-icon>
+                                Refresh access token
+                            </button>
+                        </form>
+                        <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm">
+                            <iconify-icon icon="solar:bug-linear" width="14"></iconify-icon>
+                            <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
+                        </button>
+                    </div>
+                    {% else %}
+                    <p class="text-xs text-slate-500 dark:text-slate-400">
+                        You don't have permission to test or refresh tokens.
+                    </p>
+                    <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm">
+                        <iconify-icon icon="solar:bug-linear" width="14"></iconify-icon>
+                        <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
+                    </button>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div x-show="open[{{ forloop.counter0 }}]" x-cloak class="px-5 sm:px-6 pb-5 -mt-2">
+                <div class="rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900/40 p-4">
+                    <h3 class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Diagnostics</h3>
+                    <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs font-mono text-slate-700 dark:text-slate-300">
+                        <div>
+                            <dt class="text-slate-500 dark:text-slate-400">company_key</dt>
+                            <dd>{{ c.company_key }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-slate-500 dark:text-slate-400">realm_id</dt>
+                            <dd class="break-all">{{ c.realm_id|default:"—" }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-slate-500 dark:text-slate-400">environment</dt>
+                            <dd>{{ c.environment }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-slate-500 dark:text-slate-400">connection_state</dt>
+                            <dd>{{ c.connection_state }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-slate-500 dark:text-slate-400">access_state</dt>
+                            <dd>{{ c.access_state }}</dd>
+                        </div>
+                        <div>
+                            <dt class="text-slate-500 dark:text-slate-400">client fingerprint</dt>
+                            <dd>{{ c.client_fingerprint|default:"—" }}</dd>
+                        </div>
+                    </dl>
+                </div>
+            </div>
+        </article>
+        {% endfor %}
+    </section>
+    {% endif %}
+</div>
+{% endblock %}
