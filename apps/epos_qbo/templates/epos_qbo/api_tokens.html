@@ -107,61 +107,67 @@
                 </div>
             </header>
 
-            <div class="p-6 sm:p-7">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
+            <div class="p-6">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-12">
                     <!-- Connection details -->
                     <section>
                         <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">Connection details</h3>
-                        <dl class="space-y-3 text-sm">
-                            <div class="grid grid-cols-[7.5rem,1fr] gap-x-4 items-start">
-                                <dt class="text-slate-500 dark:text-slate-400">Realm ID</dt>
-                                <dd class="min-w-0 font-mono text-xs text-slate-900 dark:text-slate-100 text-right break-all">{{ c.realm_id|default:"—" }}</dd>
+                        <div class="space-y-5">
+                            <div>
+                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Realm ID</p>
+                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100 font-mono break-all">
+                                    {{ c.realm_id|default:"—" }}
+                                </p>
                             </div>
-                            <div class="grid grid-cols-[7.5rem,1fr] gap-x-4 items-start">
-                                <dt class="text-slate-500 dark:text-slate-400">Environment</dt>
-                                <dd class="min-w-0 text-slate-900 dark:text-slate-100 font-medium text-right">{{ c.environment_label }}</dd>
+                            <div>
+                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Environment</p>
+                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{{ c.environment_label }}</p>
                             </div>
-                            <div class="grid grid-cols-[7.5rem,1fr] gap-x-4 items-start">
-                                <dt class="text-slate-500 dark:text-slate-400">Last updated</dt>
-                                <dd class="min-w-0 text-right text-slate-900 dark:text-slate-100">
-                                    {% if c.updated_at_human %}
-                                    <span class="block">{{ c.updated_at_human }}</span>
-                                    {% if c.updated_at_relative %}
-                                    <span class="block mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ c.updated_at_relative }}</span>
-                                    {% endif %}
-                                    {% else %}—{% endif %}
-                                </dd>
+                            <div>
+                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Last updated</p>
+                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                                    {% if c.updated_at_human %}{{ c.updated_at_human }}{% else %}—{% endif %}
+                                </p>
+                                {% if c.updated_at_relative %}
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ c.updated_at_relative }}</p>
+                                {% endif %}
                             </div>
-                        </dl>
+                        </div>
                     </section>
 
                     <!-- Token state -->
                     <section>
                         <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">Token state</h3>
-                        <div class="space-y-6 text-sm">
+                        <div class="space-y-5">
                             <div>
-                                <div class="flex justify-between gap-4">
-                                    <p class="text-slate-500 dark:text-slate-400">Access token</p>
-                                    <p class="text-slate-900 dark:text-slate-100 font-medium text-right">{{ c.access_state_label }}</p>
-                                </div>
+                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Access token</p>
+                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                                    {{ c.access_state_label }}
+                                </p>
                                 {% if c.access_expires_at_human %}
-                                <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 text-right">
-                                    Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} ({{ c.access_expires_relative }}){% endif %}
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                    Expires {{ c.access_expires_at_human }}{% if c.access_expires_relative %} · {{ c.access_expires_relative }}{% endif %}
                                 </p>
                                 {% endif %}
-                                <p class="mt-1.5 text-[11px] text-slate-400 dark:text-slate-400">Short-lived; auto-refreshes during sync.</p>
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Short-lived; auto-refreshes during sync.</p>
                             </div>
                             <div>
-                                <div class="flex justify-between gap-4">
-                                    <p class="text-slate-500 dark:text-slate-400">Refresh token</p>
-                                    <p class="text-slate-900 dark:text-slate-100 font-medium text-right">
-                                        {% if c.refresh_expires_at_human %}Expires {{ c.refresh_expires_at_human }}{% else %}{% if c.has_tokens %}No expiry recorded{% else %}Not stored{% endif %}{% endif %}
-                                    </p>
-                                </div>
-                                {% if c.refresh_expires_relative %}
-                                <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 text-right">{{ c.refresh_expires_relative }}</p>
+                                <p class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Refresh token</p>
+                                <p class="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+                                    {% if c.refresh_expires_at_human %}
+                                        Healthy
+                                    {% else %}
+                                        {% if c.has_tokens %}No expiry recorded{% else %}Not stored{% endif %}
+                                    {% endif %}
+                                </p>
+                                {% if c.refresh_expires_at_human %}
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                    Expires {{ c.refresh_expires_at_human }}{% if c.refresh_expires_relative %} · {{ c.refresh_expires_relative }}{% endif %}
+                                </p>
+                                {% elif c.refresh_expires_relative %}
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ c.refresh_expires_relative }}</p>
                                 {% endif %}
-                                <p class="mt-1.5 text-[11px] text-slate-400 dark:text-slate-400">Long-lived; required to keep the connection alive.</p>
+                                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Long-lived; required to keep the connection alive.</p>
                             </div>
                         </div>
                     </section>
@@ -184,11 +190,8 @@
             <!-- Action footer -->
             <div class="px-6 py-4 border-t border-slate-200 dark:border-slate-600 bg-slate-50/60 dark:bg-slate-700/30">
                 {% if perms.epos_qbo.can_trigger_runs %}
-                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <p class="text-xs text-slate-500 dark:text-slate-400 max-w-md">
-                        Test checks QuickBooks. Refresh gets a new access token using the stored refresh token.
-                    </p>
-                    <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+                <div class="space-y-2">
+                    <div class="flex flex-wrap items-center gap-2">
                         <form method="post" action="{% url 'epos_qbo:api-tokens-test' company_key=c.company_key %}">
                             {% csrf_token %}
                             <button type="submit" class="btn btn-secondary btn-sm">
@@ -210,16 +213,21 @@
                             <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
                         </button>
                     </div>
+                    <p class="text-xs text-slate-500 dark:text-slate-400">
+                        Test checks QuickBooks. Refresh gets a new access token using the stored refresh token.
+                    </p>
                 </div>
                 {% else %}
-                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div class="space-y-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm">
+                            <iconify-icon icon="solar:bug-linear" width="14"></iconify-icon>
+                            <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
+                        </button>
+                    </div>
                     <p class="text-xs text-slate-500 dark:text-slate-400">
                         You don't have permission to test or refresh tokens.
                     </p>
-                    <button type="button" @click="open[{{ forloop.counter0 }}] = !open[{{ forloop.counter0 }}]" class="btn btn-ghost btn-sm sm:self-end">
-                        <iconify-icon icon="solar:bug-linear" width="14"></iconify-icon>
-                        <span x-text="open[{{ forloop.counter0 }}] ? 'Hide diagnostics' : 'View diagnostics'"></span>
-                    </button>
                 </div>
                 {% endif %}
             </div>
