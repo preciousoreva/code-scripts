@@ -15,6 +15,15 @@ from code_scripts import inventory_pipeline, inventory_sync
 
 
 class InventoryPipelineOrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        self._inventory_apply_env = mock.patch.dict(
+            os.environ,
+            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
+            clear=False,
+        )
+        self._inventory_apply_env.start()
+        self.addCleanup(self._inventory_apply_env.stop)
+
     def _args(self, td: str, **overrides) -> argparse.Namespace:
         stock_path = Path(td) / "stock.csv"
         stock_path.write_text("Name,MeasuredCurrentStock\nWidget,5\n", encoding="utf-8")

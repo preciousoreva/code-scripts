@@ -15,6 +15,7 @@ from code_scripts.company_config import (
     get_available_companies,
     load_company_config,
 )
+from code_scripts.inventory_safety import assert_inventory_apply_allowed
 from code_scripts.inventory_sync import (
     _auto_download_stock_csv,
     _collapse_spaces,
@@ -441,6 +442,9 @@ def _run_apply_for_existing_base_pack_variants(
         print("[INFO] No eligible rows to apply for existing-base pack consolidation.")
         print(f"Apply summary: attempted={attempted} consolidated={consolidated} cleaned_up={cleaned_up} skipped={skipped} failed={failed}")
         return _result(0)
+
+    if not dry_run:
+        assert_inventory_apply_allowed(cfg, action="catalog_cleanup_apply")
 
     capped = eligible.head(int(max_products)).copy()
     skipped_due_to_cap = max(0, len(eligible) - len(capped))

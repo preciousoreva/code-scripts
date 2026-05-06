@@ -49,6 +49,7 @@ from code_scripts.inventory_notifications import (
     format_inventory_audit_summary,
     format_scope,
 )
+from code_scripts.inventory_safety import assert_inventory_apply_allowed
 from code_scripts.run_lock import GlobalRunLock
 from code_scripts.slack_notify import send_slack_success
 from code_scripts.qbo_upload import TokenManager, _make_qbo_request, get_repo_root
@@ -1420,6 +1421,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         txn_date = datetime.now().strftime("%Y-%m-%d")
 
     if args.apply:
+        assert_inventory_apply_allowed(config, action="inventory_sync_quantity_adjustment_apply")
         try:
             verify_realm_match(config.company_key, config.realm_id)
         except RuntimeError as exc:

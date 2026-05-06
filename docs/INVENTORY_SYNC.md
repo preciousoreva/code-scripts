@@ -42,6 +42,10 @@ The main Inventory card intentionally exposes only the operator workflow:
 
 Dry-run, audit-only, and low-level catalog cleanup controls stay out of the main Runs UI.
 
+### Inventory apply freeze
+
+Production inventory apply paths are blocked by default during QBO remediation. Audit, preview, stock download, and QBO snapshot fetch paths remain allowed. To intentionally allow inventory apply actions, set `OIAT_ALLOW_INVENTORY_APPLY=true` only for an approved remediation run.
+
 ## CLI Examples
 
 One product:

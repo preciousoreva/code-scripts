@@ -51,6 +51,7 @@ from code_scripts.company_config import (
     get_qbo_api_base_url,
     load_company_config,
 )
+from code_scripts.inventory_safety import assert_inventory_apply_allowed
 from code_scripts.inventory_sync import (
     fetch_qbo_inventory_items_snapshot,
     load_qbo_inventory_item_rows,
@@ -500,6 +501,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not safe_records:
         print("Nothing to apply: no rows have recommended_action=safe_to_inactivate_pack_variant.")
         return 0
+
+    assert_inventory_apply_allowed(config, action="pack_variant_cleanup_apply")
 
     capped = safe_records[: args.max_items]
     print(f"Apply: {len(capped)} of {len(safe_records)} eligible rows (cap={args.max_items}).")

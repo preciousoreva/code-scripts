@@ -47,6 +47,7 @@ from code_scripts.inventory_review_missing_candidates import (
     classify_missing_items_for_audit_file,
     parse_epos_qty_for_item_create,
 )
+from code_scripts.inventory_safety import assert_inventory_apply_allowed
 from code_scripts.inventory_sync import (
     EPOS_NEGATIVE_STOCK_POLICY,
     TokenManager,
@@ -439,6 +440,7 @@ def _apply_exact_match_quantity_adjustments(
     token_mgr: Optional[TokenManager] = None
     run_lock: Optional[GlobalRunLock] = None
     if not dry_run:
+        assert_inventory_apply_allowed(cfg, action="quantity_adjustment_apply")
         verify_realm_match(cfg.company_key, cfg.realm_id)
         token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
         run_lock = GlobalRunLock(holder=f"inventory_pipeline:{cfg.company_key}")
@@ -1281,6 +1283,7 @@ def _run_review_create_missing_items_phase(
     token_mgr: Optional[TokenManager] = None
     run_lock: Optional[GlobalRunLock] = None
     if not dry_run:
+        assert_inventory_apply_allowed(cfg, action="review_create_missing_inventory_items")
         verify_realm_match(cfg.company_key, cfg.realm_id)
         token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
         run_lock = GlobalRunLock(holder=f"inventory_pipeline:{cfg.company_key}")

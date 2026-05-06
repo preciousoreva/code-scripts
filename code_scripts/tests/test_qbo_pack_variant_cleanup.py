@@ -250,6 +250,13 @@ def _common_main_patches(rows):
 
 class ApplyModeGuardsTest(unittest.TestCase):
     def setUp(self):
+        self._inventory_apply_env = mock.patch.dict(
+            os.environ,
+            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
+            clear=False,
+        )
+        self._inventory_apply_env.start()
+        self.addCleanup(self._inventory_apply_env.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self._tmp.name)
 

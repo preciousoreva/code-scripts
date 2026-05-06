@@ -1,5 +1,6 @@
 import csv
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -469,6 +470,13 @@ def _patch_main_dependencies(*, qbo_rows, epos_rows, adjust_account_id=None):
 
 class MainGuardTest(unittest.TestCase):
     def setUp(self):
+        self._inventory_apply_env = mock.patch.dict(
+            os.environ,
+            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
+            clear=False,
+        )
+        self._inventory_apply_env.start()
+        self.addCleanup(self._inventory_apply_env.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
 
@@ -602,6 +610,13 @@ class DryRunPayloadTest(unittest.TestCase):
 
 class ApplyEndToEndTest(unittest.TestCase):
     def setUp(self):
+        self._inventory_apply_env = mock.patch.dict(
+            os.environ,
+            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
+            clear=False,
+        )
+        self._inventory_apply_env.start()
+        self.addCleanup(self._inventory_apply_env.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
 

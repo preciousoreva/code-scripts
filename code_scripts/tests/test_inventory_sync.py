@@ -669,6 +669,15 @@ class InventorySyncAutoDownloadHelperTest(unittest.TestCase):
 
 
 class InventorySyncAutoFetchQboTest(unittest.TestCase):
+    def setUp(self):
+        self._inventory_apply_env = mock.patch.dict(
+            os.environ,
+            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
+            clear=False,
+        )
+        self._inventory_apply_env.start()
+        self.addCleanup(self._inventory_apply_env.stop)
+
     def _build_fake_config(self):
         cfg = mock.Mock()
         cfg.company_key = "company_a"

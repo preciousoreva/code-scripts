@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, mock
@@ -61,6 +62,15 @@ def _classify_rows(*, with_safe: bool = True, include_blocked: bool = True):
 
 
 class ReviewMissingCreatePhaseTests(TestCase):
+    def setUp(self):
+        self._inventory_apply_env = mock.patch.dict(
+            os.environ,
+            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
+            clear=False,
+        )
+        self._inventory_apply_env.start()
+        self.addCleanup(self._inventory_apply_env.stop)
+
     def _cfg(self):
         cfg = mock.Mock()
         cfg.company_key = "company_a"

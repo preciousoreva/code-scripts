@@ -75,6 +75,7 @@ from code_scripts.company_config import (
     get_available_companies,
     load_company_config,
 )
+from code_scripts.inventory_safety import assert_inventory_apply_allowed
 from code_scripts.inventory_sync import (
     load_epos_stock_snapshot,
     load_qbo_inventory_item_rows,
@@ -617,6 +618,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ensure_company_runtime_compatible(config)
 
     if args.apply:
+        assert_inventory_apply_allowed(config, action="pack_variant_consolidation_apply")
         adjust_account_id = (config.inventory_adjustment_account_id or "").strip()
         if not adjust_account_id:
             print(
