@@ -94,7 +94,18 @@ class RunTriggerForm(forms.Form):
 class InventoryTriggerForm(forms.Form):
     """Operator-facing form for the unified Inventory pipeline."""
 
+    SAFE_INVENTORY_MODE_CHOICES = [
+        ("audit_only", "Run Inventory Audit"),
+        ("quantity_preview", "Preview Quantity Adjustments"),
+        ("catalog_plan_only", "Catalog Cleanup Plan"),
+    ]
+
     company_key = forms.SlugField(max_length=64)
+    mode = forms.ChoiceField(
+        choices=SAFE_INVENTORY_MODE_CHOICES,
+        required=False,
+        initial="audit_only",
+    )
     category = forms.CharField(
         max_length=255,
         required=False,
@@ -104,6 +115,7 @@ class InventoryTriggerForm(forms.Form):
 
     def clean(self):
         cleaned = super().clean()
+        cleaned["mode"] = (cleaned.get("mode") or "audit_only").strip() or "audit_only"
         cleaned["category"] = (cleaned.get("category") or "").strip()
         cleaned["product_filter"] = (cleaned.get("product_filter") or "").strip()
         return cleaned

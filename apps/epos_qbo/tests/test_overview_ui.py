@@ -95,6 +95,7 @@ class OverviewUIContextTests(TestCase):
         still_needs_review=0,
         updates=0,
         final_status_counts=None,
+        inventory_stats_extra=None,
         with_artifact=True,
     ):
         finished_at = self.fixed_now - timedelta(minutes=minutes_ago)
@@ -106,6 +107,20 @@ class OverviewUIContextTests(TestCase):
             finished_at=finished_at,
         )
         if with_artifact:
+            upload_stats = {
+                "report_type": "inventory_pipeline",
+                "products_checked": products_checked,
+                "in_sync": in_sync,
+                "blocked_items": blocked_items,
+                "still_needs_review": still_needs_review,
+                "catalog_fixes_applied": updates,
+                "base_items_created": 0,
+                "duplicate_base_items_resolved": 0,
+                "quantity_updates_applied": 0,
+                "final_status_counts": final_status_counts or {"in_sync": in_sync},
+            }
+            if inventory_stats_extra:
+                upload_stats.update(inventory_stats_extra)
             RunArtifact.objects.create(
                 run_job=run,
                 company_key=self.company.company_key,
@@ -117,18 +132,7 @@ class OverviewUIContextTests(TestCase):
                 rows_total=products_checked,
                 rows_kept=in_sync,
                 rows_non_target=blocked_items,
-                upload_stats_json={
-                    "report_type": "inventory_pipeline",
-                    "products_checked": products_checked,
-                    "in_sync": in_sync,
-                    "blocked_items": blocked_items,
-                    "still_needs_review": still_needs_review,
-                    "catalog_fixes_applied": updates,
-                    "base_items_created": 0,
-                    "duplicate_base_items_resolved": 0,
-                    "quantity_updates_applied": 0,
-                    "final_status_counts": final_status_counts or {"in_sync": in_sync},
-                },
+                upload_stats_json=upload_stats,
             )
         return run
 
@@ -349,6 +353,46 @@ class OverviewUIContextTests(TestCase):
         self.assertEqual(company_row["inventory_status"]["label"], "In sync")
         self.assertEqual(company_row["inventory_status"]["updates_applied"], 5)
         self.assertEqual(company_row["inventory_status"]["subtext"], "5 updates applied")
+
+    def test_latest_inventory_status_uses_audit_only_mode_label(self):
+        self._create_inventory_run(
+            products_checked=147,
+            in_sync=147,
+            blocked_items=0,
+            inventory_stats_extra={"inventory_mode": "audit_only"},
+        )
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Audit only")
+        self.assertEqual(company_row["inventory_status"]["severity"], "healthy")
+
+    def test_latest_inventory_status_uses_preview_mode_label(self):
+        self._create_inventory_run(
+            products_checked=147,
+            in_sync=147,
+            blocked_items=0,
+            inventory_stats_extra={"inventory_mode": "quantity_preview"},
+        )
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Preview only")
+
+    def test_latest_inventory_status_shows_catalog_apply_blocked(self):
+        self._create_inventory_run(
+            products_checked=147,
+            in_sync=147,
+            blocked_items=0,
+            inventory_stats_extra={
+                "inventory_mode": "catalog_apply_admin_only",
+                "qbo_write_blocked": True,
+            },
+        )
+
+        company_row = self._company_row()
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Catalog apply blocked")
 
     def test_company_last_run_falls_back_to_latest_artifact_time(self):
         RunArtifact.objects.create(

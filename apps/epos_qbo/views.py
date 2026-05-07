@@ -171,6 +171,23 @@ RUN_ARTIFACT_REPORT_ORDER = [
     "source",
 ]
 RUN_ARTIFACT_REPORT_SUFFIXES = {".csv", ".json"}
+INVENTORY_MODE_LABELS = {
+    "audit_only": "Audit only",
+    "quantity_preview": "Preview only",
+    "quantity_apply": "Applied quantity adjustments",
+    "catalog_plan_only": "Catalog plan only",
+    "catalog_apply_admin_only": "Catalog cleanup applied",
+    "review_create_missing_items": "Missing item creation",
+}
+INVENTORY_MODE_WRITE_INTENT_LABELS = {
+    "audit_only": "No QBO writes",
+    "quantity_preview": "Preview quantity adjustments",
+    "quantity_apply": "Apply quantity adjustments",
+    "catalog_plan_only": "Plan catalog cleanup",
+    "catalog_apply_admin_only": "Admin catalog apply",
+    "review_create_missing_items": "Create missing inventory items",
+}
+INVENTORY_SAFE_APPLY_COPY = "Production inventory apply is blocked by default. Audit and preview are safe."
 
 
 def _unique_existing_resolved_dirs(paths: list[Path]) -> list[Path]:
@@ -652,6 +669,47 @@ def _inventory_summary_from_artifact(artifact: RunArtifact | None) -> dict:
     return summary
 
 
+def _coerce_bool_stat(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _inventory_mode_label(mode: object, summary: dict | None = None) -> str:
+    raw_mode = str(mode or "").strip()
+    summary = summary if isinstance(summary, dict) else {}
+    if raw_mode == "catalog_apply_admin_only" and _coerce_bool_stat(summary.get("qbo_write_blocked")):
+        return "Catalog apply blocked"
+    return INVENTORY_MODE_LABELS.get(raw_mode, raw_mode.replace("_", " ").title() if raw_mode else "")
+
+
+def _inventory_mode_context(job: RunJob, artifacts_list: list[RunArtifact]) -> dict[str, object] | None:
+    if job.scope not in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+        return None
+    opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    summary: dict = {}
+    for artifact in artifacts_list:
+        if _is_inventory_artifact(artifact):
+            summary = _inventory_summary_from_artifact(artifact)
+            if summary:
+                break
+    mode = str(summary.get("inventory_mode") or opts.get("mode") or "").strip()
+    if not mode:
+        return None
+    return {
+        "inventory_mode": mode,
+        "mode_label": _inventory_mode_label(mode, summary),
+        "write_intent": summary.get("write_intent") or INVENTORY_MODE_WRITE_INTENT_LABELS.get(mode, ""),
+        "qbo_write_attempted": _coerce_bool_stat(summary.get("qbo_write_attempted")),
+        "qbo_write_blocked": _coerce_bool_stat(summary.get("qbo_write_blocked")),
+        "catalog_apply_enabled": _coerce_bool_stat(summary.get("catalog_apply_enabled")),
+        "quantity_apply_enabled": _coerce_bool_stat(summary.get("quantity_apply_enabled")),
+        "missing_item_create_enabled": _coerce_bool_stat(summary.get("missing_item_create_enabled")),
+    }
+
+
 def _has_non_in_sync_inventory_rows(summary: dict) -> bool:
     counts = summary.get("final_status_counts") if isinstance(summary.get("final_status_counts"), dict) else {}
     for status, raw_count in counts.items():
@@ -768,6 +826,8 @@ def _inventory_status_for_company(
         }
 
     summary = _inventory_summary_from_artifact(latest_artifact)
+    inventory_mode = str(summary.get("inventory_mode") or "").strip()
+    mode_label = _inventory_mode_label(inventory_mode, summary)
     products_checked = _safe_int_stat(summary, "products_checked")
     in_sync = _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct"))
     blocked = _safe_int_stat(summary, "blocked_items")
@@ -797,13 +857,14 @@ def _inventory_status_for_company(
         }
     if clean:
         return {
-            "label": "In sync",
+            "label": mode_label or "In sync",
             "severity": "healthy",
             "last_sync": last_sync,
             "products_checked": products_checked,
             "blocked_items": blocked,
             "updates_applied": updates,
             "subtext": f"{updates} updates applied" if updates > 0 else "",
+            "inventory_mode": inventory_mode,
         }
     return {
         "label": "Not checked",
@@ -2688,6 +2749,7 @@ def run_detail(request, job_id):
         "run_attention_message": _run_attention_message(job, artifacts_list),
         "run_upload_summary_message": run_upload_summary_message,
         "inventory_review_action": _run_detail_inventory_review_action_context(job),
+        "inventory_mode_context": _inventory_mode_context(job, artifacts_list),
     }
     context.update(_nav_context())
     context.update(
@@ -2816,7 +2878,7 @@ def trigger_run(request):
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_POST
 def trigger_inventory_run(request):
-    """Queue the unified inventory sync pipeline."""
+    """Queue the unified inventory pipeline in an explicit safe mode."""
     form = InventoryTriggerForm(request.POST)
     if not form.is_valid():
         messages.error(request, f"Invalid inventory trigger payload: {form.errors.get_json_data()}")
@@ -2828,7 +2890,8 @@ def trigger_inventory_run(request):
         messages.error(request, "Unknown company key for inventory.")
         return redirect("epos_qbo:runs")
 
-    inventory_options: dict = {}
+    mode = (cleaned.get("mode") or "audit_only").strip() or "audit_only"
+    inventory_options: dict = {"mode": mode}
     category = (cleaned.get("category") or "").strip()
     if category:
         inventory_options["categories"] = [category]
@@ -2846,11 +2909,12 @@ def trigger_inventory_run(request):
     dispatch_next_queued_job()
 
     job.refresh_from_db()
+    mode_label = _inventory_mode_label(mode) or "Inventory run"
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Inventory sync started: {job.friendly_id}")
+        messages.success(request, f"{mode_label} started: {job.friendly_id}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.info(request, f"Inventory sync queued: {job.friendly_id}. It will start automatically.")
+    messages.info(request, f"{mode_label} queued: {job.friendly_id}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 
@@ -3402,6 +3466,10 @@ def _sales_sync_display(artifact: RunArtifact | None) -> str:
 
 def _inventory_activity_label(job: RunJob | None, artifact: RunArtifact | None) -> str:
     summary = _inventory_summary_from_artifact(artifact)
+    opts = job.inventory_options_json if job and isinstance(job.inventory_options_json, dict) else {}
+    mode = str(summary.get("inventory_mode") or opts.get("mode") or "").strip()
+    if mode:
+        return _inventory_mode_label(mode, summary) or "Inventory run"
     apply_stats = summary.get("apply") if isinstance(summary.get("apply"), dict) else {}
     apply_mode = str(apply_stats.get("mode") or "").strip().lower()
     posted = _safe_int_stat(apply_stats, "posted") if apply_stats else 0
@@ -4239,6 +4307,7 @@ def _inventory_retry_confirm_context(
     context,
     action_title: str,
     action_label: str,
+    inventory_mode: str,
     warning_text: str,
     rows: list[dict],
     preview_limit: int = 25,
@@ -4249,6 +4318,10 @@ def _inventory_retry_confirm_context(
         "company": company,
         "action_title": action_title,
         "action_label": action_label,
+        "inventory_mode": inventory_mode,
+        "inventory_mode_label": _inventory_mode_label(inventory_mode),
+        "inventory_write_intent": INVENTORY_MODE_WRITE_INTENT_LABELS.get(inventory_mode, ""),
+        "inventory_safe_apply_copy": INVENTORY_SAFE_APPLY_COPY,
         "warning_text": warning_text,
         "row_count": len(rows),
         "rows": rows,
@@ -4278,12 +4351,13 @@ def company_inventory_retry_catalog_cleanup_confirm(request, company_key):
     template_context = _inventory_retry_confirm_context(
         company=company,
         context=context,
-        action_title="Confirm Catalog Cleanup Retry",
-        action_label="Catalog cleanup retry",
+        action_title="Confirm Scoped Catalog Apply",
+        action_label="Scoped catalog apply",
+        inventory_mode="catalog_apply_admin_only",
         warning_text=(
-            "This will queue a real inventory pipeline job. When the job runs, it may update "
+            "This queues catalog_apply_admin_only for the reviewed rows only. When the job runs, it may update "
             "QuickBooks inventory by consolidating/inactivating duplicate or pack-variant items "
-            "and adjusting base quantities. No changes are made until you confirm."
+            "and adjusting base quantities. Production apply remains blocked unless explicitly unlocked."
         ),
         rows=rows,
     )
@@ -4339,12 +4413,13 @@ def company_inventory_retry_quantity_adjustments_confirm(request, company_key):
     template_context = _inventory_retry_confirm_context(
         company=company,
         context=context,
-        action_title="Confirm Quantity Adjustment Retry",
-        action_label="Quantity adjustment retry",
+        action_title="Confirm Scoped Quantity Apply",
+        action_label="Scoped quantity apply",
+        inventory_mode="quantity_apply",
         warning_text=(
-            "This will queue a real inventory pipeline job. When the job runs, it may post "
+            "This queues quantity_apply for the reviewed rows only. When the job runs, it may post "
             "QuickBooks InventoryAdjustment entries so QBO QtyOnHand matches EPOS. EPOS is the "
-            "source of truth. No changes are made until you confirm."
+            "source of truth. Production apply remains blocked unless explicitly unlocked."
         ),
         rows=rows,
     )

@@ -266,7 +266,13 @@ def _build_retry_inventory_options(
     """
 
     affected_base_names = _affected_base_names(rows)
+    mode = ""
+    if intent == RETRY_INTENT_CATALOG:
+        mode = "catalog_apply_admin_only"
+    elif intent == RETRY_INTENT_QUANTITY:
+        mode = "quantity_apply"
     options: dict[str, Any] = {
+        "mode": mode,
         # Scoped execution inputs for the unified inventory pipeline runner.
         # These are derived from the trusted latest final-audit artifact (not user input).
         "base_names": affected_base_names,
@@ -427,6 +433,7 @@ def _build_missing_create_inventory_options(
     total_scope = len(preview.rows)
     blocked_scope = int(preview.blocked_count)
     return {
+        "mode": REVIEW_CREATE_MISSING_INTENT,
         "base_names": base_names,
         "max_catalog_fixes": 0,
         "max_quantity_adjustments": 0,

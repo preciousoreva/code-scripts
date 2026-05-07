@@ -173,6 +173,7 @@ class InventoryTriggerFormTests(TestCase):
             }
         )
         self.assertTrue(form.is_valid(), form.errors.as_text())
+        self.assertEqual(form.cleaned_data["mode"], "audit_only")
         self.assertEqual(form.cleaned_data["category"], "")
         self.assertEqual(form.cleaned_data["product_filter"], "")
 
@@ -182,9 +183,11 @@ class InventoryTriggerFormTests(TestCase):
                 "company_key": "company_a",
                 "category": " ALCOHOLS & SPIRITS ",
                 "product_filter": " Trophy ",
+                "mode": "quantity_preview",
             }
         )
         self.assertTrue(form.is_valid(), form.errors.as_text())
+        self.assertEqual(form.cleaned_data["mode"], "quantity_preview")
         self.assertEqual(form.cleaned_data["category"], "ALCOHOLS & SPIRITS")
         self.assertEqual(form.cleaned_data["product_filter"], "Trophy")
 

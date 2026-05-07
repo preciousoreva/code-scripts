@@ -74,6 +74,7 @@ class InventoryTriggerViewTests(TestCase):
         self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
         self.assertEqual(job.company_key, "company_a")
         self.assertNotIn("stock_csv", job.inventory_options_json)
+        self.assertEqual(job.inventory_options_json.get("mode"), "audit_only")
         self.assertEqual(job.inventory_options_json.get("categories"), ["Beverages"])
         self.assertEqual(job.inventory_options_json.get("product_filter"), "Widget")
         self.assertNotIn("max_catalog_fixes", job.inventory_options_json)
@@ -93,7 +94,39 @@ class InventoryTriggerViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         job = RunJob.objects.get()
         self.assertEqual(job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
-        self.assertEqual(job.inventory_options_json, {})
+        self.assertEqual(job.inventory_options_json, {"mode": "audit_only"})
+
+    def test_quantity_preview_action_queues_preview_mode(self):
+        self.client.login(username="op", password="pw")
+        with mock.patch(
+            "apps.epos_qbo.views.dispatch_next_queued_job", return_value=(None, "queued")
+        ):
+            response = self.client.post(
+                reverse("epos_qbo:run-trigger-inventory"),
+                {
+                    "company_key": "company_a",
+                    "mode": "quantity_preview",
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        job = RunJob.objects.get()
+        self.assertEqual(job.inventory_options_json, {"mode": "quantity_preview"})
+
+    def test_catalog_plan_action_queues_plan_mode(self):
+        self.client.login(username="op", password="pw")
+        with mock.patch(
+            "apps.epos_qbo.views.dispatch_next_queued_job", return_value=(None, "queued")
+        ):
+            response = self.client.post(
+                reverse("epos_qbo:run-trigger-inventory"),
+                {
+                    "company_key": "company_a",
+                    "mode": "catalog_plan_only",
+                },
+            )
+        self.assertEqual(response.status_code, 302)
+        job = RunJob.objects.get()
+        self.assertEqual(job.inventory_options_json, {"mode": "catalog_plan_only"})
 
     def test_product_filter_stores_scope_without_caps(self):
         self.client.login(username="op", password="pw")
@@ -109,6 +142,7 @@ class InventoryTriggerViewTests(TestCase):
             )
         self.assertEqual(response.status_code, 302)
         job = RunJob.objects.get()
+        self.assertEqual(job.inventory_options_json.get("mode"), "audit_only")
         self.assertEqual(job.inventory_options_json.get("product_filter"), "Widget")
         self.assertNotIn("max_catalog_fixes", job.inventory_options_json)
         self.assertNotIn("max_quantity_adjustments", job.inventory_options_json)
@@ -136,9 +170,11 @@ class InventoryTriggerViewTests(TestCase):
         self.assertIn(">Inventory", html)
         self.assertEqual(html.count('role="tab"'), 2)
         self.assertIn(f'action="{reverse("epos_qbo:run-trigger-inventory")}"', html)
-        self.assertIn("Sync Inventory", html)
+        self.assertIn("Run Inventory Audit", html)
+        self.assertIn("Preview Quantity Adjustments", html)
+        self.assertIn("Catalog Cleanup Plan", html)
         self.assertIn(
-            "Downloads EPOS stock, fixes supported QBO catalog issues, and syncs quantities.",
+            "Production inventory apply is blocked by default. Audit and preview are safe.",
             html,
         )
         self.assertIn("aria-controls=\"sales-run-panel\"", html)
@@ -150,8 +186,7 @@ class InventoryTriggerViewTests(TestCase):
         self.assertNotIn("These safety limits cap how many QuickBooks changes can happen", html)
         self.assertNotIn("Max catalog fixes per run", html)
         self.assertNotIn("Max quantity adjustments per run", html)
-        self.assertNotIn("Catalog Cleanup", html)
-        self.assertNotIn("Inventory Audit", html)
+        self.assertNotIn("Catalog Apply", html)
 
     def test_runs_page_hides_inventory_trigger_when_no_company_enabled(self):
         CompanyConfigRecord.objects.update(
@@ -380,6 +415,40 @@ class InventoryTriggerViewTests(TestCase):
         self.assertIn('<select x-model="selectedReport"', html)
         self.assertEqual(download.status_code, 200)
         self.assertEqual(b"".join(download.streaming_content), b"sku,status\nABC,in_sync\n")
+
+    def test_run_detail_shows_inventory_mode_summary_metadata(self):
+        self.client.login(username="op", password="pw")
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            status=RunJob.STATUS_SUCCEEDED,
+            inventory_options_json={"mode": "quantity_preview"},
+        )
+        RunArtifact.objects.create(
+            run_job=job,
+            company_key="company_a",
+            kind=RunArtifact.KIND_INVENTORY_AUDIT,
+            source_path="/tmp/inventory_pipeline_company_a.json",
+            source_hash="inventory-summary-mode",
+            upload_stats_json={
+                "report_type": "inventory_pipeline",
+                "inventory_mode": "quantity_preview",
+                "write_intent": "preview_quantity_adjustments",
+                "qbo_write_attempted": False,
+                "qbo_write_blocked": False,
+                "catalog_apply_enabled": False,
+                "quantity_apply_enabled": False,
+                "missing_item_create_enabled": False,
+            },
+        )
+
+        html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
+
+        self.assertIn("Inventory Mode", html)
+        self.assertIn("Preview only", html)
+        self.assertIn("preview_quantity_adjustments", html)
+        self.assertIn("QBO write attempted", html)
+        self.assertIn("Quantity apply enabled", html)
 
     def test_report_download_rejects_existing_file_outside_trusted_roots(self):
         self.client.login(username="op", password="pw")

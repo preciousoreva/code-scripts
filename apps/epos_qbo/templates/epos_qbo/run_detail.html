@@ -124,6 +124,42 @@
     </section>
     {% endif %}
 
+    {% if inventory_mode_context %}
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm space-y-3">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory Mode</h2>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Mode</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.mode_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Write intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.write_intent }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">QBO write attempted</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.qbo_write_attempted|yesno:"Yes,No" }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">QBO write blocked</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.qbo_write_blocked|yesno:"Yes,No" }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Catalog apply enabled</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.catalog_apply_enabled|yesno:"Yes,No" }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Quantity apply enabled</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.quantity_apply_enabled|yesno:"Yes,No" }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Missing item create enabled</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.missing_item_create_enabled|yesno:"Yes,No" }}</dd>
+            </div>
+        </dl>
+    </section>
+    {% endif %}
+
     <section
         class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
         <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>

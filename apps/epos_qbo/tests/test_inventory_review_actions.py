@@ -238,10 +238,11 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Resolve Review Items", html)
-        self.assertIn("Review cleanup", html)
-        self.assertIn("Review adjustments", html)
+        self.assertIn("Review scoped cleanup apply", html)
+        self.assertIn("Review scoped quantity apply", html)
         self.assertIn("Preview items", html)
-        self.assertIn("Retry actions queue real inventory pipeline jobs.", html)
+        self.assertIn("Retry actions are scoped to reviewed rows and capped.", html)
+        self.assertIn("Production inventory apply is blocked by default.", html)
         self.assertIn(
             reverse(
                 "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
@@ -272,8 +273,11 @@ class InventoryReviewActionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
-        self.assertIn("Confirm Catalog Cleanup Retry", html)
-        self.assertIn("This will queue a real inventory pipeline job.", html)
+        self.assertIn("Confirm Scoped Catalog Apply", html)
+        self.assertIn("Catalog cleanup applied", html)
+        self.assertIn("Admin catalog apply", html)
+        self.assertIn("This queues catalog_apply_admin_only for the reviewed rows only.", html)
+        self.assertIn("Production apply remains blocked unless explicitly unlocked.", html)
         self.assertIn("Affected items", html)
         self.assertIn("Pack Conflict", html)
         self.assertIn(
@@ -300,8 +304,11 @@ class InventoryReviewActionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
-        self.assertIn("Confirm Quantity Adjustment Retry", html)
-        self.assertIn("This will queue a real inventory pipeline job.", html)
+        self.assertIn("Confirm Scoped Quantity Apply", html)
+        self.assertIn("Applied quantity adjustments", html)
+        self.assertIn("Apply quantity adjustments", html)
+        self.assertIn("This queues quantity_apply for the reviewed rows only.", html)
+        self.assertIn("Production apply remains blocked unless explicitly unlocked.", html)
         self.assertIn("Affected items", html)
         self.assertIn("BENSON &amp; HEDGES CIGARETTES", html)
         self.assertIn(
@@ -365,6 +372,7 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(review_retry.get("row_count"), 1)
         self.assertIn("Pack Conflict", review_retry.get("affected_base_names", []))
         opts = retry_job.inventory_options_json or {}
+        self.assertEqual(opts.get("mode"), "catalog_apply_admin_only")
         self.assertIn("Pack Conflict", opts.get("base_names", []))
         self.assertEqual(opts.get("max_catalog_fixes"), 1)
         self.assertEqual(opts.get("max_quantity_adjustments"), 0)
@@ -402,6 +410,7 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertNotIn("ATTACKER PRODUCT", affected)
         self.assertNotIn("MALICIOUS", affected)
         opts = retry_job.inventory_options_json or {}
+        self.assertEqual(opts.get("mode"), "quantity_apply")
         self.assertIn("BENSON & HEDGES CIGARETTES", opts.get("base_names", []))
         self.assertEqual(opts.get("max_catalog_fixes"), 0)
         self.assertEqual(opts.get("max_quantity_adjustments"), 1)
@@ -539,6 +548,7 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertIsNotNone(queued)
         opts = queued.inventory_options_json or {}
         rcm = opts.get("review_create_missing_items") or {}
+        self.assertEqual(opts.get("mode"), REVIEW_CREATE_MISSING_INTENT)
         self.assertEqual(rcm.get("intent"), REVIEW_CREATE_MISSING_INTENT)
         self.assertEqual(rcm.get("safe_count"), 2)
         self.assertEqual(rcm.get("blocked_count"), 2)

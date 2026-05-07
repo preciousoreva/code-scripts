@@ -47,6 +47,7 @@
         <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Action</p>
             <p class="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ action_label }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ inventory_mode_label }} · {{ inventory_write_intent }}</p>
         </div>
         <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
             <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Company</p>
@@ -103,7 +104,8 @@
     </div>
 
     <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
-        <p class="text-sm text-slate-700 dark:text-slate-200 mb-4">This is the final step — submitting below queues the inventory job immediately (same as confirming a run).</p>
+        <p class="text-sm text-slate-700 dark:text-slate-200 mb-2">This is the final step — submitting below queues the inventory job immediately (same as confirming a run).</p>
+        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">{{ inventory_safe_apply_copy }}</p>
         <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
             <a href="{{ review_url }}" class="btn btn-secondary whitespace-nowrap justify-center sm:justify-start">
                 Cancel
@@ -119,4 +121,3 @@
     </div>
 </div>
 {% endblock %}
-

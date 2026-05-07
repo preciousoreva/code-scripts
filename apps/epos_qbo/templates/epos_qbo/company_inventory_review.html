@@ -112,7 +112,7 @@
     <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl">
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
             <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Resolve Review Items</h2>
-            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Retry actions queue real inventory pipeline jobs. Preview item creation is read-only.</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Retry actions are scoped to reviewed rows and capped. Production inventory apply is blocked by default. Audit and preview are safe.</p>
         </div>
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 p-6 items-stretch">
             {% if review.actions.catalog_cleanup_count > 0 %}
@@ -125,7 +125,7 @@
                 <div class="pt-3 self-end w-full">
                     <a href="{{ review.actions.retry_catalog_cleanup_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
                         <iconify-icon icon="solar:restart-linear" width="16"></iconify-icon>
-                        Review cleanup
+                        Review scoped cleanup apply
                     </a>
                 </div>
             </div>
@@ -140,7 +140,7 @@
                 <div class="pt-3 self-end w-full">
                     <a href="{{ review.actions.retry_quantity_adjustments_confirm_url }}" class="btn btn-secondary w-full justify-center min-h-10 whitespace-nowrap">
                         <iconify-icon icon="solar:tuning-square-linear" width="16"></iconify-icon>
-                        Review adjustments
+                        Review scoped quantity apply
                     </a>
                 </div>
             </div>

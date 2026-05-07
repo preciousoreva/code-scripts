@@ -121,7 +121,7 @@
              x-data="inventoryForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Downloads EPOS stock, fixes supported QBO catalog issues, and syncs quantities.
+            Production inventory apply is blocked by default. Audit and preview are safe.
         </p>
         {% if inventory_companies %}
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
@@ -155,8 +155,10 @@
                 </label>
             </div>
 
-            <div class="flex items-center justify-end">
-                <button type="submit" class="btn btn-primary">Sync Inventory</button>
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2">
+                <button type="submit" name="mode" value="audit_only" class="btn btn-secondary justify-center">Run Inventory Audit</button>
+                <button type="submit" name="mode" value="quantity_preview" class="btn btn-secondary justify-center">Preview Quantity Adjustments</button>
+                <button type="submit" name="mode" value="catalog_plan_only" class="btn btn-primary justify-center">Catalog Cleanup Plan</button>
             </div>
         </form>
         {% else %}
