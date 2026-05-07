@@ -45,6 +45,10 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             "max_catalog_fixes": None,
             "max_quantity_adjustments": None,
             "max_qty_delta": None,
+            "max_apply_qty_delta": None,
+            "max_apply_value_impact": None,
+            "allow_zero_cost_apply": False,
+            "allow_negative_qbo_qty_apply": False,
             "adjust_account_id": None,
             "txn_date": "2026-04-28",
             "mode": "audit_only",
@@ -62,6 +66,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             realm_id="123",
             inventory_adjustment_account_id="99",
             inventory_max_qty_delta=None,
+            _data={},
             slack_webhook_url="",
         )
 
@@ -190,10 +195,21 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "Id": str(i),
                     "qbo_qty_on_hand": 2.0,
                     "qbo_has_pack": False,
+                    "PurchaseCost": 10.0,
                 }
                 for i in range(1, count + 1)
             ]
         )
+
+    def _risk_policy(self, **overrides) -> inventory_pipeline.QuantityRiskPolicy:
+        defaults = {
+            "max_apply_qty_delta": 100.0,
+            "max_apply_value_impact": 50_000.0,
+            "allow_zero_cost_apply": False,
+            "allow_negative_qbo_qty_apply": False,
+        }
+        defaults.update(overrides)
+        return inventory_pipeline.QuantityRiskPolicy(**defaults)
 
     def _patch_common(
         self,
@@ -875,8 +891,144 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             self.assertEqual(summary["inventory_mode"], "quantity_preview")
             self.assertEqual(summary["write_intent"], "preview")
             self.assertEqual(summary["quantity_adjustment_stats"]["planned"], 1)
+            detail = summary["quantity_adjustment_stats"]["details"][0]
+            self.assertEqual(detail["epos_product_name"], "Widget 1")
+            self.assertEqual(detail["normalized_base_name"], "widget 1")
+            self.assertEqual(detail["qbo_item_id"], "1")
+            self.assertEqual(detail["qbo_item_name"], "Widget 1")
+            self.assertEqual(detail["qbo_qty"], 2.0)
+            self.assertEqual(detail["epos_expected_qty"], 5.0)
+            self.assertEqual(detail["qty_delta"], 3.0)
+            self.assertEqual(detail["qbo_cost"], 10.0)
+            self.assertEqual(detail["estimated_value_impact"], 30.0)
+            self.assertEqual(detail["risk_flags"], "")
+            self.assertEqual(detail["risk_level"], "low")
+            self.assertEqual(detail["recommended_action"], "eligible_for_apply")
+            self.assertTrue(detail["apply_eligible"])
+            self.assertEqual(summary["quantity_preview_candidates"], 1)
+            self.assertEqual(summary["quantity_apply_eligible"], 1)
+            self.assertEqual(summary["quantity_blocked_by_risk"], 0)
+            self.assertIn("quantity_preview_csv", summary["child_reports"])
+            payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(payload["quantity_preview_candidates"], 1)
+            self.assertEqual(payload["quantity_risk_flag_counts"], {})
             self.assertEqual(summary["quantity_updates_applied"], 0)
             post_mock.assert_not_called()
+
+    def test_quantity_preview_blocks_negative_qbo_quantity(self):
+        qbo_rows = self._qbo_rows()
+        qbo_rows.loc[0, "qbo_qty_on_hand"] = -2.0
+        result = inventory_pipeline._apply_exact_match_quantity_adjustments(
+            cfg=self._cfg(),
+            audit_df=self._quantity_report(),
+            qbo_item_rows=qbo_rows,
+            max_quantity_adjustments=None,
+            max_qty_delta=None,
+            risk_policy=self._risk_policy(),
+            adjust_account_id=None,
+            adjust_account_name="Inventory Shrinkage",
+            txn_date="2026-04-28",
+            dry_run=True,
+        )
+
+        detail = result["details"][0]
+        self.assertIn("negative_qbo_qty", detail["risk_flags"])
+        self.assertFalse(detail["apply_eligible"])
+        self.assertEqual(result["planned"], 0)
+        self.assertEqual(result["quantity_blocked_by_risk"], 1)
+
+    def test_quantity_preview_blocks_zero_or_missing_cost_by_default(self):
+        for cost in (0.0, None):
+            with self.subTest(cost=cost):
+                qbo_rows = self._qbo_rows()
+                qbo_rows.loc[0, "PurchaseCost"] = cost
+                result = inventory_pipeline._apply_exact_match_quantity_adjustments(
+                    cfg=self._cfg(),
+                    audit_df=self._quantity_report(),
+                    qbo_item_rows=qbo_rows,
+                    max_quantity_adjustments=None,
+                    max_qty_delta=None,
+                    risk_policy=self._risk_policy(),
+                    adjust_account_id=None,
+                    adjust_account_name="Inventory Shrinkage",
+                    txn_date="2026-04-28",
+                    dry_run=True,
+                )
+
+                detail = result["details"][0]
+                self.assertIn("missing_or_zero_cost", detail["risk_flags"])
+                self.assertFalse(detail["apply_eligible"])
+                self.assertEqual(result["planned"], 0)
+
+    def test_quantity_preview_blocks_large_delta(self):
+        audit = self._quantity_report()
+        audit.loc[0, "epos_single_units"] = 500.0
+        result = inventory_pipeline._apply_exact_match_quantity_adjustments(
+            cfg=self._cfg(),
+            audit_df=audit,
+            qbo_item_rows=self._qbo_rows(),
+            max_quantity_adjustments=None,
+            max_qty_delta=None,
+            risk_policy=self._risk_policy(max_apply_qty_delta=100.0),
+            adjust_account_id=None,
+            adjust_account_name="Inventory Shrinkage",
+            txn_date="2026-04-28",
+            dry_run=True,
+        )
+
+        detail = result["details"][0]
+        self.assertIn("large_delta", detail["risk_flags"])
+        self.assertFalse(detail["apply_eligible"])
+
+    def test_quantity_preview_blocks_large_value_impact(self):
+        qbo_rows = self._qbo_rows()
+        qbo_rows.loc[0, "PurchaseCost"] = 1000.0
+        result = inventory_pipeline._apply_exact_match_quantity_adjustments(
+            cfg=self._cfg(),
+            audit_df=self._quantity_report(),
+            qbo_item_rows=qbo_rows,
+            max_quantity_adjustments=None,
+            max_qty_delta=None,
+            risk_policy=self._risk_policy(max_apply_value_impact=100.0),
+            adjust_account_id=None,
+            adjust_account_name="Inventory Shrinkage",
+            txn_date="2026-04-28",
+            dry_run=True,
+        )
+
+        detail = result["details"][0]
+        self.assertIn("large_value_impact", detail["risk_flags"])
+        self.assertFalse(detail["apply_eligible"])
+
+    def test_quantity_apply_posts_only_eligible_rows_and_skips_blocked(self):
+        qbo_rows = self._qbo_rows(count=2)
+        qbo_rows.loc[1, "PurchaseCost"] = 0.0
+        audit = self._quantity_report(count=2)
+        lock = mock.Mock()
+        lock.acquire.return_value = SimpleNamespace(acquired=True, reason="")
+        with mock.patch.object(inventory_pipeline, "verify_realm_match"), \
+             mock.patch.object(inventory_pipeline, "TokenManager"), \
+             mock.patch.object(inventory_pipeline, "GlobalRunLock", return_value=lock), \
+             mock.patch.object(inventory_pipeline, "post_inventory_adjustment", return_value={}) as post_mock, \
+             mock.patch.object(inventory_pipeline, "mark_qbo_snapshot_stale"):
+            result = inventory_pipeline._apply_exact_match_quantity_adjustments(
+                cfg=self._cfg(),
+                audit_df=audit,
+                qbo_item_rows=qbo_rows,
+                max_quantity_adjustments=None,
+                max_qty_delta=None,
+                risk_policy=self._risk_policy(),
+                adjust_account_id=None,
+                adjust_account_name="Inventory Shrinkage",
+                txn_date="2026-04-28",
+                dry_run=False,
+            )
+
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertEqual(result["posted"], 1)
+        self.assertEqual(result["skipped_blocked_by_risk"], 1)
+        self.assertEqual(result["quantity_apply_eligible"], 1)
+        self.assertEqual(result["quantity_blocked_by_risk"], 1)
 
     def test_audit_only_summary_includes_mode_write_fields(self):
         with tempfile.TemporaryDirectory() as td:
@@ -942,7 +1094,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     qbo_item_rows=self._qbo_rows(),
                     max_quantity_adjustments=None,
                     max_qty_delta=None,
+                    risk_policy=self._risk_policy(),
                     adjust_account_id=None,
+                    adjust_account_name="Inventory Shrinkage",
                     txn_date="2026-04-28",
                     dry_run=False,
                 )
@@ -961,7 +1115,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                 qbo_item_rows=self._qbo_rows(),
                 max_quantity_adjustments=None,
                 max_qty_delta=None,
+                risk_policy=self._risk_policy(),
                 adjust_account_id=None,
+                adjust_account_name="Inventory Shrinkage",
                 txn_date="2026-04-28",
                 dry_run=True,
             )

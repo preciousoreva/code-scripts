@@ -83,6 +83,25 @@ from code_scripts.slack_notify import (
 from code_scripts.token_manager import verify_realm_match
 
 
+DEFAULT_MAX_APPLY_QTY_DELTA = 100.0
+DEFAULT_MAX_APPLY_VALUE_IMPACT = 50_000.0
+QUANTITY_PREVIEW_FIELDNAMES = [
+    "epos_product_name",
+    "normalized_base_name",
+    "qbo_item_id",
+    "qbo_item_name",
+    "qbo_qty",
+    "epos_expected_qty",
+    "qty_delta",
+    "qbo_cost",
+    "estimated_value_impact",
+    "adjustment_account_id",
+    "adjustment_account_name",
+    "risk_flags",
+    "risk_level",
+    "recommended_action",
+    "apply_eligible",
+]
 SAFE_CATALOG_ISSUE_TYPES = {
     "base_with_pack_variants",
     "only_pack_variant_exists",
@@ -109,6 +128,14 @@ class AuditResult:
     report: pd.DataFrame
     report_path: Path
     qbo_path: Path
+
+
+@dataclass(frozen=True)
+class QuantityRiskPolicy:
+    max_apply_qty_delta: float | None
+    max_apply_value_impact: float | None
+    allow_zero_cost_apply: bool
+    allow_negative_qbo_qty_apply: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,6 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-catalog-fixes", type=int, default=None)
     parser.add_argument("--max-quantity-adjustments", type=int, default=None)
     parser.add_argument("--max-qty-delta", type=float, default=None)
+    parser.add_argument("--max-apply-qty-delta", type=float, default=None)
+    parser.add_argument("--max-apply-value-impact", type=float, default=None)
+    parser.add_argument("--allow-zero-cost-apply", action="store_true")
+    parser.add_argument("--allow-negative-qbo-qty-apply", action="store_true")
     parser.add_argument("--adjust-account-id", default=None)
     parser.add_argument("--txn-date", default=None)
     parser.add_argument(
@@ -460,6 +491,115 @@ def _empty_catalog_result() -> dict[str, Any]:
     }
 
 
+def _qbo_item_cost(row: pd.Series | None) -> float | None:
+    if row is None:
+        return None
+    for key in ("PurchaseCost", "UnitPrice"):
+        raw = row.get(key, None)
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(parsed):
+            continue
+        return float(parsed)
+    return None
+
+
+def _classify_quantity_candidate(
+    *,
+    audit_row: pd.Series,
+    qbo_group: pd.DataFrame,
+    chosen: pd.Series | None,
+    choose_reason: str,
+    account_id: str,
+    account_name: str,
+    policy: QuantityRiskPolicy,
+) -> dict[str, Any]:
+    base = str(audit_row.get("base_name") or "").strip()
+    qbo_item_count = int(_numeric(audit_row.get("qbo_item_count_for_base", 0), 0.0))
+    qbo_has_pack = bool(audit_row.get("qbo_has_pack_variants", False))
+    issue_type = str(audit_row.get("catalog_issue_type") or "").strip()
+    epos_target = _numeric(audit_row.get("epos_single_units", 0.0))
+    current_qty = _numeric(chosen.get("qbo_qty_on_hand", 0.0) if chosen is not None else 0.0)
+    qty_diff = epos_target - current_qty
+    qbo_cost = _qbo_item_cost(chosen)
+    value_impact = qty_diff * float(qbo_cost or 0.0)
+    flags: list[str] = []
+
+    if chosen is None:
+        flags.append("missing_from_qbo")
+    if choose_reason != "exact_name_match":
+        flags.append("manual_review_required")
+    if choose_reason == "exact_name_match_multi_pick_largest_qty" or qbo_item_count > 1 or len(qbo_group) > 1:
+        flags.append("multiple_qbo_matches")
+    if qbo_has_pack or issue_type in {"base_with_pack_variants", "only_pack_variant_exists"}:
+        flags.append("pack_base_ambiguity")
+    if current_qty < 0:
+        flags.append("negative_qbo_qty")
+    if qbo_cost is None or qbo_cost <= 0:
+        flags.append("missing_or_zero_cost")
+    if not account_id:
+        flags.append("manual_review_required")
+    if policy.max_apply_qty_delta is not None and abs(qty_diff) > float(policy.max_apply_qty_delta):
+        flags.append("large_delta")
+    if policy.max_apply_value_impact is not None and abs(value_impact) > float(policy.max_apply_value_impact):
+        flags.append("large_value_impact")
+
+    blocking_flags = set(flags)
+    if policy.allow_negative_qbo_qty_apply:
+        blocking_flags.discard("negative_qbo_qty")
+    if policy.allow_zero_cost_apply:
+        blocking_flags.discard("missing_or_zero_cost")
+
+    apply_eligible = bool(chosen is not None and abs(qty_diff) > 0 and not blocking_flags)
+    if apply_eligible:
+        risk_level = "low"
+        recommended_action = "eligible_for_apply"
+    else:
+        risk_level = "high" if any(
+            flag in blocking_flags
+            for flag in {"multiple_qbo_matches", "pack_base_ambiguity", "missing_from_qbo", "large_value_impact"}
+        ) else "medium"
+        recommended_action = "manual_review_required"
+
+    item_id = str(chosen.get("Id", "") or "").strip() if chosen is not None else ""
+    return {
+        "epos_product_name": base,
+        "normalized_base_name": _normalize_name_key(base),
+        "qbo_item_id": item_id,
+        "qbo_item_name": str(chosen.get("Name", "") or "").strip() if chosen is not None else "",
+        "qbo_qty": current_qty,
+        "epos_expected_qty": epos_target,
+        "qty_delta": qty_diff,
+        "qbo_cost": qbo_cost,
+        "estimated_value_impact": value_impact,
+        "adjustment_account_id": account_id,
+        "adjustment_account_name": account_name,
+        "risk_flags": "|".join(flags),
+        "risk_level": risk_level,
+        "recommended_action": recommended_action,
+        "apply_eligible": apply_eligible,
+        "base_name": base,
+        "item_id": item_id,
+        "delta": qty_diff,
+        "dry_run": False,
+        "applied": False,
+    }
+
+
+def _quantity_risk_flag_counts(details: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for detail in details:
+        for flag in str(detail.get("risk_flags") or "").split("|"):
+            flag = flag.strip()
+            if flag:
+                counts[flag] = counts.get(flag, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _apply_exact_match_quantity_adjustments(
     *,
     cfg,
@@ -467,7 +607,9 @@ def _apply_exact_match_quantity_adjustments(
     qbo_item_rows: pd.DataFrame,
     max_quantity_adjustments: int | None,
     max_qty_delta: float | None,
+    risk_policy: QuantityRiskPolicy,
     adjust_account_id: str | None,
+    adjust_account_name: str | None,
     txn_date: str,
     dry_run: bool,
 ) -> dict[str, Any]:
@@ -477,6 +619,13 @@ def _apply_exact_match_quantity_adjustments(
         "skipped": 0,
         "skipped_due_to_cap": 0,
         "skipped_non_exact": 0,
+        "skipped_blocked_by_risk": 0,
+        "quantity_preview_candidates": 0,
+        "quantity_apply_eligible": 0,
+        "quantity_blocked_by_risk": 0,
+        "quantity_manual_review_required": 0,
+        "risk_flag_counts": {},
+        "attempted": 0,
         "changed_qbo": False,
         "details": [],
     }
@@ -502,7 +651,7 @@ def _apply_exact_match_quantity_adjustments(
     account_id = (adjust_account_id or "").strip() or str(
         getattr(cfg, "inventory_adjustment_account_id", "") or ""
     ).strip()
-    if not account_id:
+    if not account_id and not dry_run:
         raise RuntimeError(
             "missing inventory adjustment account id for quantity adjustments."
         )
@@ -535,16 +684,33 @@ def _apply_exact_match_quantity_adjustments(
             else:
                 group = qbo_item_rows[qbo_item_rows["base_name"].map(_normalize_name_key) == base_norm]
             chosen, reason = choose_canonical_qbo_item_row(group, base_name=base)
+            detail = _classify_quantity_candidate(
+                audit_row=row,
+                qbo_group=group,
+                chosen=chosen,
+                choose_reason=reason,
+                account_id=account_id,
+                account_name=str(adjust_account_name or ""),
+                policy=risk_policy,
+            )
+            result["details"].append(detail)
+            result["quantity_preview_candidates"] += 1
+            if bool(detail.get("apply_eligible")):
+                result["quantity_apply_eligible"] += 1
+            else:
+                result["quantity_blocked_by_risk"] += 1
+                if "manual_review_required" in str(detail.get("risk_flags") or "") or detail.get("recommended_action") == "manual_review_required":
+                    result["quantity_manual_review_required"] += 1
             if chosen is None or reason != "exact_name_match":
                 print(f"[SKIP] {base!r}: quantity sync requires exact QBO name match.")
                 result["skipped"] += 1
                 result["skipped_non_exact"] += 1
                 continue
 
-            item_id = str(chosen.get("Id", "") or "").strip()
-            current_qty = float(chosen.get("qbo_qty_on_hand", 0.0) or 0.0)
-            epos_target = float(row.get("epos_single_units", 0.0) or 0.0)
-            qty_diff = epos_target - current_qty
+            item_id = str(detail.get("item_id") or "").strip()
+            current_qty = float(detail.get("qbo_qty", 0.0) or 0.0)
+            epos_target = float(detail.get("epos_expected_qty", 0.0) or 0.0)
+            qty_diff = float(detail.get("qty_delta", 0.0) or 0.0)
             if abs(qty_diff) <= 0:
                 continue
             if effective_max_delta is not None and abs(qty_diff) > float(effective_max_delta):
@@ -553,6 +719,14 @@ def _apply_exact_match_quantity_adjustments(
                     f"{effective_max_delta}."
                 )
                 result["skipped"] += 1
+                continue
+            if not bool(detail.get("apply_eligible")):
+                print(
+                    f"[SKIP] {base!r}: quantity adjustment blocked by risk "
+                    f"({detail.get('risk_flags') or 'manual_review_required'})."
+                )
+                result["skipped"] += 1
+                result["skipped_blocked_by_risk"] += 1
                 continue
 
             doc_number = build_inventory_adjustment_doc_number(txn_date=txn_date, item_id=item_id)
@@ -571,38 +745,21 @@ def _apply_exact_match_quantity_adjustments(
             if dry_run:
                 print(f"[DRY-RUN] would post quantity adjustment for {base!r}: {payload}")
                 result["planned"] += 1
-                result["details"].append(
-                    {
-                        "base_name": base,
-                        "item_id": item_id,
-                        "epos_expected_qty": epos_target,
-                        "qbo_start_qty": current_qty,
-                        "delta": qty_diff,
-                        "applied": False,
-                        "dry_run": True,
-                    }
-                )
+                detail["dry_run"] = True
                 continue
 
             assert token_mgr is not None
+            result["attempted"] += 1
             post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
             print(f"[OK] Posted quantity adjustment for {base!r} item_id={item_id}")
             result["posted"] += 1
-            result["details"].append(
-                {
-                    "base_name": base,
-                    "item_id": item_id,
-                    "epos_expected_qty": epos_target,
-                    "qbo_start_qty": current_qty,
-                    "delta": qty_diff,
-                    "applied": True,
-                    "dry_run": False,
-                }
-            )
+            detail["applied"] = True
+            detail["dry_run"] = False
     finally:
         if run_lock is not None:
             run_lock.release()
 
+    result["risk_flag_counts"] = _quantity_risk_flag_counts(result["details"])
     if result["posted"] > 0:
         mark_qbo_snapshot_stale(cfg.company_key, reason="inventory_pipeline_quantity_adjustments_posted")
         result["changed_qbo"] = True
@@ -636,6 +793,10 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
         "base_items_created": payload.get("base_items_created"),
         "duplicate_base_items_resolved": payload.get("duplicate_base_items_resolved"),
         "quantity_updates_applied": payload.get("quantity_updates_applied"),
+        "quantity_preview_candidates": payload.get("quantity_preview_candidates"),
+        "quantity_apply_eligible": payload.get("quantity_apply_eligible"),
+        "quantity_blocked_by_risk": payload.get("quantity_blocked_by_risk"),
+        "quantity_manual_review_required": payload.get("quantity_manual_review_required"),
         "blocked_items": payload.get("blocked_items"),
         "missing_base_item_in_qbo": payload.get("missing_base_item_in_qbo"),
         "duplicate_base_items_in_qbo": payload.get("duplicate_base_items_in_qbo"),
@@ -654,6 +815,32 @@ def _write_summary_reports(summary: dict[str, Any], *, output_dir: str | None = 
         writer.writeheader()
         writer.writerow(row)
 
+    return json_path, csv_path
+
+
+def _write_quantity_preview_reports(
+    *,
+    company_key: str,
+    details: list[dict[str, Any]],
+    output_dir: str | None = None,
+) -> tuple[Path, Path] | None:
+    if not details:
+        return None
+    directory = Path(output_dir).expanduser() if output_dir else inventory_pipeline_reports_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%H%M%S")
+    json_path = directory / f"inventory_quantity_preview_{company_key}_{stamp}.json"
+    csv_path = directory / f"inventory_quantity_preview_{company_key}_{stamp}.csv"
+    rows = []
+    for detail in details:
+        rows.append({field: detail.get(field, "") for field in QUANTITY_PREVIEW_FIELDNAMES})
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(rows, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=QUANTITY_PREVIEW_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
     return json_path, csv_path
 
 
@@ -677,6 +864,74 @@ def _numeric(value: Any, default: float = 0.0) -> float:
     if pd.isna(parsed):
         return float(default)
     return parsed
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(parsed) or parsed <= 0:
+        return None
+    return float(parsed)
+
+
+def _config_value(cfg: Any, section: str, key: str, default: Any = None) -> Any:
+    data = getattr(cfg, "_data", None)
+    if not isinstance(data, dict):
+        return default
+    section_data = data.get(section)
+    if not isinstance(section_data, dict):
+        return default
+    return section_data.get(key, default)
+
+
+def _config_bool(cfg: Any, section: str, key: str, default: bool = False) -> bool:
+    raw = _config_value(cfg, section, key, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_quantity_risk_policy(
+    *,
+    cfg: Any,
+    max_qty_delta: float | None,
+    max_apply_qty_delta: float | None,
+    max_apply_value_impact: float | None,
+    allow_zero_cost_apply: bool,
+    allow_negative_qbo_qty_apply: bool,
+) -> QuantityRiskPolicy:
+    qty_limit = (
+        _optional_positive_float(max_apply_qty_delta)
+        or _optional_positive_float(_config_value(cfg, "inventory", "max_apply_qty_delta"))
+        or _optional_positive_float(_config_value(cfg, "qbo", "max_apply_qty_delta"))
+        or _optional_positive_float(max_qty_delta)
+        or _optional_positive_float(getattr(cfg, "inventory_max_qty_delta", None))
+        or DEFAULT_MAX_APPLY_QTY_DELTA
+    )
+    value_limit = (
+        _optional_positive_float(max_apply_value_impact)
+        or _optional_positive_float(_config_value(cfg, "inventory", "max_apply_value_impact"))
+        or _optional_positive_float(_config_value(cfg, "qbo", "max_apply_value_impact"))
+        or DEFAULT_MAX_APPLY_VALUE_IMPACT
+    )
+    return QuantityRiskPolicy(
+        max_apply_qty_delta=qty_limit,
+        max_apply_value_impact=value_limit,
+        allow_zero_cost_apply=bool(
+            allow_zero_cost_apply
+            or _config_bool(cfg, "inventory", "allow_zero_cost_apply")
+            or _config_bool(cfg, "qbo", "allow_zero_cost_apply")
+        ),
+        allow_negative_qbo_qty_apply=bool(
+            allow_negative_qbo_qty_apply
+            or _config_bool(cfg, "inventory", "allow_negative_qbo_qty_apply")
+            or _config_bool(cfg, "qbo", "allow_negative_qbo_qty_apply")
+        ),
+    )
 
 
 def _epos_negative_clamp_totals(report: pd.DataFrame) -> dict[str, Any]:
@@ -882,6 +1137,10 @@ def _stable_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
         "still_needs_review": 0,
         "skipped_unsupported": 0,
         "skipped_safely": 0,
+        "quantity_preview_candidates": 0,
+        "quantity_apply_eligible": 0,
+        "quantity_blocked_by_risk": 0,
+        "quantity_manual_review_required": 0,
     }
     for key, default in numeric_defaults.items():
         try:
@@ -925,6 +1184,8 @@ def _stable_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
     payload["product_details"] = list(payload.get("product_details") or [])
     if not isinstance(payload.get("quantity_adjustment_stats"), dict):
         payload["quantity_adjustment_stats"] = {}
+    if not isinstance(payload.get("quantity_risk_flag_counts"), dict):
+        payload["quantity_risk_flag_counts"] = {}
     payload["completion_status"] = str(payload.get("completion_status") or "clean")
     payload["run_url"] = str(payload.get("run_url") or "")
     return payload
@@ -942,11 +1203,23 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
         f"Base items created: {int(summary.get('base_items_created', 0) or 0)}",
         f"Duplicate base items resolved: {int(summary.get('duplicate_base_items_resolved', 0) or 0)}",
         f"Quantity updates applied: {summary['quantity_updates_applied']}",
+    ]
+    if int(summary.get("quantity_preview_candidates", 0) or 0) > 0:
+        lines.extend(
+            [
+                f"Quantity preview candidates: {summary['quantity_preview_candidates']}",
+                f"Quantity apply eligible: {summary['quantity_apply_eligible']}",
+                f"Quantity blocked by risk: {summary['quantity_blocked_by_risk']}",
+            ]
+        )
+    lines.extend(
+        [
         f"Blocked items: {summary['blocked_items']}",
         f"Missing base item in QBO: {summary['missing_base_item_in_qbo']}",
         f"Duplicate base items in QBO: {summary['duplicate_base_items_in_qbo']}",
         f"Still needs review: {summary['still_needs_review']}",
-    ]
+        ]
+    )
     if int(summary.get("epos_negative_rows_clamped", 0) or 0) > 0:
         lines.append(
             "EPOS negative rows clamped to zero: "
@@ -1631,6 +1904,14 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     base_names = [str(v).strip() for v in list(getattr(args, "base_names", []) or []) if str(v).strip()]
     base_names = base_names or None
     txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
+    quantity_risk_policy = _resolve_quantity_risk_policy(
+        cfg=cfg,
+        max_qty_delta=args.max_qty_delta,
+        max_apply_qty_delta=args.max_apply_qty_delta,
+        max_apply_value_impact=args.max_apply_value_impact,
+        allow_zero_cost_apply=bool(args.allow_zero_cost_apply),
+        allow_negative_qbo_qty_apply=bool(args.allow_negative_qbo_qty_apply),
+    )
     child_reports: dict[str, str] = {}
 
     print("=" * 68)
@@ -1735,6 +2016,13 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "skipped": 0,
         "skipped_due_to_cap": 0,
         "skipped_non_exact": 0,
+        "skipped_blocked_by_risk": 0,
+        "quantity_preview_candidates": 0,
+        "quantity_apply_eligible": 0,
+        "quantity_blocked_by_risk": 0,
+        "quantity_manual_review_required": 0,
+        "risk_flag_counts": {},
+        "attempted": 0,
         "changed_qbo": False,
         "details": [],
     }
@@ -1745,10 +2033,21 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             qbo_item_rows=qbo_item_rows,
             max_quantity_adjustments=max_quantity_adjustments,
             max_qty_delta=args.max_qty_delta,
+            risk_policy=quantity_risk_policy,
             adjust_account_id=args.adjust_account_id,
+            adjust_account_name=str(args.adjust_account_id or getattr(cfg, "inventory_adjustment_account_id", "") or ""),
             txn_date=txn_date,
             dry_run=bool(args.dry_run or mode_flags["quantity_preview_enabled"]),
         )
+        quantity_reports = _write_quantity_preview_reports(
+            company_key=cfg.company_key,
+            details=list(quantity_result.get("details") or []),
+            output_dir=args.summary_output_dir,
+        )
+        if quantity_reports is not None:
+            quantity_json, quantity_csv = quantity_reports
+            child_reports["quantity_preview_json"] = str(quantity_json)
+            child_reports["quantity_preview_csv"] = str(quantity_csv)
 
     final = audit_after_catalog
     if quantity_result["changed_qbo"]:
@@ -1869,6 +2168,15 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "base_items_created": int(catalog_result.get("base_items_created", 0) or 0),
         "duplicate_base_items_resolved": int(catalog_result.get("duplicate_base_items_resolved", 0) or 0),
         "quantity_updates_applied": int(quantity_result["posted"]),
+        "quantity_preview_candidates": int(quantity_result.get("quantity_preview_candidates", 0) or 0),
+        "quantity_apply_eligible": int(quantity_result.get("quantity_apply_eligible", 0) or 0),
+        "quantity_blocked_by_risk": int(quantity_result.get("quantity_blocked_by_risk", 0) or 0),
+        "quantity_manual_review_required": int(quantity_result.get("quantity_manual_review_required", 0) or 0),
+        "quantity_risk_flag_counts": dict(quantity_result.get("risk_flag_counts") or {}),
+        "max_apply_qty_delta": quantity_risk_policy.max_apply_qty_delta,
+        "max_apply_value_impact": quantity_risk_policy.max_apply_value_impact,
+        "allow_zero_cost_apply": bool(quantity_risk_policy.allow_zero_cost_apply),
+        "allow_negative_qbo_qty_apply": bool(quantity_risk_policy.allow_negative_qbo_qty_apply),
         "blocked_items": int(blocked_items),
         "missing_base_item_in_qbo": int(missing_base_item_in_qbo),
         "duplicate_base_items_in_qbo": int(duplicate_base_items_in_qbo),

@@ -64,6 +64,23 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "3")
         self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "7")
 
+    def test_quantity_risk_thresholds_become_cli_args_for_internal_callers(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "max_apply_qty_delta": 25,
+                    "max_apply_value_impact": 1000,
+                    "allow_zero_cost_apply": True,
+                    "allow_negative_qbo_qty_apply": True,
+                }
+            )
+        )
+
+        self.assertEqual(cmd[cmd.index("--max-apply-qty-delta") + 1], "25")
+        self.assertEqual(cmd[cmd.index("--max-apply-value-impact") + 1], "1000")
+        self.assertIn("--allow-zero-cost-apply", cmd)
+        self.assertIn("--allow-negative-qbo-qty-apply", cmd)
+
     def test_product_filter_without_caps_omits_limit_flags(self):
         cmd = build_command(
             self._base_cleaned(

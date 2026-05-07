@@ -61,6 +61,28 @@ class InventoryReviewParserTests(TestCase):
         self.assertEqual(result.rows[0]["reason_label"], "product not found in QuickBooks")
         self.assertEqual(result.rows[0]["reason_group"], "Missing from QuickBooks")
 
+    def test_parser_tolerates_quantity_preview_risk_columns(self):
+        with TemporaryDirectory() as td:
+            final_audit = Path(td) / "final.csv"
+            final_audit.write_text(
+                "\n".join(
+                    [
+                        "epos_product_name,status,catalog_issue_type,qbo_item_id,qbo_item_name,qbo_qty,epos_expected_qty,qty_delta,qbo_cost,estimated_value_impact,risk_flags,risk_level,recommended_action,apply_eligible",
+                        "Widget,needs_adjustment,exact_name_match,1,Widget,2,5,3,10,30,,low,eligible_for_apply,True",
+                        "Risky,needs_adjustment,exact_name_match,2,Risky,-2,5,7,10,70,negative_qbo_qty,medium,manual_review_required,False",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = parse_inventory_review_csv(final_audit)
+
+        self.assertEqual(result.total_rows, 2)
+        self.assertEqual(len(result.rows), 2)
+        self.assertEqual(result.rows[0]["product"], "Widget")
+        self.assertEqual(result.rows[0]["delta"], "3")
+        self.assertEqual(result.rows[1]["raw"]["risk_flags"], "negative_qbo_qty")
+
 
 class InventoryReviewViewTests(TestCase):
     def setUp(self):

@@ -157,6 +157,8 @@ RUN_ARTIFACT_REPORT_LABELS = {
     "final_audit": "Final Audit",
     "initial_audit": "Initial Audit",
     "catalog_cleanup": "Catalog Cleanup",
+    "quantity_preview_csv": "Quantity Preview",
+    "quantity_preview_json": "Quantity Preview JSON",
     "post_catalog_audit": "Post Catalog Audit",
     "review_missing_create_report": "Missing item creation report",
 }

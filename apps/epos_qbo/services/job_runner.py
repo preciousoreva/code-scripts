@@ -146,6 +146,14 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
 
     if opts.get("max_qty_delta") is not None:
         cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
+    if opts.get("max_apply_qty_delta") is not None:
+        cmd.extend(["--max-apply-qty-delta", str(opts["max_apply_qty_delta"])])
+    if opts.get("max_apply_value_impact") is not None:
+        cmd.extend(["--max-apply-value-impact", str(opts["max_apply_value_impact"])])
+    if opts.get("allow_zero_cost_apply"):
+        cmd.append("--allow-zero-cost-apply")
+    if opts.get("allow_negative_qbo_qty_apply"):
+        cmd.append("--allow-negative-qbo-qty-apply")
     if opts.get("adjust_account_id"):
         cmd.extend(["--adjust-account-id", str(opts["adjust_account_id"])])
     if opts.get("txn_date"):
