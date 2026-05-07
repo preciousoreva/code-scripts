@@ -12,6 +12,7 @@ from unittest import mock
 import pandas as pd
 
 from code_scripts import inventory_pipeline, inventory_sync
+from code_scripts.inventory_safety import InventoryApplyDisabledError
 
 
 class InventoryPipelineOrchestrationTests(unittest.TestCase):
@@ -46,6 +47,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             "max_qty_delta": None,
             "adjust_account_id": None,
             "txn_date": "2026-04-28",
+            "mode": "audit_only",
             "dry_run": False,
             "no_slack": True,
             "summary_output_dir": str(Path(td) / "summaries"),
@@ -704,6 +706,8 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                         stock_csv=str(stock_path),
                         product_filter="GOLDBERG CAN 50cl*24",
                         categories=["ALCOHOLS & SPIRITS"],
+                        mode="catalog_apply_admin_only",
+                        max_catalog_fixes=1,
                     )
                 )
 
@@ -823,6 +827,8 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                         stock_csv=str(stock_path),
                         product_filter="LEGEND EXTRA STOUT CAN 440ml*24",
                         categories=["ALCOHOLS & SPIRITS"],
+                        mode="catalog_apply_admin_only",
+                        max_catalog_fixes=1,
                     )
                 )
 
@@ -832,36 +838,216 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertEqual(summary["skipped_unsupported"], 0)
         self.assertEqual(summary["quantity_updates_applied"], 0)
 
-    def test_dry_run_passes_dry_flags_and_reports_no_writes(self):
+    def test_default_mode_performs_no_qbo_writes(self):
         with tempfile.TemporaryDirectory() as td:
             qbo_path = Path(td) / "qbo.csv"
-            sequence: list[str] = []
             self._patch_common(td, plan=self._supported_plan(), qbo_paths=[qbo_path])
             with mock.patch.object(
                 inventory_pipeline,
                 "_run_apply_for_existing_base_pack_variants",
-                side_effect=lambda **kwargs: sequence.append(f"catalog:{kwargs['dry_run']}") or 0,
-            ), mock.patch.object(
+            ) as catalog_mock, mock.patch.object(
                 inventory_pipeline,
                 "_apply_exact_match_quantity_adjustments",
-                side_effect=lambda **kwargs: sequence.append(f"quantity:{kwargs['dry_run']}") or {
-                    "posted": 0,
-                    "planned": 1,
-                    "skipped": 0,
-                    "skipped_due_to_cap": 0,
-                    "skipped_non_exact": 0,
-                    "changed_qbo": False,
-                },
-            ):
-                summary = inventory_pipeline.run_inventory_pipeline(
-                    self._args(td, dry_run=True)
-                )
+            ) as quantity_mock:
+                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
 
-            self.assertEqual(sequence, ["catalog:True", "quantity:True"])
+            catalog_mock.assert_not_called()
+            quantity_mock.assert_not_called()
+            self.assertEqual(summary["inventory_mode"], "audit_only")
             self.assertEqual(summary["catalog_fixes_applied"], 0)
             self.assertEqual(summary["quantity_updates_applied"], 0)
 
-    def test_catalog_cleanup_runs_before_quantity_sync(self):
+    def test_quantity_preview_reports_planned_quantity_without_posting(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            self._patch_common(
+                td,
+                plan=pd.DataFrame(),
+                qbo_paths=[qbo_path],
+                qbo_rows=self._qbo_rows(),
+                audit_report=self._quantity_report(),
+            )
+            with mock.patch.object(inventory_pipeline, "post_inventory_adjustment") as post_mock:
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="quantity_preview")
+                )
+
+            self.assertEqual(summary["inventory_mode"], "quantity_preview")
+            self.assertEqual(summary["write_intent"], "preview")
+            self.assertEqual(summary["quantity_adjustment_stats"]["planned"], 1)
+            self.assertEqual(summary["quantity_updates_applied"], 0)
+            post_mock.assert_not_called()
+
+    def test_audit_only_summary_includes_mode_write_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            self._patch_common(td, plan=self._supported_plan(), qbo_paths=[qbo_path])
+            summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+            payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["inventory_mode"], "audit_only")
+        self.assertEqual(payload["write_intent"], "none")
+        self.assertFalse(payload["qbo_write_attempted"])
+        self.assertFalse(payload["catalog_apply_enabled"])
+        self.assertFalse(payload["quantity_apply_enabled"])
+        self.assertFalse(payload["missing_item_create_enabled"])
+
+    def test_catalog_plan_only_writes_plan_but_does_not_apply(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            self._patch_common(td, plan=self._supported_plan(), qbo_paths=[qbo_path])
+            with mock.patch.object(
+                inventory_pipeline,
+                "_run_apply_for_existing_base_pack_variants",
+            ) as cleanup_mock:
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_plan_only")
+                )
+
+            cleanup_mock.assert_not_called()
+            self.assertEqual(summary["inventory_mode"], "catalog_plan_only")
+            self.assertIn("catalog_cleanup", summary["child_reports"])
+            self.assertEqual(summary["catalog_fixes_applied"], 0)
+
+    def test_catalog_apply_admin_only_blocks_production_without_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            qbo_path = Path(td) / "qbo.csv"
+            cfg = self._cfg()
+            cfg.qbo_environment = "production"
+            self._patch_common(td, plan=self._supported_plan(), qbo_paths=[qbo_path])
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(inventory_pipeline, "load_company_config", return_value=cfg), \
+                 mock.patch.object(
+                     inventory_pipeline,
+                     "_run_apply_for_existing_base_pack_variants",
+                     side_effect=InventoryApplyDisabledError("blocked"),
+                 ) as cleanup_mock:
+                with self.assertRaises(InventoryApplyDisabledError):
+                    inventory_pipeline.run_inventory_pipeline(
+                        self._args(td, mode="catalog_apply_admin_only", max_catalog_fixes=1)
+                    )
+
+        cleanup_mock.assert_called_once()
+
+    def test_quantity_apply_blocks_production_without_inventory_apply_override(self):
+        cfg = self._cfg()
+        cfg.qbo_environment = "production"
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(inventory_pipeline, "post_inventory_adjustment") as post_mock, \
+             mock.patch.object(inventory_pipeline, "TokenManager") as token_mock:
+            with self.assertRaises(InventoryApplyDisabledError):
+                inventory_pipeline._apply_exact_match_quantity_adjustments(
+                    cfg=cfg,
+                    audit_df=self._quantity_report(),
+                    qbo_item_rows=self._qbo_rows(),
+                    max_quantity_adjustments=None,
+                    max_qty_delta=None,
+                    adjust_account_id=None,
+                    txn_date="2026-04-28",
+                    dry_run=False,
+                )
+        post_mock.assert_not_called()
+        token_mock.assert_not_called()
+
+    def test_quantity_dry_run_preview_allowed_in_production_without_override(self):
+        cfg = self._cfg()
+        cfg.qbo_environment = "production"
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(inventory_pipeline, "post_inventory_adjustment") as post_mock, \
+             mock.patch.object(inventory_pipeline, "TokenManager") as token_mock:
+            result = inventory_pipeline._apply_exact_match_quantity_adjustments(
+                cfg=cfg,
+                audit_df=self._quantity_report(),
+                qbo_item_rows=self._qbo_rows(),
+                max_quantity_adjustments=None,
+                max_qty_delta=None,
+                adjust_account_id=None,
+                txn_date="2026-04-28",
+                dry_run=True,
+            )
+
+        self.assertEqual(result["planned"], 1)
+        self.assertEqual(result["posted"], 0)
+        post_mock.assert_not_called()
+        token_mock.assert_not_called()
+
+    def test_review_create_missing_items_blocks_production_without_override(self):
+        cfg = self._cfg()
+        cfg.qbo_environment = "production"
+        with tempfile.TemporaryDirectory() as td:
+            audit_path = Path(td) / "final.csv"
+            audit_path.write_text("product,status\nWidget,missing_from_qbo\n", encoding="utf-8")
+            args = self._args(td, dry_run=False)
+            spec = {
+                "source_final_audit": str(audit_path),
+                "affected_base_names": ["Widget"],
+                "item_inv_start_date": "2026-04-28",
+            }
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(inventory_pipeline, "classify_missing_items_for_audit_file", return_value={
+                     "rows": [
+                         {
+                             "suggested_qbo_name": "Widget",
+                             "is_safe": True,
+                             "product": "Widget",
+                             "category": "CAT",
+                             "epos_expected_qty": "5",
+                         }
+                     ]
+                 }), \
+                 mock.patch.object(inventory_pipeline, "load_category_account_mapping", return_value={}), \
+                 mock.patch.object(inventory_pipeline, "create_inventory_item") as create_mock:
+                with self.assertRaises(InventoryApplyDisabledError):
+                    inventory_pipeline._run_review_create_missing_items_phase(
+                        args,
+                        cfg,
+                        spec,
+                        started_at="2026-04-28T00:00:00",
+                    )
+        create_mock.assert_not_called()
+
+    def test_review_create_missing_items_dry_run_allowed_in_production(self):
+        cfg = self._cfg()
+        cfg.qbo_environment = "production"
+        with tempfile.TemporaryDirectory() as td:
+            audit_path = Path(td) / "final.csv"
+            audit_path.write_text("product,status\nWidget,missing_from_qbo\n", encoding="utf-8")
+            args = self._args(td, dry_run=True)
+            spec = {
+                "source_final_audit": str(audit_path),
+                "affected_base_names": ["Widget"],
+                "item_inv_start_date": "2026-04-28",
+            }
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(inventory_pipeline, "classify_missing_items_for_audit_file", return_value={
+                     "rows": [
+                         {
+                             "suggested_qbo_name": "Widget",
+                             "is_safe": True,
+                             "product": "Widget",
+                             "category": "CAT",
+                             "epos_expected_qty": "5",
+                         }
+                     ]
+                 }), \
+                 mock.patch.object(inventory_pipeline, "load_category_account_mapping", return_value={}), \
+                 mock.patch.object(inventory_pipeline, "_resolve_qbo_snapshot", return_value=Path(td) / "qbo.csv"), \
+                 mock.patch.object(inventory_pipeline, "load_qbo_inventory_item_rows", return_value=pd.DataFrame()), \
+                 mock.patch.object(inventory_pipeline, "create_inventory_item") as create_mock, \
+                 mock.patch.object(inventory_pipeline, "_write_summary_reports", return_value=(Path(td) / "s.json", Path(td) / "s.txt")):
+                result = inventory_pipeline._run_review_create_missing_items_phase(
+                    args,
+                    cfg,
+                    spec,
+                    started_at="2026-04-28T00:00:00",
+                )
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["products_checked"], 1)
+        self.assertEqual(result["base_items_created"], 0)
+        create_mock.assert_not_called()
+
+    def test_catalog_apply_mode_skips_quantity_sync(self):
         with tempfile.TemporaryDirectory() as td:
             qbo_path = Path(td) / "qbo.csv"
             sequence: list[str] = []
@@ -882,9 +1068,11 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "changed_qbo": False,
                 },
             ):
-                inventory_pipeline.run_inventory_pipeline(self._args(td))
+                inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_apply_admin_only", max_catalog_fixes=1)
+                )
 
-            self.assertEqual(sequence, ["catalog", "quantity"])
+            self.assertEqual(sequence, ["catalog"])
 
     def test_qbo_snapshot_refreshes_after_catalog_cleanup_writes(self):
         with tempfile.TemporaryDirectory() as td:
@@ -912,7 +1100,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "changed_qbo": False,
                 },
             ):
-                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_apply_admin_only", max_catalog_fixes=1)
+                )
 
             self.assertEqual(resolve_mock.call_count, 2)
             self.assertEqual(summary["qbo_csv"], str(qbo_after_catalog))
@@ -950,10 +1140,12 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "changed_qbo": False,
                 },
             ):
-                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_apply_admin_only", max_catalog_fixes=3)
+                )
 
             self.assertEqual(cleanup_mock.call_args.kwargs["max_products"], 3)
-            self.assertIsNone(summary["max_catalog_fixes"])
+            self.assertEqual(summary["max_catalog_fixes"], 3)
             self.assertEqual(summary["catalog_fixes_applied"], 3)
             self.assertEqual(summary["skipped_unsupported"], 0)
 
@@ -990,7 +1182,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                 },
             ):
                 summary = inventory_pipeline.run_inventory_pipeline(
-                    self._args(td, max_catalog_fixes=1)
+                    self._args(td, mode="catalog_apply_admin_only", max_catalog_fixes=1)
                 )
 
             self.assertEqual(cleanup_mock.call_args.kwargs["max_products"], 1)
@@ -1018,7 +1210,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                  mock.patch.object(inventory_pipeline, "GlobalRunLock", return_value=lock), \
                  mock.patch.object(inventory_pipeline, "post_inventory_adjustment", return_value={}) as post_mock, \
                  mock.patch.object(inventory_pipeline, "mark_qbo_snapshot_stale") as stale_mock:
-                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="quantity_apply")
+                )
 
             self.assertIsNone(summary["max_quantity_adjustments"])
             self.assertEqual(post_mock.call_count, 3)
@@ -1047,7 +1241,7 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                  mock.patch.object(inventory_pipeline, "post_inventory_adjustment", return_value={}) as post_mock, \
                  mock.patch.object(inventory_pipeline, "mark_qbo_snapshot_stale"):
                 summary = inventory_pipeline.run_inventory_pipeline(
-                    self._args(td, max_quantity_adjustments=1)
+                    self._args(td, mode="quantity_apply", max_quantity_adjustments=1)
                 )
 
             self.assertEqual(summary["max_quantity_adjustments"], 1)
@@ -1220,9 +1414,11 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "changed_qbo": False,
                 },
             ):
-                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_plan_only")
+                )
 
-            cleanup_mock.assert_called_once()
+            cleanup_mock.assert_not_called()
             self.assertEqual(summary["catalog_fixes_applied"], 0)
             self.assertEqual(summary["unsupported_catalog_issues"].get("only_pack_variant_exists", 0), 0)
             self.assertEqual(summary["unsupported_catalog_issues"]["missing_from_qbo"], 1)
@@ -1247,7 +1443,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "changed_qbo": False,
                 },
             ):
-                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_plan_only")
+                )
 
             cleanup_mock.assert_not_called()
             self.assertEqual(summary["catalog_fixes_applied"], 0)
@@ -1284,7 +1482,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "changed_qbo": False,
                 },
             ):
-                summary = inventory_pipeline.run_inventory_pipeline(self._args(td))
+                summary = inventory_pipeline.run_inventory_pipeline(
+                    self._args(td, mode="catalog_apply_admin_only", max_catalog_fixes=1)
+                )
 
             self.assertEqual(summary["catalog_fixes_applied"], 1)
             self.assertEqual(summary["duplicate_base_items_resolved"], 1)

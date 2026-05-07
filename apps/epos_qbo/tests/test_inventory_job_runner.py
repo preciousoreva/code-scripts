@@ -30,6 +30,7 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--auto-download", cmd)
         self.assertIn("--auto-fetch-qbo", cmd)
         self.assertIn("--qbo-force-refresh", cmd)
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "audit_only")
         self.assertNotIn("--max-catalog-fixes", cmd)
         self.assertNotIn("--max-quantity-adjustments", cmd)
         self.assertNotIn("code_scripts.inventory_catalog_cleanup", flat)
@@ -92,6 +93,17 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("4", cmd)
 
+    def test_mode_option_becomes_cli_arg(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "mode": "quantity_preview",
+                }
+            )
+        )
+
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "quantity_preview")
+
     def test_build_command_for_job_supports_base_name_scope_and_zero_caps(self):
         job = RunJob.objects.create(
             scope=RunJob.SCOPE_INVENTORY_PIPELINE,
@@ -112,6 +124,70 @@ class InventoryPipelineBuildCommandTests(TestCase):
         self.assertIn("0", cmd)
         self.assertIn("--max-quantity-adjustments", cmd)
         self.assertIn("2", cmd)
+
+    def test_review_retry_catalog_command_remains_scoped_and_capped(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["Pack Conflict"],
+                "max_catalog_fixes": 1,
+                "max_quantity_adjustments": 0,
+                "review_retry": {
+                    "intent": "review_retry_catalog_cleanup",
+                    "row_count": 1,
+                    "affected_base_names": ["Pack Conflict"],
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+
+        self.assertEqual(cmd[cmd.index("--base-name") + 1], "Pack Conflict")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "catalog_apply_admin_only")
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "1")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "0")
+        self.assertNotIn("--dry-run", cmd)
+
+    def test_review_retry_quantity_command_remains_scoped_and_capped(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["BENSON & HEDGES CIGARETTES"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 1,
+                "review_retry": {
+                    "intent": "review_retry_quantity_adjustments",
+                    "row_count": 1,
+                    "affected_base_names": ["BENSON & HEDGES CIGARETTES"],
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+
+        self.assertEqual(cmd[cmd.index("--base-name") + 1], "BENSON & HEDGES CIGARETTES")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "quantity_apply")
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "1")
+        self.assertNotIn("--dry-run", cmd)
+
+    def test_review_retry_command_rejects_unscoped_full_catalog_apply(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "max_catalog_fixes": 10,
+                "max_quantity_adjustments": 0,
+                "review_retry": {
+                    "intent": "review_retry_catalog_cleanup",
+                    "row_count": 1,
+                    "affected_base_names": ["Pack Conflict"],
+                },
+            },
+        )
+
+        with self.assertRaises(ValueError):
+            build_command_for_job(job)
 
     def test_build_command_for_job_includes_review_create_missing_items_flag(self):
         job = RunJob.objects.create(
@@ -167,6 +243,8 @@ class InventoryPipelineBuildCommandTests(TestCase):
                 "code_scripts.inventory_pipeline",
                 "--company",
                 "company_a",
+                "--mode",
+                "audit_only",
                 "--auto-download",
                 "--auto-fetch-qbo",
                 "--qbo-force-refresh",

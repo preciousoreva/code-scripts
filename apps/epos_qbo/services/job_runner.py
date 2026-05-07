@@ -83,6 +83,7 @@ def build_command(cleaned: dict) -> list[str]:
 def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[str]:
     """Build the operator-facing unified inventory pipeline command."""
     opts = cleaned.get("inventory_options") or {}
+    _validate_inventory_review_options(opts)
     company = cleaned["company_key"]
     if not company:
         raise ValueError("inventory_pipeline requires company_key")
@@ -95,6 +96,8 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
         "--company",
         str(company),
     ]
+    mode = _inventory_pipeline_mode(opts)
+    cmd.extend(["--mode", mode])
     stock_csv = (opts.get("stock_csv") or "").strip()
     if stock_csv:
         cmd.extend(["--stock-csv", stock_csv])
@@ -151,6 +154,60 @@ def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[st
         cmd.append("--dry-run")
 
     return [str(part) for part in cmd]
+
+
+def _validate_inventory_review_options(opts: dict) -> None:
+    """Fail closed when a review-triggered inventory write job loses its scope."""
+
+    review_retry = opts.get("review_retry")
+    review_create_missing = opts.get("review_create_missing_items")
+    if not isinstance(review_retry, dict) and not isinstance(review_create_missing, dict):
+        return
+
+    base_names = opts.get("base_names") or []
+    if isinstance(base_names, str):
+        base_names = [base_names]
+    scoped_base_names = [str(value or "").strip() for value in base_names if str(value or "").strip()]
+    if not scoped_base_names:
+        raise ValueError("inventory review jobs require scoped base_names")
+
+    max_catalog = _positive_inventory_limit(opts.get("max_catalog_fixes"), "max_catalog_fixes")
+    max_quantity = _positive_inventory_limit(
+        opts.get("max_quantity_adjustments"),
+        "max_quantity_adjustments",
+    )
+
+    if isinstance(review_create_missing, dict):
+        if max_catalog != 0 or max_quantity != 0:
+            raise ValueError("inventory missing-item review jobs must disable catalog and quantity phases")
+        return
+
+    intent = str(review_retry.get("intent") or "").strip()
+    row_count = int(review_retry.get("row_count") or len(scoped_base_names))
+    if intent == "review_retry_catalog_cleanup":
+        if max_catalog is None or max_catalog > row_count or max_quantity != 0:
+            raise ValueError("catalog review retry jobs must be scoped by row count and disable quantity")
+    elif intent == "review_retry_quantity_adjustments":
+        if max_catalog != 0 or max_quantity is None or max_quantity > row_count:
+            raise ValueError("quantity review retry jobs must disable catalog and be scoped by row count")
+    else:
+        raise ValueError("unknown inventory review retry intent")
+
+
+def _inventory_pipeline_mode(opts: dict) -> str:
+    raw = str(opts.get("mode") or "").strip()
+    if raw:
+        return raw
+    review_retry = opts.get("review_retry")
+    if isinstance(review_retry, dict):
+        intent = str(review_retry.get("intent") or "").strip()
+        if intent == "review_retry_catalog_cleanup":
+            return "catalog_apply_admin_only"
+        if intent == "review_retry_quantity_adjustments":
+            return "quantity_apply"
+    if isinstance(opts.get("review_create_missing_items"), dict):
+        return "audit_only"
+    return "audit_only"
 
 
 def _positive_inventory_limit(value: object, option_name: str) -> int | None:

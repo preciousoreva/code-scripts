@@ -93,6 +93,14 @@ UNSUPPORTED_CATALOG_ISSUE_TYPES = {
     "missing_from_qbo",
     "multiple_active_base_items",
 }
+INVENTORY_MODES = (
+    "audit_only",
+    "quantity_preview",
+    "quantity_apply",
+    "catalog_plan_only",
+    "catalog_apply_admin_only",
+)
+DEFAULT_INVENTORY_MODE = "audit_only"
 
 
 @dataclass(frozen=True)
@@ -132,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-qty-delta", type=float, default=None)
     parser.add_argument("--adjust-account-id", default=None)
     parser.add_argument("--txn-date", default=None)
+    parser.add_argument(
+        "--mode",
+        choices=INVENTORY_MODES,
+        default=DEFAULT_INVENTORY_MODE,
+        help="Explicit inventory pipeline mode. Defaults to audit_only.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--review-create-missing-items",
@@ -166,6 +180,31 @@ def _optional_non_negative_int(value: int | None) -> int | None:
     if value is None:
         return None
     return max(0, int(value))
+
+
+def _inventory_mode(args: argparse.Namespace) -> str:
+    mode = str(getattr(args, "mode", "") or DEFAULT_INVENTORY_MODE).strip()
+    if mode not in INVENTORY_MODES:
+        raise ValueError(f"unsupported inventory mode: {mode}")
+    return mode
+
+
+def _mode_flags(mode: str) -> dict[str, bool]:
+    return {
+        "catalog_plan_enabled": mode in {"catalog_plan_only", "catalog_apply_admin_only"},
+        "catalog_apply_enabled": mode == "catalog_apply_admin_only",
+        "quantity_preview_enabled": mode == "quantity_preview",
+        "quantity_apply_enabled": mode == "quantity_apply",
+        "missing_item_create_enabled": False,
+    }
+
+
+def _write_intent_for_mode(mode: str) -> str:
+    if mode in {"quantity_apply", "catalog_apply_admin_only", "review_create_missing_items"}:
+        return "apply"
+    if mode in {"quantity_preview", "catalog_plan_only"}:
+        return "preview"
+    return "none"
 
 
 def _resolve_stock_path(args: argparse.Namespace, cfg) -> Path:
@@ -382,6 +421,43 @@ def _apply_catalog_cleanup(
     result["applied"] = 0 if dry_run else int(applied)
     result["changed_qbo"] = bool(applied and not dry_run)
     return result
+
+
+def _catalog_plan_only_result(*, cfg, action_plan: pd.DataFrame) -> dict[str, Any]:
+    catalog_report_path = _catalog_output_path(cfg.company_key)
+    _write_catalog_csv(catalog_report_path, action_plan)
+    print(f"[INFO] Wrote catalog cleanup report: {catalog_report_path}")
+    supported = _supported_catalog_rows(action_plan)
+    unsupported = (
+        action_plan.drop(index=supported.index).copy() if not action_plan.empty else action_plan.copy()
+    )
+    return {
+        "report_path": str(catalog_report_path),
+        "supported_available": int(len(supported)),
+        "unsupported_counts": _catalog_counts(unsupported),
+        "skipped_due_to_cap": 0,
+        "applied": 0,
+        "base_items_created": 0,
+        "duplicate_base_items_resolved": 0,
+        "created_base_details": [],
+        "changed_qbo": False,
+        "exit_code": 0,
+    }
+
+
+def _empty_catalog_result() -> dict[str, Any]:
+    return {
+        "report_path": "",
+        "supported_available": 0,
+        "unsupported_counts": {},
+        "skipped_due_to_cap": 0,
+        "applied": 0,
+        "base_items_created": 0,
+        "duplicate_base_items_resolved": 0,
+        "created_base_details": [],
+        "changed_qbo": False,
+        "exit_code": 0,
+    }
 
 
 def _apply_exact_match_quantity_adjustments(
@@ -823,6 +899,8 @@ def _stable_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
         "company_key": "",
         "display_name": "",
         "scope": "",
+        "inventory_mode": DEFAULT_INVENTORY_MODE,
+        "write_intent": "none",
         "started_at": "",
         "finished_at": "",
         "run_job_id": "",
@@ -836,6 +914,11 @@ def _stable_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
         if not payload[key]:
             payload[key] = default
     payload["dry_run"] = bool(payload.get("dry_run", False))
+    payload["qbo_write_attempted"] = bool(payload.get("qbo_write_attempted", False))
+    payload["qbo_write_blocked"] = bool(payload.get("qbo_write_blocked", False))
+    payload["catalog_apply_enabled"] = bool(payload.get("catalog_apply_enabled", False))
+    payload["quantity_apply_enabled"] = bool(payload.get("quantity_apply_enabled", False))
+    payload["missing_item_create_enabled"] = bool(payload.get("missing_item_create_enabled", False))
     payload["blocked_catalog_examples"] = list(payload.get("blocked_catalog_examples") or [])
     payload["created_base_details"] = list(payload.get("created_base_details") or [])
     payload["duplicate_resolution_details"] = list(payload.get("duplicate_resolution_details") or [])
@@ -851,6 +934,7 @@ def _format_final_summary(summary: dict[str, Any]) -> str:
     summary = _stable_summary_payload(summary)
     lines = [
         f"{_completion_heading(summary.get('completion_status'))} for {summary['display_name']} ({summary['company_key']})",
+        f"Inventory mode: {summary['inventory_mode']}",
         f"Scope: {summary['scope'] or 'all products'}",
         f"Products checked: {summary['products_checked']}",
         f"In sync / Products clean: {summary['in_sync']}",
@@ -1431,6 +1515,13 @@ def _run_review_create_missing_items_phase(
         "finished_at": _now_utc_iso(),
         "company_key": cfg.company_key,
         "display_name": cfg.display_name,
+        "inventory_mode": "review_create_missing_items",
+        "write_intent": _write_intent_for_mode("review_create_missing_items"),
+        "qbo_write_attempted": bool(created_count > 0 and not dry_run),
+        "qbo_write_blocked": False,
+        "catalog_apply_enabled": False,
+        "quantity_apply_enabled": False,
+        "missing_item_create_enabled": bool(not dry_run),
         "scope": "review_create_missing_items",
         "dry_run": dry_run,
         "stock_csv": str(audit_path),
@@ -1515,6 +1606,8 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     cfg = load_company_config(args.company)
     ensure_company_runtime_compatible(cfg)
     review_action_env = _load_review_action_envelope()
+    mode = _inventory_mode(args)
+    mode_flags = _mode_flags(mode)
 
     if getattr(args, "review_create_missing_items", False):
         raw_spec = os.environ.get("OIAT_REVIEW_CREATE_MISSING_JSON", "").strip()
@@ -1531,6 +1624,8 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     max_catalog_fixes = _optional_non_negative_int(args.max_catalog_fixes)
     max_quantity_adjustments = _optional_non_negative_int(args.max_quantity_adjustments)
+    if mode == "catalog_apply_admin_only" and max_catalog_fixes is None:
+        raise RuntimeError("catalog_apply_admin_only requires --max-catalog-fixes.")
     categories = [str(c).strip() for c in list(args.categories or []) if str(c).strip()]
     product_filter = (args.product_filter or "").strip() or None
     base_names = [str(v).strip() for v in list(getattr(args, "base_names", []) or []) if str(v).strip()]
@@ -1540,6 +1635,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     print("=" * 68)
     print(f"Inventory pipeline: {cfg.display_name} ({cfg.company_key})")
+    print(f"Mode: {mode}")
     scope_text = format_scope(category=categories, product=product_filter)
     if scope_text:
         print(f"Scope: {scope_text}")
@@ -1568,6 +1664,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             webhook_url=webhook,
             metadata={
                 "scope": "inventory_pipeline",
+                "inventory_mode": mode,
                 "base_names_selected": int(len(base_names or [])),
                 "run_job_id": os.environ.get("OIAT_RUN_JOB_ID", "").strip(),
                 "run_url": _build_run_detail_url(os.environ.get("OIAT_RUN_JOB_ID", "").strip()),
@@ -1589,53 +1686,71 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     )
     child_reports["initial_audit"] = str(initial.report_path)
 
-    catalog_plan = plan_catalog_cleanup(
-        company_key=cfg.company_key,
-        audit_df=initial.report,
-        qbo_item_rows=qbo_item_rows,
-        source_inventory_report=str(initial.report_path),
-    )
-    catalog_result = _apply_catalog_cleanup(
-        cfg=cfg,
-        plan_df=catalog_plan,
-        qbo_item_rows=qbo_item_rows,
-        txn_date=txn_date,
-        max_catalog_fixes=max_catalog_fixes,
-        dry_run=bool(args.dry_run),
-    )
-    child_reports["catalog_cleanup"] = catalog_result["report_path"]
-    if catalog_result["exit_code"] != 0:
-        raise RuntimeError(
-            f"catalog cleanup failed with exit code {catalog_result['exit_code']}"
+    catalog_plan = pd.DataFrame()
+    catalog_result = _empty_catalog_result()
+    if mode_flags["catalog_plan_enabled"]:
+        catalog_plan = plan_catalog_cleanup(
+            company_key=cfg.company_key,
+            audit_df=initial.report,
+            qbo_item_rows=qbo_item_rows,
+            source_inventory_report=str(initial.report_path),
         )
+        if mode_flags["catalog_apply_enabled"]:
+            catalog_result = _apply_catalog_cleanup(
+                cfg=cfg,
+                plan_df=catalog_plan,
+                qbo_item_rows=qbo_item_rows,
+                txn_date=txn_date,
+                max_catalog_fixes=max_catalog_fixes,
+                dry_run=bool(args.dry_run),
+            )
+        else:
+            catalog_result = _catalog_plan_only_result(cfg=cfg, action_plan=catalog_plan)
+        child_reports["catalog_cleanup"] = catalog_result["report_path"]
+        if catalog_result["exit_code"] != 0:
+            raise RuntimeError(
+                f"catalog cleanup failed with exit code {catalog_result['exit_code']}"
+            )
 
     if catalog_result["changed_qbo"]:
         qbo_path = _resolve_qbo_snapshot(args, cfg, force_refresh=True)
         qbo_item_rows = load_qbo_inventory_item_rows(str(qbo_path))
 
-    post_catalog = _run_audit_phase(
-        cfg=cfg,
-        stock_path=stock_path,
-        qbo_path=qbo_path,
-        phase="post_catalog",
-        categories=categories,
-        product_filter=product_filter,
-        base_names=base_names,
-    )
-    child_reports["post_catalog_audit"] = str(post_catalog.report_path)
+    audit_after_catalog = initial
+    if mode_flags["catalog_apply_enabled"]:
+        audit_after_catalog = _run_audit_phase(
+            cfg=cfg,
+            stock_path=stock_path,
+            qbo_path=qbo_path,
+            phase="post_catalog",
+            categories=categories,
+            product_filter=product_filter,
+            base_names=base_names,
+        )
+        child_reports["post_catalog_audit"] = str(audit_after_catalog.report_path)
 
-    quantity_result = _apply_exact_match_quantity_adjustments(
-        cfg=cfg,
-        audit_df=post_catalog.report,
-        qbo_item_rows=qbo_item_rows,
-        max_quantity_adjustments=max_quantity_adjustments,
-        max_qty_delta=args.max_qty_delta,
-        adjust_account_id=args.adjust_account_id,
-        txn_date=txn_date,
-        dry_run=bool(args.dry_run),
-    )
+    quantity_result = {
+        "posted": 0,
+        "planned": 0,
+        "skipped": 0,
+        "skipped_due_to_cap": 0,
+        "skipped_non_exact": 0,
+        "changed_qbo": False,
+        "details": [],
+    }
+    if mode_flags["quantity_preview_enabled"] or mode_flags["quantity_apply_enabled"]:
+        quantity_result = _apply_exact_match_quantity_adjustments(
+            cfg=cfg,
+            audit_df=audit_after_catalog.report,
+            qbo_item_rows=qbo_item_rows,
+            max_quantity_adjustments=max_quantity_adjustments,
+            max_qty_delta=args.max_qty_delta,
+            adjust_account_id=args.adjust_account_id,
+            txn_date=txn_date,
+            dry_run=bool(args.dry_run or mode_flags["quantity_preview_enabled"]),
+        )
 
-    final = post_catalog
+    final = audit_after_catalog
     if quantity_result["changed_qbo"]:
         qbo_path = _resolve_qbo_snapshot(args, cfg, force_refresh=True)
         final = _run_audit_phase(
@@ -1731,6 +1846,16 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "started_at": started_at,
         "company_key": cfg.company_key,
         "display_name": cfg.display_name,
+        "inventory_mode": mode,
+        "write_intent": _write_intent_for_mode(mode),
+        "qbo_write_attempted": bool(
+            (mode_flags["catalog_apply_enabled"] and int(catalog_result.get("applied", 0) or 0) > 0)
+            or (mode_flags["quantity_apply_enabled"] and int(quantity_result.get("posted", 0) or 0) > 0)
+        ),
+        "qbo_write_blocked": False,
+        "catalog_apply_enabled": bool(mode_flags["catalog_apply_enabled"] and not args.dry_run),
+        "quantity_apply_enabled": bool(mode_flags["quantity_apply_enabled"] and not args.dry_run),
+        "missing_item_create_enabled": False,
         "scope": scope_text,
         "dry_run": bool(args.dry_run),
         "stock_csv": str(stock_path),

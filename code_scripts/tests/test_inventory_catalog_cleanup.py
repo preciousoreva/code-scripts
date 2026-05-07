@@ -8,6 +8,7 @@ from unittest import mock
 import pandas as pd
 
 from code_scripts import inventory_catalog_cleanup, inventory_sync
+from code_scripts.inventory_safety import InventoryApplyDisabledError
 
 
 class CatalogCleanupPlannerTest(unittest.TestCase):
@@ -612,6 +613,49 @@ class CatalogCleanupPlannerTest(unittest.TestCase):
         stale_mock.assert_not_called()
         verify_mock.assert_not_called()
         token_mock.assert_not_called()
+
+    def test_apply_blocks_production_without_inventory_apply_override(self):
+        fake_cfg = mock.Mock(
+            company_key="company_a",
+            display_name="ACME",
+            qbo_environment="production",
+            realm_id="REALM123",
+            inventory_adjustment_account_id="88",
+        )
+        audit_df = pd.DataFrame(
+            [
+                {"base_name": "GOLDBERG CAN 50cl", "epos_single_units": 8.0, "catalog_issue_type": "base_with_pack_variants"},
+            ]
+        )
+        qbo_item_rows = pd.DataFrame(
+            [
+                {"Id": "10", "Name": "GOLDBERG CAN 50cl", "base_name": "GOLDBERG CAN 50cl", "qbo_has_pack": False, "qbo_qty_on_hand": 1},
+                {"Id": "11", "Name": "GOLDBERG CAN 50cl*6", "base_name": "GOLDBERG CAN 50cl", "qbo_has_pack": True, "qbo_qty_on_hand": 1},
+            ]
+        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(inventory_catalog_cleanup, "load_company_config", return_value=fake_cfg), \
+             mock.patch.object(inventory_catalog_cleanup, "ensure_company_runtime_compatible"), \
+             mock.patch.object(inventory_catalog_cleanup, "get_available_companies", return_value=["company_a"]), \
+             mock.patch.object(inventory_catalog_cleanup, "_read_inventory_report", return_value=audit_df), \
+             mock.patch.object(inventory_catalog_cleanup, "load_qbo_inventory_item_rows", return_value=qbo_item_rows), \
+             mock.patch.object(inventory_catalog_cleanup, "post_inventory_adjustment") as post_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_post_inactivate") as inact_mock, \
+             mock.patch.object(inventory_catalog_cleanup, "_write_csv"), \
+             redirect_stdout(io.StringIO()):
+            (Path(td) / "qbo.csv").write_text("Id,Name,Type,TrackQtyOnHand,QtyOnHand\n", encoding="utf-8")
+            with self.assertRaises(InventoryApplyDisabledError):
+                inventory_catalog_cleanup.main([
+                    "--company", "company_a",
+                    "--from-report", "/tmp/r.csv",
+                    "--apply",
+                    "--max-products", "1",
+                    "--qbo-csv", str(Path(td) / "qbo.csv"),
+                ])
+        post_mock.assert_not_called()
+        inact_mock.assert_not_called()
 
     def test_dry_run_only_pack_variant_create_path_does_not_write(self):
         fake_cfg = mock.Mock(
