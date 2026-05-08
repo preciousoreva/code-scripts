@@ -1,8 +1,14 @@
 """
-QuickBooks Online: Inventory quantity adjustments via InventoryAdjustment.
+QuickBooks Online InventoryAdjustment helpers.
 
-This uses the QBO v3 accounting API entity ``InventoryAdjustment`` (not the older
-name ``InventoryQtyAdjustment``). The XSD defines:
+InventoryAdjustment POST support is intentionally disabled for the forward
+inventory sync workflow. Public QBO InventoryAdjustment quantity changes use an
+adjustment account and previously polluted P&L when routed through COGS /
+Inventory Shrinkage. Keep payload construction only for historical tests and
+remediation diagnostics; do not post new inventory adjustments from code.
+
+The QBO v3 accounting API entity ``InventoryAdjustment`` (not the older name
+``InventoryQtyAdjustment``) defines:
 
 - ``AdjustAccountRef`` (required): inventory adjustment (expense/OBE) account
 - ``Line`` entries with ``DetailType == "ItemAdjustmentLineDetail"`` and
@@ -15,9 +21,6 @@ See Intuit ``Finance.xsd`` in the official QuickBooks V3 PHP SDK repo.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-
-from code_scripts.company_config import get_qbo_api_base_url
-from code_scripts.qbo_upload import TokenManager, _make_qbo_request
 
 MINORVERSION = "70"
 
@@ -83,22 +86,12 @@ def build_inventory_adjustment_payload(
 
 
 def post_inventory_adjustment(
-    token_mgr: TokenManager,
+    token_mgr: Any,
     realm_id: str,
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """POST InventoryAdjustment; returns parsed JSON body."""
-    base_url = get_qbo_api_base_url()
-    url = f"{base_url}/v3/company/{realm_id}/inventoryadjustment?minorversion={MINORVERSION}"
-    resp = _make_qbo_request("POST", url, token_mgr, json=payload)
-    if resp.status_code not in (200, 201):
-        try:
-            body = resp.json()
-            detail = body
-        except Exception:
-            detail = resp.text[:2000]
-        raise RuntimeError(f"InventoryAdjustment failed: HTTP {resp.status_code}: {detail}")
-    try:
-        return resp.json()
-    except Exception as exc:
-        raise RuntimeError(f"InventoryAdjustment: invalid JSON response: {exc}") from exc
+    """Fail closed: automated QBO InventoryAdjustment posting has been removed."""
+    raise RuntimeError(
+        "QBO InventoryAdjustment posting has been removed. "
+        "Use preview reports and manual QBO Adjust starting value corrections instead."
+    )

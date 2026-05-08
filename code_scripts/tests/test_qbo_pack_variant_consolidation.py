@@ -464,7 +464,6 @@ def _patch_main_dependencies(*, qbo_rows, epos_rows, adjust_account_id=None):
             consolidation, "load_epos_stock_snapshot",
             return_value=_stub_epos_df(epos_rows),
         ),
-        mock.patch.object(consolidation, "verify_realm_match"),
     ]
 
 
@@ -502,37 +501,13 @@ class MainGuardTest(unittest.TestCase):
             for p in reversed(patches):
                 p.stop()
 
-    def test_apply_requires_max_products(self):
+    def test_apply_is_removed_before_safety_caps(self):
         rc, _, err = self._run([
             "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
             "--apply", "--product", "TROPHY",
         ], adjust_account_id="82")
         self.assertEqual(rc, 2)
-        self.assertIn("--apply requires --max-products", err)
-
-    def test_apply_rejects_zero_max_products(self):
-        rc, _, err = self._run([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "0", "--product", "TROPHY",
-        ], adjust_account_id="82")
-        self.assertEqual(rc, 2)
-        self.assertIn("--max-products must be > 0", err)
-
-    def test_apply_requires_product_or_category_scope(self):
-        rc, _, err = self._run([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "1",
-        ], adjust_account_id="82")
-        self.assertEqual(rc, 2)
-        self.assertIn("--product or --category", err)
-
-    def test_apply_blocks_when_no_adjust_account_configured(self):
-        rc, _, err = self._run([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "1", "--product", "TROPHY",
-        ], adjust_account_id=None)
-        self.assertEqual(rc, 2)
-        self.assertIn("inventory_adjustment_account_id is not configured", err)
+        self.assertIn("--apply has been removed", err)
 
     def test_apply_and_dry_run_together_returns_2(self):
         rc, _, err = self._run([
@@ -563,244 +538,41 @@ class DryRunPayloadTest(unittest.TestCase):
             p.start()
         try:
             buf, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(consolidation, "post_inventory_adjustment") as post_mock, \
-                 redirect_stdout(buf), redirect_stderr(err):
+            with redirect_stdout(buf), redirect_stderr(err):
                 rc = consolidation.main(full_argv)
-            return rc, buf.getvalue(), err.getvalue(), post_mock
+            return rc, buf.getvalue(), err.getvalue()
         finally:
             for p in reversed(patches):
                 p.stop()
 
-    def test_dry_run_builds_trophy_payload_and_does_not_post(self):
-        rc, out, _err, post_mock = self._run([
+    def test_dry_run_prints_manual_starting_value_corrections(self):
+        rc, out, _err = self._run([
             "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
             "--dry-run", "--product", "TROPHY", "--txn-date", "2026-04-27",
         ])
         self.assertEqual(rc, 0)
-        post_mock.assert_not_called()
 
-        # Extract the JSON payload line emitted by [DRY-RUN-PLAN]
-        payload_line = next(
-            (line for line in out.splitlines() if line.strip().startswith("payload=")),
+        correction_line = next(
+            (line for line in out.splitlines() if line.strip().startswith("manual_starting_value_corrections=")),
             "",
         )
-        self.assertTrue(payload_line, msg=f"no payload line in output:\n{out}")
+        self.assertTrue(correction_line, msg=f"no manual correction line in output:\n{out}")
         import json as _json
-        payload = _json.loads(payload_line.strip().split("payload=", 1)[1])
+        correction = _json.loads(correction_line.strip().split("=", 1)[1])
 
-        # Expected TROPHY payload from the requirements
-        self.assertEqual(payload["TxnDate"], "2026-04-27")
-        self.assertEqual(payload["AdjustAccountRef"]["value"], "82")
-        # QBO requires a non-null DocNumber; we generate a deterministic one.
-        self.assertEqual(payload["DocNumber"], "INVCON-20260427-9364")
+        self.assertEqual(correction["txn_date"], "2026-04-27")
+        self.assertEqual(correction["doc_number"], "INVCON-20260427-9364")
         line_pairs = [
-            (l["ItemAdjustmentLineDetail"]["ItemRef"]["value"],
-             l["ItemAdjustmentLineDetail"]["QtyDiff"])
-            for l in payload["Line"]
+            (l["item_id"], l["qty_diff"])
+            for l in correction["lines"]
         ]
         self.assertEqual(line_pairs, [
             ("9364", 631.0),
             ("9365", -3.0),
             ("9366", -52.0),
         ])
-        # PrivateNote sanity
-        self.assertIn("OIAT pack variant consolidation", payload["PrivateNote"])
-        self.assertIn("9364", payload["PrivateNote"])
-
-
-class ApplyEndToEndTest(unittest.TestCase):
-    def setUp(self):
-        self._inventory_apply_env = mock.patch.dict(
-            os.environ,
-            {"OIAT_ALLOW_INVENTORY_APPLY": "true"},
-            clear=False,
-        )
-        self._inventory_apply_env.start()
-        self.addCleanup(self._inventory_apply_env.stop)
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def _run_apply(self, argv, *, qbo_rows=None, epos_rows=None, post_side_effect=None):
-        out_path = self.tmp / "report.csv"
-        full_argv = list(argv) + ["--output", str(out_path)]
-        patches = _patch_main_dependencies(
-            qbo_rows=qbo_rows or _QBO_TROPHY_ROWS,
-            epos_rows=epos_rows or _EPOS_TROPHY_ROWS,
-            adjust_account_id="82",
-        )
-        for p in patches:
-            p.start()
-        post_calls: list[dict] = []
-
-        def fake_post(_tm, _realm, payload):
-            post_calls.append(payload)
-            if post_side_effect is not None:
-                return post_side_effect(payload)
-            return {"InventoryAdjustment": {"DocNumber": "INV-1"}}
-
-        fake_lock_result = mock.Mock(acquired=True, reason="")
-        fake_lock = mock.Mock()
-        fake_lock.acquire.return_value = fake_lock_result
-        fake_lock.release.return_value = None
-
-        try:
-            buf, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(consolidation, "post_inventory_adjustment", side_effect=fake_post), \
-                 mock.patch.object(consolidation, "TokenManager"), \
-                 mock.patch.object(consolidation, "GlobalRunLock", return_value=fake_lock), \
-                 mock.patch.object(consolidation, "mark_qbo_snapshot_stale") as stale_mock, \
-                 redirect_stdout(buf), redirect_stderr(err):
-                rc = consolidation.main(full_argv)
-            return rc, buf.getvalue(), err.getvalue(), post_calls, stale_mock
-        finally:
-            for p in reversed(patches):
-                p.stop()
-
-    def test_apply_posts_trophy_and_marks_snapshot_stale(self):
-        rc, _out, _err, posts, stale_mock = self._run_apply([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "1", "--product", "TROPHY",
-            "--txn-date", "2026-04-27",
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(posts), 1)
-        # Lines match TROPHY expected payload
-        line_pairs = [
-            (l["ItemAdjustmentLineDetail"]["ItemRef"]["value"],
-             l["ItemAdjustmentLineDetail"]["QtyDiff"])
-            for l in posts[0]["Line"]
-        ]
-        self.assertEqual(line_pairs, [
-            ("9364", 631.0),
-            ("9365", -3.0),
-            ("9366", -52.0),
-        ])
-        self.assertEqual(posts[0]["AdjustAccountRef"]["value"], "82")
-        self.assertEqual(posts[0]["TxnDate"], "2026-04-27")
-        # QBO requires a non-null DocNumber; we generate a deterministic one.
-        self.assertEqual(posts[0]["DocNumber"], "INVCON-20260427-9364")
-        # Snapshot stale must be marked once with the right reason
-        stale_mock.assert_called_once()
-        all_args = list(stale_mock.call_args.args) + list(stale_mock.call_args.kwargs.values())
-        self.assertIn("company_a", all_args)
-        self.assertIn("pack_variant_consolidation_applied", all_args)
-
-    def test_apply_skips_rows_over_max_abs_base_diff(self):
-        # Use the default --max-abs-base-diff 1000; +631 fits, but 2000 will be blocked.
-        rc, _out, _err, posts, stale_mock = self._run_apply([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "5", "--product", "TROPHY",
-            "--max-abs-base-diff", "100",  # forces TROPHY (diff 631) to be blocked
-        ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(posts, [])
-        # No successful posts -> snapshot must NOT be marked stale
-        stale_mock.assert_not_called()
-
-    def test_apply_skips_rows_over_max_lines(self):
-        # Build a scenario with 1 base + many pack variants.
-        many_packs = [
-            {"Id": "1000", "Name": "P", "base_name": "P", "qbo_has_pack": False, "qbo_qty_on_hand": 0},
-        ]
-        for i in range(15):
-            many_packs.append({
-                "Id": f"200{i}", "Name": f"P*{i+2}", "base_name": "P",
-                "qbo_has_pack": True, "qbo_qty_on_hand": 1,
-            })
-        epos = [{"base_name": "P", "epos_single_units": 100, "epos_categories": "X"}]
-        rc, _out, _err, posts, stale_mock = self._run_apply([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "5", "--product", "P",
-            "--max-lines", "5",
-        ], qbo_rows=many_packs, epos_rows=epos)
-        self.assertEqual(rc, 0)
-        self.assertEqual(posts, [])
-        stale_mock.assert_not_called()
-
-    def test_apply_only_posts_consolidation_plan_available(self):
-        # Add a needs_manual_review row alongside TROPHY (a base with no
-        # variants doesn't generate a plan row, so use a pack-only row).
-        qbo = list(_QBO_TROPHY_ROWS) + [
-            # Pack variant with no exact base -> needs_manual_review
-            {"Id": "7000", "Name": "GHOST*6", "base_name": "GHOST",
-             "qbo_has_pack": True, "qbo_qty_on_hand": 5},
-        ]
-        epos = list(_EPOS_TROPHY_ROWS) + [
-            {"base_name": "GHOST", "epos_single_units": 30, "epos_categories": "ALCOHOLS & SPIRITS"},
-        ]
-        # Scope by category so both rows are in scope for filtering, but the
-        # GHOST one is needs_manual_review and must not be posted.
-        rc, _out, _err, posts, _stale = self._run_apply([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "5",
-            "--category", "ALCOHOLS & SPIRITS",
-        ], qbo_rows=qbo, epos_rows=epos)
-        self.assertEqual(rc, 0)
-        # Exactly one POST — the TROPHY consolidation. GHOST is needs_manual_review
-        # and is excluded by _classify_for_apply.
-        self.assertEqual(len(posts), 1)
-        line_ids = sorted(
-            l["ItemAdjustmentLineDetail"]["ItemRef"]["value"] for l in posts[0]["Line"]
-        )
-        self.assertEqual(line_ids, ["9364", "9365", "9366"])
-        # GHOST item should NOT appear in any posted payload
-        for payload in posts:
-            for line in payload["Line"]:
-                self.assertNotEqual(
-                    line["ItemAdjustmentLineDetail"]["ItemRef"]["value"], "7000"
-                )
-
-    def test_duplicate_doc_number_emits_friendly_message_and_does_not_mark_stale(self):
-        # Simulate QBO's duplicate-DocNumber rejection. The CLI should:
-        #   - count the row as failed (not silently treat as success)
-        #   - print [DUPLICATE] line with the DocNumber and date hint
-        #   - NOT mark the snapshot stale (no successful posts)
-        from code_scripts.qbo_inventory_adjustment import (
-            post_inventory_adjustment as _real_post,  # noqa: F401 import for pattern parity
-        )
-
-        def fake_post(payload):
-            raise RuntimeError(
-                "InventoryAdjustment failed: HTTP 400: "
-                "{'Fault': {'Error': [{'Message': 'Duplicate Document Number "
-                "Error', 'code': '6240'}], 'type': 'ValidationFault'}}"
-            )
-
-        rc, out, err, posts, stale_mock = self._run_apply([
-            "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-            "--apply", "--max-products", "1", "--product", "TROPHY",
-            "--txn-date", "2026-04-27",
-        ], post_side_effect=fake_post)
-
-        # Failure rc, friendly message, no stale mark.
-        self.assertEqual(rc, 1)
-        self.assertIn("[DUPLICATE]", err)
-        self.assertIn("INVCON-20260427-9364", err)
-        self.assertIn("may have already been applied", err)
-        stale_mock.assert_not_called()
-        # Must NOT print the generic [FAIL] header for this specific case.
-        self.assertNotIn(
-            "[FAIL] base='TROPHY LAGER CAN 500ML' item_id=9364:",
-            err,
-        )
-
-    def test_apply_does_not_inactivate_any_items(self):
-        # The cleanup module exposes _post_inactivate / _fetch_item_with_sync_token.
-        # Consolidation must NOT touch those.
-        from code_scripts import qbo_pack_variant_cleanup as cleanup
-        with mock.patch.object(cleanup, "_post_inactivate") as inact_mock, \
-             mock.patch.object(cleanup, "_fetch_item_with_sync_token") as fetch_mock:
-            rc, _out, _err, posts, _stale = self._run_apply([
-                "--company", "company_a", "--stock-csv", "x", "--qbo-csv", "x",
-                "--apply", "--max-products", "1", "--product", "TROPHY",
-            ])
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(posts), 1)
-        inact_mock.assert_not_called()
-        fetch_mock.assert_not_called()
+        self.assertIn("OIAT pack variant consolidation", correction["note"])
+        self.assertIn("9364", correction["note"])
 
 
 if __name__ == "__main__":

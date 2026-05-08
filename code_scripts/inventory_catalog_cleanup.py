@@ -28,7 +28,6 @@ from code_scripts.inventory_sync import (
     load_qbo_inventory_snapshot,
     build_audit_report,
 )
-from code_scripts.qbo_inventory_adjustment import build_inventory_adjustment_payload, post_inventory_adjustment
 from code_scripts.qbo_pack_variant_cleanup import (
     _fetch_item_with_sync_token,
     _post_inactivate,
@@ -132,23 +131,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--apply",
         action="store_true",
-        help="Apply catalog cleanup for eligible rows. CLI-only; supports only existing-base pack consolidation.",
+        help="Removed: QBO quantity-changing catalog apply is disabled.",
     )
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview what --apply would do (no QBO writes).",
+        help="Preview manual QBO starting-value corrections and catalog follow-up actions (no QBO writes).",
     )
     p.add_argument(
         "--max-products",
         type=int,
         default=None,
-        help="Required with --apply. Hard cap on number of base products to process.",
+        help="Hard cap on number of base products to preview.",
     )
     p.add_argument(
         "--txn-date",
         default=None,
-        help="TxnDate for InventoryAdjustments (YYYY-MM-DD). Defaults to today.",
+        help="Date label for manual correction previews (YYYY-MM-DD). Defaults to today.",
     )
     p.add_argument(
         "--include-no-action",
@@ -391,6 +390,12 @@ def _run_apply_for_existing_base_pack_variants(
     - create_base_then_consolidate_pack_variant
     - resolve_duplicate_base_items
     """
+    if not dry_run:
+        raise RuntimeError(
+            "QBO inventory quantity apply has been removed. "
+            "Use catalog plans and manual QBO starting-value corrections instead."
+        )
+
     attempted = consolidated = cleaned_up = skipped = failed = 0
     base_items_created = 0
     duplicate_base_items_resolved = 0
@@ -711,99 +716,21 @@ def _run_apply_for_existing_base_pack_variants(
                 continue
 
             doc_number = build_consolidation_doc_number(txn_date=txn_date, base_item_id=base_item_id)
-            payload = build_inventory_adjustment_payload(
-                adjust_account_id=str((cfg.inventory_adjustment_account_id or "")).strip(),
-                txn_date=txn_date,
-                private_note=f"OIAT catalog cleanup | base={base_name!r} | action={action}",
-                lines=lines,
-                doc_number=doc_number,
+            if action == "resolve_duplicate_base_items":
+                dup_names = [str(x).strip() for x in dup_rows["Name"].tolist()]
+                pack_names = [str(x).strip() for x in pack_rows["Name"].tolist()]
+                print(f"[DRY-RUN] canonical_base={base_item_id}:{canonical_name!r}")
+                print(f"[DRY-RUN] duplicate_bases={dup_names}")
+                print(f"[DRY-RUN] pack_variants={pack_names}")
+            print(
+                "[DRY-RUN] manual QBO starting-value corrections required "
+                f"doc={doc_number} base={base_name!r} lines={lines}"
             )
-
-            if dry_run:
-                if action == "resolve_duplicate_base_items":
-                    dup_names = [str(x).strip() for x in dup_rows["Name"].tolist()]
-                    pack_names = [str(x).strip() for x in pack_rows["Name"].tolist()]
-                    print(f"[DRY-RUN] canonical_base={base_item_id}:{canonical_name!r}")
-                    print(f"[DRY-RUN] duplicate_bases={dup_names}")
-                    print(f"[DRY-RUN] pack_variants={pack_names}")
-                print("[DRY-RUN] would post InventoryAdjustment payload=" + str(payload))
-                consolidated += 1
-                cleaned_up += 1 if (pack_ids_for_cleanup or duplicate_base_ids_for_cleanup) else 0
-                if action == "resolve_duplicate_base_items":
-                    duplicate_base_items_resolved += 1
-                continue
-
-            assert token_mgr is not None
-            try:
-                resp = post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
-                consolidated += 1
-                inv_id = ""
-                try:
-                    inv_id = str(((resp or {}).get("InventoryAdjustment") or {}).get("Id") or "").strip()
-                except Exception:  # noqa: BLE001
-                    inv_id = ""
-                suffix = f"id={inv_id}" if inv_id else f"doc={doc_number}"
-                print(f"[OK] Posted InventoryAdjustment {suffix} for base={base_name!r}")
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                if is_duplicate_doc_number_error(exc):
-                    print(f"[FAIL] base={base_name!r} duplicate DocNumber={doc_number}: {exc}")
-                else:
-                    print(f"[FAIL] base={base_name!r} consolidation failed: {exc}")
-                continue
-
-            cleanup_failed = False
-            for did in duplicate_base_ids_for_cleanup:
-                try:
-                    live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, did)
-                    qty = float(live.get("QtyOnHand", 0) or 0)
-                    if qty != 0:
-                        print(f"[SKIP] duplicate_base_id={did} qty_on_hand={qty} reason=nonzero_qty_on_hand")
-                        continue
-                    sync_token = str(live.get("SyncToken", "")).strip()
-                    payload_inactivate = build_inactivate_payload(
-                        item_id=did,
-                        sync_token=sync_token,
-                        original_name=str(live.get("Name", "") or "").strip(),
-                    )
-                    _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
-                    nm = str(live.get("Name", "") or "").strip()
-                    print(f"[OK] Inactivated duplicate_base_id={did} {nm!r}")
-                except Exception as exc:  # noqa: BLE001
-                    cleanup_failed = True
-                    failed += 1
-                    partial_failures.append(f"base={base_name} cleanup_failed duplicate_base_id={did}: {exc}")
-                    print(f"[FAIL] base={base_name!r} cleanup failed for duplicate_base_id={did}: {exc}")
-                    break
-            for pid in pack_ids_for_cleanup:
-                try:
-                    live = _fetch_item_with_sync_token(token_mgr, cfg.realm_id, pid)
-                    qty = float(live.get("QtyOnHand", 0) or 0)
-                    if qty != 0:
-                        print(f"[SKIP] pack_variant_id={pid} qty_on_hand={qty} reason=nonzero_qty_on_hand")
-                        continue
-                    sync_token = str(live.get("SyncToken", "")).strip()
-                    payload_inactivate = build_inactivate_payload(
-                        item_id=pid,
-                        sync_token=sync_token,
-                        original_name=str(live.get("Name", "") or "").strip(),
-                    )
-                    _post_inactivate(token_mgr, cfg.realm_id, payload_inactivate)
-                    nm = str(live.get("Name", "") or "").strip()
-                    print(f"[OK] Inactivated pack_variant_id={pid} {nm!r}")
-                except Exception as exc:  # noqa: BLE001
-                    cleanup_failed = True
-                    failed += 1
-                    partial_failures.append(f"base={base_name} cleanup_failed pack_id={pid}: {exc}")
-                    print(f"[FAIL] base={base_name!r} cleanup failed for pack_id={pid}: {exc}")
-                    break
-            if not cleanup_failed:
-                cleaned_up += 1 if (pack_ids_for_cleanup or duplicate_base_ids_for_cleanup) else 0
-                if action == "resolve_duplicate_base_items":
-                    duplicate_base_items_resolved += 1
-
-            if cleanup_failed:
-                print(f"[WARN] base={base_name!r} consolidation succeeded but cleanup failed (partial).")
+            consolidated += 1
+            cleaned_up += 1 if (pack_ids_for_cleanup or duplicate_base_ids_for_cleanup) else 0
+            if action == "resolve_duplicate_base_items":
+                duplicate_base_items_resolved += 1
+            continue
 
     finally:
         if not dry_run:
@@ -833,16 +760,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.apply and args.dry_run:
         raise SystemExit("Error: pass either --apply or --dry-run, not both.")
     if args.apply:
-        if args.max_products is None:
-            raise SystemExit("Error: --apply requires --max-products.")
-        if int(args.max_products) <= 0:
-            raise SystemExit("Error: --max-products must be > 0.")
-        adjust_account_id = str(getattr(cfg, "inventory_adjustment_account_id", "") or "").strip()
-        if not adjust_account_id:
-            raise SystemExit(
-                "Error: qbo.inventory_adjustment_account_id is not configured; "
-                "apply mode refuses to post without an adjust account."
-            )
+        raise SystemExit(
+            "Error: --apply has been removed for QBO inventory quantity changes. "
+            "Use --dry-run/plan output and manual QBO starting-value corrections."
+        )
 
     report_path = Path(args.from_report).expanduser() if args.from_report else None
     stock_path = Path(args.stock_csv).expanduser() if args.stock_csv else None

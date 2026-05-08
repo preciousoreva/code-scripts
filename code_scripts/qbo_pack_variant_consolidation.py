@@ -1,4 +1,4 @@
-"""QBO pack-variant consolidation planner (target-based) with audit / dry-run / apply.
+"""QBO pack-variant consolidation planner (target-based).
 
 Why this is different from ``qbo_pack_variant_migration``
 =========================================================
@@ -9,7 +9,7 @@ stock).  Production data showed this would severely overstate final QBO
 stock.
 
 This planner instead uses **EPOS as the inventory target of record**.  For
-each base product it proposes one logical InventoryAdjustment that:
+each base product it proposes manual QBO starting-value corrections that:
 
 * sets the exact-base item to the EPOS single-unit target, and
 * zeros every active pack-variant item under that base.
@@ -24,29 +24,13 @@ Concretely, for the TROPHY example::
 Default invocation is **audit-only** — no QBO writes, no payloads built,
 just the report CSV.
 
-``--dry-run`` builds the exact ``InventoryAdjustment`` payloads that
-``--apply`` would POST and prints them, but does **not** call QBO.
+``--dry-run`` prints the scoped manual correction lines after safety caps. It
+does **not** build or POST QuickBooks ``InventoryAdjustment`` transactions.
 
-``--apply`` POSTs one ``InventoryAdjustment`` per consolidation_plan_available
-row using ``code_scripts.qbo_inventory_adjustment.post_inventory_adjustment``,
-under strict safety guards:
-
-* ``--apply`` is mutually exclusive with ``--dry-run``;
-* ``--apply`` requires ``--max-products`` (> 0);
-* ``--apply`` requires either ``--product`` or ``--category`` to scope the
-  run (no whole-catalog applies);
-* ``--apply`` requires ``qbo.inventory_adjustment_account_id`` to be
-  configured for the company;
-* rows whose ``|base_qty_diff_to_target|`` exceeds ``--max-abs-base-diff``
-  (default 1000) are blocked;
-* rows whose ``planned_line_count`` exceeds ``--max-lines`` (default 10)
-  are blocked;
-* a ``GlobalRunLock`` is held for the duration of the apply;
-* the cached QBO snapshot is marked stale on any successful POST so that
-  the next inventory_sync / consolidation run refreshes from QBO;
-* pack-variant items are **not** inactivated by this command — that
-  remains the cleanup tool's responsibility once their QtyOnHand has
-  been driven to zero by a successful apply here.
+``--apply`` is intentionally disabled. Public QBO quantity adjustments post
+against an adjustment account and previously polluted P&L when routed through
+COGS/Inventory Shrinkage. Use this report to make QBO UI "Adjust starting
+value" corrections with Opening Balance Equity instead.
 
 Reuses without duplication:
 * :func:`code_scripts.inventory_sync.load_epos_stock_snapshot` for the
@@ -75,20 +59,11 @@ from code_scripts.company_config import (
     get_available_companies,
     load_company_config,
 )
-from code_scripts.inventory_safety import assert_inventory_apply_allowed
 from code_scripts.inventory_sync import (
     load_epos_stock_snapshot,
     load_qbo_inventory_item_rows,
 )
-from code_scripts.qbo_inventory_adjustment import (
-    build_inventory_adjustment_payload,
-    post_inventory_adjustment,
-)
 from code_scripts.qbo_pack_variant_cleanup import _resolve_qbo_csv
-from code_scripts.qbo_snapshot_cache import mark_qbo_snapshot_stale
-from code_scripts.qbo_upload import TokenManager
-from code_scripts.run_lock import GlobalRunLock
-from code_scripts.token_manager import verify_realm_match
 
 
 _REPORT_FIELDS = [
@@ -313,11 +288,7 @@ def build_doc_number(txn_date: str, base_item_id: str) -> str:
 
 
 def build_lines_from_plan_row(row: dict[str, Any]) -> list[dict[str, Any]]:
-    """Convert one consolidation_plan_available row into InventoryAdjustment lines.
-
-    Skips zero-diff entries (no point posting a no-op line).  Returns the
-    list ready for :func:`code_scripts.qbo_inventory_adjustment.build_inventory_adjustment_payload`.
-    """
+    """Convert one consolidation_plan_available row into manual correction lines."""
     lines: list[dict[str, Any]] = []
 
     base_id = str(row.get("base_qbo_item_id") or "").strip()
@@ -352,7 +323,7 @@ def _scope_description(args: argparse.Namespace) -> str:
 
 
 def build_private_note(row: dict[str, Any], scope_description: str = "") -> str:
-    """Compose the PrivateNote string for a consolidation InventoryAdjustment."""
+    """Compose a human-readable note for manual correction exports."""
     pack_ids = str(row.get("pack_variant_item_ids") or "").replace(_LIST_DELIMITER, ", ")
     parts = [
         "OIAT pack variant consolidation",
@@ -370,11 +341,10 @@ def build_private_note(row: dict[str, Any], scope_description: str = "") -> str:
 def is_duplicate_doc_number_error(exc: BaseException) -> bool:
     """Detect QBO's "Duplicate Document Number" rejection by error string.
 
-    QBO returns this as ``ValidationFault`` ``code=6240`` with message text
-    that contains the phrase ``Duplicate Document Number``. We compare on
-    the stringified exception so this works regardless of whether the
-    caller wrapped the original ``RuntimeError`` from
-    :func:`code_scripts.qbo_inventory_adjustment.post_inventory_adjustment`.
+    Historical apply runs saw QBO return this as ``ValidationFault``
+    ``code=6240`` with message text that contains the phrase
+    ``Duplicate Document Number``. The helper is kept for older tests and
+    remediation diagnostics; this script no longer posts inventory changes.
 
     Returns ``True`` for both the explicit code (``"6240"``) and the
     English phrase, so a future minor-version change in either field
@@ -427,10 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Target-based QBO pack-variant consolidation planner. Default mode "
             "is audit-only (writes a report CSV). Pass --dry-run to preview "
-            "InventoryAdjustment payloads without posting, or --apply (with "
-            "scoping + safety caps) to post them to QBO. Pack variants are "
-            "NOT inactivated by this command — that remains the cleanup tool's "
-            "responsibility once their QtyOnHand has been driven to zero here."
+            "manual QBO starting-value correction lines. --apply is disabled."
         ),
     )
     available = get_available_companies()
@@ -498,31 +465,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Build the exact InventoryAdjustment payloads that --apply would "
-             "POST and print them, but do NOT call QBO.",
+        help="Print manual QBO starting-value correction lines after safety caps; do not call QBO.",
     )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="POST one InventoryAdjustment per consolidation_plan_available row. "
-             "Mutually exclusive with --dry-run. Requires --max-products plus "
-             "either --product or --category to scope the run, and "
-             "qbo.inventory_adjustment_account_id configured for the company.",
+        help="Removed: QBO InventoryAdjustment posting is disabled.",
     )
     parser.add_argument(
         "--max-products",
         type=int,
         default=None,
         help="Hard cap on how many consolidation_plan_available rows to "
-             "post in --apply mode (and to preview in --dry-run).",
+             "preview in --dry-run.",
     )
     parser.add_argument(
         "--max-abs-base-diff",
         type=float,
         default=1000.0,
         help="Block any row whose |base_qty_diff_to_target| exceeds this "
-             "magnitude (default: 1000). Raise explicitly if you really mean "
-             "to post a larger single-item adjustment.",
+             "magnitude (default: 1000).",
     )
     parser.add_argument(
         "--max-lines",
@@ -534,7 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--txn-date",
         default=None,
-        help="TxnDate for the InventoryAdjustment (YYYY-MM-DD). Defaults to today.",
+        help="Date label for the manual correction plan (YYYY-MM-DD). Defaults to today.",
     )
     return parser
 
@@ -591,20 +553,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.apply and args.dry_run:
         print("Error: pass either --apply or --dry-run, not both.", file=sys.stderr)
         return 2
+    if args.apply:
+        print(
+            "Error: --apply has been removed for QBO inventory quantity changes. "
+            "Use --dry-run/plan output and manual QBO starting-value corrections.",
+            file=sys.stderr,
+        )
+        return 2
     if args.max_products is not None and args.max_products <= 0:
         print("Error: --max-products must be > 0.", file=sys.stderr)
         return 2
-    if args.apply:
-        if args.max_products is None:
-            print("Error: --apply requires --max-products.", file=sys.stderr)
-            return 2
-        if not args.product and not args.category:
-            print(
-                "Error: --apply requires --product or --category to scope the run; "
-                "whole-catalog applies are intentionally not allowed.",
-                file=sys.stderr,
-            )
-            return 2
 
     if not args.qbo_csv and not args.auto_fetch_qbo:
         print(
@@ -616,20 +574,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     config = load_company_config(args.company)
     ensure_company_runtime_compatible(config)
-
-    if args.apply:
-        assert_inventory_apply_allowed(config, action="pack_variant_consolidation_apply")
-        adjust_account_id = (config.inventory_adjustment_account_id or "").strip()
-        if not adjust_account_id:
-            print(
-                "Error: qbo.inventory_adjustment_account_id is not configured for "
-                f"company '{config.company_key}'. Apply mode refuses to post "
-                "without an adjust account.",
-                file=sys.stderr,
-            )
-            return 2
-    else:
-        adjust_account_id = (config.inventory_adjustment_account_id or "").strip()
 
     qbo_path = _resolve_qbo_csv(args, config)
     qbo_df = load_qbo_inventory_item_rows(str(qbo_path))
@@ -701,7 +645,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     txn_date = (args.txn_date or datetime.now().strftime("%Y-%m-%d")).strip()
     scope_desc = _scope_description(args)
-    mode_label = "APPLY" if args.apply else "DRY-RUN"
+    mode_label = "DRY-RUN"
 
     print()
     print(f"Mode: {mode_label}")
@@ -714,98 +658,41 @@ def main(argv: Optional[list[str]] = None) -> int:
         for row, reason in blocked:
             print(f"  [BLOCKED] base={row['base_name']!r}: {reason}")
     if args.max_products is not None:
-        print(f"After --max-products cap: will {'post' if args.apply else 'preview'} {len(capped)} (skipped={len(skipped_due_to_cap)})")
+        print(f"After --max-products cap: will preview {len(capped)} (skipped={len(skipped_due_to_cap)})")
     else:
-        print(f"Will {'post' if args.apply else 'preview'}: {len(capped)}")
+        print(f"Will preview: {len(capped)}")
 
-    # Build payloads (and either print them, or post them).
+    # Print manual correction lines only. This script no longer posts QBO quantity changes.
     attempted = succeeded = failed = no_op = 0
-    failures: list[tuple[str, str]] = []
-    token_mgr: Optional[TokenManager] = None
-    run_lock: Optional[GlobalRunLock] = None
-
-    if args.apply:
-        verify_realm_match(config.company_key, config.realm_id)
-        token_mgr = TokenManager(config.company_key, config.realm_id)
-        run_lock = GlobalRunLock(holder=f"qbo_pack_variant_consolidation:{config.company_key}")
-        lock_result = run_lock.acquire()
-        if not lock_result.acquired:
-            print(
-                f"Error: another pipeline run is active ({lock_result.reason}); "
-                "refusing to --apply consolidation.",
-                file=sys.stderr,
+    for row in capped:
+        attempted += 1
+        lines = build_lines_from_plan_row(row)
+        if not lines:
+            no_op += 1
+            print(f"[SKIP] base={row['base_name']!r} has no non-zero diffs; nothing to correct.")
+            continue
+        doc_number = build_doc_number(
+            txn_date=txn_date,
+            base_item_id=str(row.get("base_qbo_item_id", "")),
+        )
+        print(
+            f"[{mode_label}-PLAN] base={row['base_name']!r} "
+            f"item_id={row['base_qbo_item_id']} target={row['epos_single_units_target']} "
+            f"base_diff={row['base_qty_diff_to_target']} packs={row['pack_variant_item_ids']}"
+        )
+        print(
+            "              manual_starting_value_corrections="
+            + json.dumps(
+                {
+                    "doc_number": doc_number,
+                    "txn_date": txn_date,
+                    "note": build_private_note(row, scope_description=scope_desc),
+                    "lines": lines,
+                },
+                separators=(",", ":"),
             )
-            return 2
-
-    try:
-        for row in capped:
-            attempted += 1
-            lines = build_lines_from_plan_row(row)
-            if not lines:
-                no_op += 1
-                print(f"[SKIP] base={row['base_name']!r} has no non-zero diffs; nothing to post.")
-                continue
-            doc_number = build_doc_number(
-                txn_date=txn_date,
-                base_item_id=str(row.get("base_qbo_item_id", "")),
-            )
-            payload = build_inventory_adjustment_payload(
-                adjust_account_id=adjust_account_id or "",
-                txn_date=txn_date,
-                private_note=build_private_note(row, scope_description=scope_desc),
-                lines=lines,
-                doc_number=doc_number,
-            )
-            print(
-                f"[{mode_label}-PLAN] base={row['base_name']!r} "
-                f"item_id={row['base_qbo_item_id']} target={row['epos_single_units_target']} "
-                f"base_diff={row['base_qty_diff_to_target']} packs={row['pack_variant_item_ids']}"
-            )
-            print("              payload=" + json.dumps(payload, separators=(",", ":")))
-            if args.dry_run:
-                continue
-
-            # Apply path
-            try:
-                resp = post_inventory_adjustment(token_mgr, config.realm_id, payload)
-                inv_adj = (resp or {}).get("InventoryAdjustment", {})
-                doc = inv_adj.get("DocNumber") or inv_adj.get("Id")
-                print(f"[OK] Posted InventoryAdjustment doc/id={doc} for base={row['base_name']!r}")
-                succeeded += 1
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                failures.append((str(row.get("base_qbo_item_id", "")), str(exc)))
-                if is_duplicate_doc_number_error(exc):
-                    # Friendly hint when QBO rejects on DocNumber collision.
-                    # Our DocNumbers are deterministic per (date, base item),
-                    # so a duplicate here usually means we already posted this
-                    # exact consolidation today.  We do NOT silently treat
-                    # the duplicate as success — the operator should verify
-                    # the resulting QBO state before retrying.
-                    print(
-                        f"[DUPLICATE] base={row['base_name']!r} "
-                        f"item_id={row['base_qbo_item_id']} "
-                        f"DocNumber={doc_number}: QBO rejected as a duplicate. "
-                        f"This consolidation may have already been applied for "
-                        f"this base item on {txn_date}. Verify base / pack "
-                        f"QtyOnHand in QBO before re-running with --txn-date "
-                        f"set to a different date.",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(
-                        f"[FAIL] base={row['base_name']!r} item_id={row['base_qbo_item_id']}: {exc}",
-                        file=sys.stderr,
-                    )
-    finally:
-        if args.apply:
-            if succeeded > 0:
-                mark_qbo_snapshot_stale(
-                    config.company_key, reason="pack_variant_consolidation_applied"
-                )
-                print("[INFO] Marked cached QBO snapshot stale after consolidation apply.")
-            if run_lock is not None:
-                run_lock.release()
+        )
+        succeeded += 1
 
     print("-" * 78)
     print(
@@ -813,43 +700,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"failed={failed} no_op={no_op} blocked={len(blocked)} "
         f"skipped_due_to_cap={len(skipped_due_to_cap)}"
     )
-    if failures:
-        for item_id, err in failures:
-            print(f"  fail: id={item_id} -> {err}", file=sys.stderr)
-
-    # Optional, non-blocking Slack notify — only on real apply runs (the
-    # dry-run already prints the planned payloads to stdout).
-    if args.apply:
-        webhook = getattr(config, "slack_webhook_url", None)
-        if webhook:
-            try:
-                from code_scripts.inventory_notifications import (
-                    format_pack_variant_apply_summary,
-                )
-                from code_scripts.slack_notify import send_slack_success
-
-                send_slack_success(
-                    format_pack_variant_apply_summary(
-                        kind="pack_variant_consolidation",
-                        company_display_name=config.display_name,
-                        company_key=config.company_key,
-                        mode="apply",
-                        scope=scope_desc,
-                        counts={
-                            "attempted": attempted,
-                            "succeeded": succeeded,
-                            "failed": failed,
-                            "no_op": no_op,
-                            "blocked": len(blocked),
-                            "skipped_due_to_cap": len(skipped_due_to_cap),
-                        },
-                        report_path=str(report_path),
-                    ),
-                    webhook,
-                )
-            except Exception as notify_exc:  # noqa: BLE001 — never fail the run
-                print(f"[WARN] Slack notify failed (ignored): {notify_exc}", file=sys.stderr)
-
     return 0 if failed == 0 else 1
 
 

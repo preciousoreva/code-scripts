@@ -10,10 +10,10 @@ Current scope:
 - Compare to QBO QtyOnHand for Inventory items (TrackQtyOnHand = true).
 - Write a CSV report and print a small summary.
 
-Optional write-back:
-- Create a QBO ``InventoryAdjustment`` (quantity difference per item) for rows that
-  are safe to apply. Ambiguous QBO mappings (multiple inventory SKUs for the same
-  base name) are skipped unless explicitly allowed.
+Preview workflow:
+- ``--dry-run`` prints manual QBO starting-value correction rows for scoped,
+  exact-match products. ``--apply`` is intentionally disabled; the public QBO
+  InventoryAdjustment API must not be used for this forward inventory sync.
 """
 
 from __future__ import annotations
@@ -38,19 +38,15 @@ from code_scripts.company_config import (
     load_company_config,
 )
 from code_scripts.paths import OPS_ROOT, REPO_ROOT
-from code_scripts.qbo_inventory_adjustment import build_inventory_adjustment_payload, post_inventory_adjustment
 from code_scripts.qbo_snapshot_cache import (
     clear_qbo_snapshot_stale_marker,
     get_qbo_snapshot_path,
     get_qbo_snapshot_stale_reason,
-    mark_qbo_snapshot_stale,
 )
 from code_scripts.inventory_notifications import (
     format_inventory_audit_summary,
     format_scope,
 )
-from code_scripts.inventory_safety import assert_inventory_apply_allowed
-from code_scripts.run_lock import GlobalRunLock
 from code_scripts.slack_notify import send_slack_success
 from code_scripts.qbo_upload import TokenManager, _make_qbo_request, get_repo_root
 from code_scripts.token_manager import verify_realm_match
@@ -404,12 +400,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--apply",
         action="store_true",
-        help="Post InventoryAdjustment transactions to QBO for applicable rows (requires tokens + account id).",
+        help="Removed: QBO quantity-apply posting is disabled; use preview/manual starting-value correction workflow.",
     )
     p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print InventoryAdjustment JSON payloads for applicable rows but do not POST (no tokens required).",
+        help="Preview rows that would need manual QBO starting-value correction; do not POST to QBO.",
     )
     p.add_argument(
         "--notify-slack",
@@ -423,40 +419,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--txn-date",
         dest="txn_date",
         default=None,
-        help="TxnDate for InventoryAdjustment (YYYY-MM-DD). Defaults to today (local date).",
+        help="Date label for manual correction preview rows (YYYY-MM-DD). Defaults to today.",
     )
     p.add_argument(
         "--adjust-account-id",
         dest="adjust_account_id",
         default=None,
         help=(
-            "QBO Account Id for AdjustAccountRef (inventory adjustment account). "
-            "If omitted, uses qbo.inventory_adjustment_account_id or "
-            "{COMPANY}_INVENTORY_ADJUSTMENT_ACCOUNT_ID."
+            "Deprecated compatibility option. QBO quantity adjustment posting is disabled; "
+            "manual corrections should use the configured Opening Balance Equity account in QBO UI."
         ),
     )
     p.add_argument(
         "--allow-ambiguous",
         action="store_true",
         help=(
-            "Allow applying adjustments when multiple QBO inventory rows map to the same base name. "
-            "This picks a canonical row (exact base-name match preferred)."
+            "Include ambiguous QBO mappings in the preview. Exact base-name matches are still preferred."
         ),
     )
     p.add_argument(
         "--allow-fallback-picks",
         action="store_true",
         help=(
-            "In --apply mode, allow posting adjustments when the selected QBO item was chosen by a "
-            "non-exact pick method (e.g. fallback_largest_qty). This is for CLI power-users only; "
-            "the dashboard should remain exact-match-only."
+            "In preview mode, include rows where the selected QBO item was chosen by a non-exact "
+            "fallback method (e.g. fallback_largest_qty)."
         ),
     )
     p.add_argument(
         "--max-adjustments",
         type=int,
         default=25,
-        help="Safety cap on number of InventoryAdjustment POSTs in one run (default: 25).",
+        help="Safety cap on number of manual correction preview rows (default: 25).",
     )
     p.add_argument(
         "--max-qty-delta",
@@ -1377,7 +1370,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Wrote report: {out_path}")
     print("=" * 68)
 
-    if not args.apply and not args.dry_run:
+    if args.apply:
+        print(
+            "Error: inventory quantity apply has been removed. "
+            "Use audit/preview output to perform QBO UI Adjust starting value corrections."
+        )
+        _emit_metadata({"mode": "apply_removed", "posted": 0, "skipped": 0})
+        return 2
+
+    if not args.dry_run:
         _emit_metadata({"mode": "audit_only", "posted": 0, "skipped": 0})
         webhook = config.slack_webhook_url if _should_notify_audit_only(args) else None
         if webhook:
@@ -1407,28 +1408,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"[WARN] Slack notify failed (ignored): {notify_exc}")
         return 0
 
-    adjust_account_id = (args.adjust_account_id or "").strip() or (config.inventory_adjustment_account_id or "")
-    if not adjust_account_id:
-        print(
-            "Error: missing inventory adjustment account id. "
-            "Set --adjust-account-id, or qbo.inventory_adjustment_account_id, "
-            "or {COMPANY}_INVENTORY_ADJUSTMENT_ACCOUNT_ID."
-        )
-        return 2
-
     txn_date = (args.txn_date or "").strip()
     if not txn_date:
         txn_date = datetime.now().strftime("%Y-%m-%d")
-
-    if args.apply:
-        assert_inventory_apply_allowed(config, action="inventory_sync_quantity_adjustment_apply")
-        try:
-            verify_realm_match(config.company_key, config.realm_id)
-        except RuntimeError as exc:
-            print(f"Error: Realm ID safety check failed: {exc}")
-            return 2
-
-    token_mgr: Optional[TokenManager] = TokenManager(config.company_key, config.realm_id) if args.apply else None
 
     qbo_rows = load_qbo_inventory_item_rows(str(qbo_path))
 
@@ -1442,23 +1424,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if candidates.empty:
         print("[INFO] No applicable rows to adjust (needs_adjustment/ambiguous with --allow-ambiguous).")
         _emit_metadata({
-            "mode": "dry_run" if args.dry_run else ("apply" if args.apply else "audit_only"),
-            "posted": 0,
-            "skipped": 0,
-            "reason": "no_candidates",
-        })
+                "mode": "manual_starting_value_preview",
+                "posted": 0,
+                "planned": 0,
+                "skipped": 0,
+                "reason": "no_candidates",
+            })
         return 0
-
-    run_lock: Optional[GlobalRunLock] = None
-    if args.apply:
-        run_lock = GlobalRunLock(holder=f"inventory_sync:{config.company_key}")
-        lock_result = run_lock.acquire()
-        if not lock_result.acquired:
-            print(
-                f"Error: another pipeline run is active ({lock_result.reason}); "
-                "refusing to --apply inventory adjustments."
-            )
-            return 2
 
     max_qty_delta: Optional[float] = args.max_qty_delta
     if max_qty_delta is None:
@@ -1468,184 +1440,79 @@ def main(argv: Optional[list[str]] = None) -> int:
     if max_qty_delta is not None:
         print(f"[INFO] Per-item qty-delta cap active: |QtyDiff| <= {max_qty_delta}")
 
-    posted = 0
+    planned = 0
     skipped = 0
     skipped_non_exact_pick = 0
-    apply_error: Optional[str] = None
     manual_review_examples: list[str] = []
-    try:
-        for _, row in candidates.iterrows():
-            if posted >= int(args.max_adjustments):
-                print(f"[WARN] Hit --max-adjustments={args.max_adjustments}; stopping.")
-                break
+    for _, row in candidates.iterrows():
+        if planned >= int(args.max_adjustments):
+            print(f"[WARN] Hit --max-adjustments={args.max_adjustments}; stopping.")
+            break
 
-            base = str(row["base_name"])
-            epos_target = float(row["epos_single_units"])
-            base_norm = _normalize_name_key(base)
-            if "base_name_norm" in qbo_rows.columns:
-                group = qbo_rows[qbo_rows["base_name_norm"] == base_norm]
-            else:
-                group = qbo_rows[qbo_rows["base_name"].map(_normalize_name_key) == base_norm]
+        base = str(row["base_name"])
+        epos_target = float(row["epos_single_units"])
+        base_norm = _normalize_name_key(base)
+        if "base_name_norm" in qbo_rows.columns:
+            group = qbo_rows[qbo_rows["base_name_norm"] == base_norm]
+        else:
+            group = qbo_rows[qbo_rows["base_name"].map(_normalize_name_key) == base_norm]
 
-            chosen, reason = choose_canonical_qbo_item_row(group, base_name=base)
-            if chosen is None or not str(chosen.get("Id", "")).strip():
-                print(f"[SKIP] {base!r}: could not pick QBO item ({reason})")
-                skipped += 1
-                continue
+        chosen, reason = choose_canonical_qbo_item_row(group, base_name=base)
+        if chosen is None or not str(chosen.get("Id", "")).strip():
+            print(f"[SKIP] {base!r}: could not pick QBO item ({reason})")
+            skipped += 1
+            continue
 
-            item_id = str(chosen["Id"]).strip()
-            current_qty = float(chosen.get("qbo_qty_on_hand", 0.0) or 0.0)
-            qty_diff = float(epos_target) - current_qty
+        item_id = str(chosen["Id"]).strip()
+        current_qty = float(chosen.get("qbo_qty_on_hand", 0.0) or 0.0)
+        qty_diff = float(epos_target) - current_qty
 
-            if abs(qty_diff) <= float(args.tolerance):
-                continue
+        if abs(qty_diff) <= float(args.tolerance):
+            continue
 
-            if max_qty_delta is not None and abs(qty_diff) > max_qty_delta:
-                print(
-                    f"[SKIP] {base!r}: |qty_diff|={abs(qty_diff)} exceeds cap={max_qty_delta} "
-                    f"(epos_single_units={epos_target}, qbo_item_qty={current_qty}); "
-                    "review manually."
-                )
-                skipped += 1
-                continue
-
-            if args.apply and not args.dry_run:
-                if reason != "exact_name_match":
-                    if args.allow_fallback_picks and reason == "fallback_largest_qty":
-                        pass
-                    else:
-                        print(
-                            f"[SKIP] base={base!r} item_id={item_id} pick={reason} "
-                            "reason=non_exact_pick_not_allowed"
-                        )
-                        skipped += 1
-                        skipped_non_exact_pick += 1
-                        if len(manual_review_examples) < 10:
-                            chosen_name = str(chosen.get("Name", "") or "").strip()
-                            if reason == "fallback_largest_qty" and str(chosen.get("qbo_has_pack", False)):
-                                manual_review_examples.append(
-                                    f"{base} — only pack variant exists in QuickBooks: {chosen_name}"
-                                )
-                            else:
-                                manual_review_examples.append(
-                                    f"{base} — no exact QuickBooks item match found"
-                                )
-                        continue
-
-            memo = (
-                f"OIAT inventory sync | base={base!r} | pick={reason} | "
-                f"epos_single_units={epos_target} | qbo_item_qty={current_qty} | delta={qty_diff}"
+        if max_qty_delta is not None and abs(qty_diff) > max_qty_delta:
+            print(
+                f"[SKIP] {base!r}: |qty_diff|={abs(qty_diff)} exceeds cap={max_qty_delta} "
+                f"(epos_single_units={epos_target}, qbo_item_qty={current_qty}); "
+                "review manually."
             )
-            doc_number = build_inventory_adjustment_doc_number(txn_date=str(txn_date), item_id=item_id)
-            payload = build_inventory_adjustment_payload(
-                adjust_account_id=str(adjust_account_id),
-                txn_date=str(txn_date),
-                doc_number=doc_number,
-                private_note=memo[:950],
-                lines=[{"item_id": item_id, "qty_diff": qty_diff}],
+            skipped += 1
+            continue
+
+        if reason != "exact_name_match" and not (
+            args.allow_fallback_picks and reason == "fallback_largest_qty"
+        ):
+            print(
+                f"[SKIP] base={base!r} item_id={item_id} pick={reason} "
+                "reason=non_exact_pick_not_allowed"
             )
-
-            print("-" * 68)
-            print(f"{'DRY-RUN ' if args.dry_run else ''}InventoryAdjustment → item_id={item_id} base={base!r} QtyDiff={qty_diff}")
-
-            if args.dry_run:
-                print(json.dumps(payload, indent=2, sort_keys=True))
-                posted += 1
-                continue
-
-            assert token_mgr is not None
-            try:
-                resp = post_inventory_adjustment(token_mgr, config.realm_id, payload)
-            except Exception as exc:
-                apply_error = f"{base!r} (item_id={item_id}): {exc}"
-                print(f"[FAIL] Posting InventoryAdjustment failed for {apply_error}")
-                raise
-            inv_adj = (resp or {}).get("InventoryAdjustment") or {}
-            doc = inv_adj.get("DocNumber") or inv_adj.get("Id")
-            print(f"[OK] Posted InventoryAdjustment doc/id={doc}")
-            posted += 1
-    except Exception as exc:
-        if args.apply:
-            if not apply_error:
-                apply_error = str(exc)
-            webhook = config.slack_webhook_url
-            if webhook:
-                try:
-                    send_slack_success(
-                        format_inventory_audit_summary(
-                            company_display_name=config.display_name,
-                            company_key=config.company_key,
-                            mode="apply",
-                            scope=format_scope(category=list(args.categories or []), product=args.product_filter),
-                            counts={
-                                "total_groups": total_groups,
-                                "in_sync": in_sync,
-                                "needs_adjustment": needs_adjustment,
-                                "ambiguous_in_qbo": ambiguous_in_qbo,
-                                "missing_in_qbo": missing_in_qbo,
-                            "posted": posted,
-                            "skipped": skipped,
-                            "epos_negative_rows_clamped": epos_negative_rows_clamped,
-                        },
-                            report_path=str(out_path),
-                            error=apply_error,
-                            warnings_count=(ambiguous_in_qbo + missing_in_qbo + skipped_non_exact_pick),
-                            manual_review_examples=manual_review_examples or _manual_review_examples_for_audit(),
-                        ),
-                        webhook,
+            skipped += 1
+            skipped_non_exact_pick += 1
+            if len(manual_review_examples) < 10:
+                chosen_name = str(chosen.get("Name", "") or "").strip()
+                if reason == "fallback_largest_qty" and str(chosen.get("qbo_has_pack", False)):
+                    manual_review_examples.append(
+                        f"{base} - only pack variant exists in QuickBooks: {chosen_name}"
                     )
-                except Exception as notify_exc:  # noqa: BLE001 — never fail the run on notify
-                    print(f"[WARN] Slack notify failed (ignored): {notify_exc}")
-        _emit_metadata({
-            "mode": "dry_run" if args.dry_run else ("apply" if args.apply else "audit_only"),
-            "posted": posted,
-            "skipped": skipped,
-            "error": apply_error or str(exc),
-        })
-        raise
-    finally:
-        if run_lock is not None:
-            run_lock.release()
+                else:
+                    manual_review_examples.append(f"{base} - no exact QuickBooks item match found")
+            continue
+
+        print("-" * 68)
+        print(
+            "Manual starting-value correction preview "
+            f"item_id={item_id} base={base!r} qbo_qty={current_qty} "
+            f"epos_qty={epos_target} delta={qty_diff} date={txn_date}"
+        )
+        planned += 1
 
     print("=" * 68)
-    print(f"Adjustments {'planned' if args.dry_run else 'posted'}: {posted} | skipped: {skipped}")
-
-    if args.apply and not args.dry_run:
-        if posted > 0:
-            mark_qbo_snapshot_stale(config.company_key, reason="inventory_adjustments_posted")
-            print("[INFO] Marked cached QBO snapshot stale after posting adjustments.")
-        webhook = config.slack_webhook_url
-        if webhook:
-            try:
-                send_slack_success(
-                    format_inventory_audit_summary(
-                        company_display_name=config.display_name,
-                        company_key=config.company_key,
-                        mode="apply",
-                        scope=format_scope(category=list(args.categories or []), product=args.product_filter),
-                        counts={
-                            "total_groups": total_groups,
-                            "in_sync": in_sync,
-                            "needs_adjustment": needs_adjustment,
-                            "ambiguous_in_qbo": ambiguous_in_qbo,
-                            "missing_in_qbo": missing_in_qbo,
-                            "posted": posted,
-                            "skipped": skipped,
-                            "epos_negative_rows_clamped": epos_negative_rows_clamped,
-                            "txn_date": txn_date,
-                        },
-                        report_path=str(out_path),
-                        warnings_count=(ambiguous_in_qbo + missing_in_qbo + skipped_non_exact_pick),
-                        manual_review_examples=manual_review_examples or _manual_review_examples_for_audit(),
-                    ),
-                    webhook,
-                )
-            except Exception as notify_exc:  # noqa: BLE001 — never fail the run on notify
-                print(f"[WARN] Slack notify failed (ignored): {notify_exc}")
+    print(f"Manual starting-value corrections planned: {planned} | skipped: {skipped}")
 
     _emit_metadata({
-        "mode": "dry_run" if args.dry_run else "apply",
-        "posted": posted,
+        "mode": "manual_starting_value_preview",
+        "posted": 0,
+        "planned": planned,
         "skipped": skipped,
         "txn_date": txn_date,
     })

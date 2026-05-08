@@ -6,7 +6,7 @@ from unittest import mock
 
 import pandas as pd
 
-from code_scripts import inventory_sync, qbo_inventory_adjustment, qbo_snapshot_cache
+from code_scripts import inventory_sync, qbo_snapshot_cache
 from code_scripts.inventory_sync import choose_canonical_qbo_item_row
 from code_scripts.qbo_inventory_adjustment import build_inventory_adjustment_payload
 
@@ -269,40 +269,6 @@ class InventorySyncRuntimeGuardTest(unittest.TestCase):
             ])
         self.assertEqual(exit_code, 2)
         self.assertIn("QBO environment mismatch", buf.getvalue())
-
-
-class InventoryAdjustmentUrlRoutingTest(unittest.TestCase):
-    """post_inventory_adjustment must resolve the QBO host at call time so
-    OIAT_RUNTIME_ENV=sandbox reliably routes writes to the sandbox API."""
-
-    def _capture_url(self, env_value):
-        captured = {}
-
-        def fake_request(method, url, token_mgr, json=None):
-            captured["url"] = url
-            resp = mock.Mock()
-            resp.status_code = 200
-            resp.json.return_value = {"InventoryAdjustment": {"Id": "1"}}
-            return resp
-
-        env = {**os.environ, "OIAT_RUNTIME_ENV": env_value}
-        with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch.object(qbo_inventory_adjustment, "_make_qbo_request", fake_request):
-            qbo_inventory_adjustment.post_inventory_adjustment(
-                token_mgr=mock.Mock(),
-                realm_id="REALM123",
-                payload={},
-            )
-        return captured["url"]
-
-    def test_sandbox_env_routes_to_sandbox_host(self):
-        url = self._capture_url("sandbox")
-        self.assertTrue(url.startswith("https://sandbox-quickbooks.api.intuit.com/"))
-        self.assertIn("/v3/company/REALM123/inventoryadjustment", url)
-
-    def test_production_env_routes_to_prod_host(self):
-        url = self._capture_url("production")
-        self.assertTrue(url.startswith("https://quickbooks.api.intuit.com/"))
 
 
 class InventoryMaxQtyDeltaConfigTest(unittest.TestCase):
@@ -1074,7 +1040,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertTrue(recorded.get("force_refresh"))
         self.assertEqual(recorded.get("cache_max_age_hours"), 24)
 
-    def test_apply_marks_qbo_snapshot_stale(self):
+    def test_apply_is_removed_and_does_not_mark_qbo_snapshot_stale(self):
         import tempfile
         from pathlib import Path
 
@@ -1093,18 +1059,11 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
             )
 
             env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
+            buf = io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True), \
                  mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
                  mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
-                 mock.patch.object(inventory_sync, "verify_realm_match"), \
-                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
-                 mock.patch.object(
-                     inventory_sync,
-                     "post_inventory_adjustment",
-                     return_value={"InventoryAdjustment": {"Id": "99"}},
-                 ), \
-                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale") as mock_mark, \
-                 redirect_stdout(io.StringIO()):
+                 redirect_stdout(buf):
                 exit_code = inventory_sync.main([
                     "--company", "company_a",
                     "--stock-csv", str(stock_csv),
@@ -1113,10 +1072,10 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                     "--max-adjustments", "1",
                 ])
 
-        self.assertEqual(exit_code, 0)
-        mock_mark.assert_called_once_with("company_a", reason="inventory_adjustments_posted")
+        self.assertEqual(exit_code, 2)
+        self.assertIn("inventory quantity apply has been removed", buf.getvalue())
 
-    def test_dry_run_and_apply_payload_include_doc_number(self):
+    def test_dry_run_prints_manual_starting_value_preview(self):
         import tempfile
         from pathlib import Path
 
@@ -1140,7 +1099,6 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
 
             env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
 
-            # Dry-run: verify printed payload includes DocNumber.
             buf = io.StringIO()
             with mock.patch.dict(os.environ, env, clear=True), \
                  mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
@@ -1156,147 +1114,10 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                     "--max-adjustments", "1",
                 ])
             self.assertEqual(exit_code, 0)
-            self.assertIn('"DocNumber": "INVADJ-20260428-9124"', buf.getvalue())
-
-            # Apply: verify payload passed to post_inventory_adjustment includes DocNumber.
-            captured: dict = {}
-
-            def fake_post(_token_mgr, _realm_id, payload):
-                captured["payload"] = payload
-                return {"InventoryAdjustment": {"Id": "99"}}
-
-            with mock.patch.dict(os.environ, env, clear=True), \
-                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
-                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
-                 mock.patch.object(inventory_sync, "verify_realm_match"), \
-                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
-                 mock.patch.object(inventory_sync, "post_inventory_adjustment", side_effect=fake_post), \
-                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale"), \
-                 redirect_stdout(io.StringIO()):
-                exit_code = inventory_sync.main([
-                    "--company", "company_a",
-                    "--stock-csv", str(stock_csv),
-                    "--qbo-csv", str(qbo_csv),
-                    "--apply",
-                    "--txn-date", "2026-04-28",
-                    "--max-adjustments", "1",
-                ])
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(
-                captured["payload"].get("DocNumber"),
-                "INVADJ-20260428-9124",
-            )
-
-    def test_apply_posts_only_exact_name_match_by_default_and_skips_fallback(self):
-        import tempfile
-        from pathlib import Path
-
-        fake_config = self._build_fake_config()
-        fake_config.inventory_adjustment_account_id = "88"
-
-        with tempfile.TemporaryDirectory() as td:
-            tdp = Path(td)
-            stock_csv = tdp / "stock.csv"
-            # Both need adjustment (EPOS=8, QBO=1) so they enter the apply loop.
-            stock_csv.write_text(
-                "Name,CategoryName,MeasuredCurrentStock\n"
-                "WIDGET,ALCOHOLS,8\n"
-                "GADGET,ALCOHOLS,8\n",
-                encoding="utf-8",
-            )
-            qbo_csv = tdp / "qbo.csv"
-            # WIDGET has an exact base-name row -> exact_name_match.
-            # GADGET only has a pack variant -> fallback_largest_qty (no exact name match; no non-pack row).
-            qbo_csv.write_text(
-                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
-                "10,WIDGET,Inventory,true,1\n"
-                "99,GADGET*12,Inventory,true,1\n",
-                encoding="utf-8",
-            )
-
-            env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
-            calls: list[dict] = []
-
-            def fake_post(_token_mgr, _realm_id, payload):
-                calls.append(payload)
-                return {"InventoryAdjustment": {"Id": "99"}}
-
-            buf = io.StringIO()
-            with mock.patch.dict(os.environ, env, clear=True), \
-                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
-                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
-                 mock.patch.object(inventory_sync, "verify_realm_match"), \
-                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
-                 mock.patch.object(inventory_sync, "post_inventory_adjustment", side_effect=fake_post), \
-                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale"), \
-                 redirect_stdout(buf):
-                exit_code = inventory_sync.main([
-                    "--company", "company_a",
-                    "--stock-csv", str(stock_csv),
-                    "--qbo-csv", str(qbo_csv),
-                    "--apply",
-                    "--txn-date", "2026-04-28",
-                    "--max-adjustments", "10",
-                ])
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0]["Line"][0]["ItemAdjustmentLineDetail"]["ItemRef"]["value"], "10")
-            self.assertIn("pick=fallback_largest_qty", buf.getvalue())
-            self.assertIn("reason=non_exact_pick_not_allowed", buf.getvalue())
-            self.assertIn("skipped: 1", buf.getvalue())
-
-    def test_allow_fallback_picks_flag_allows_fallback_row_to_post(self):
-        import tempfile
-        from pathlib import Path
-
-        fake_config = self._build_fake_config()
-        fake_config.inventory_adjustment_account_id = "88"
-
-        with tempfile.TemporaryDirectory() as td:
-            tdp = Path(td)
-            stock_csv = tdp / "stock.csv"
-            stock_csv.write_text(
-                "Name,CategoryName,MeasuredCurrentStock\n"
-                "WIDGET,ALCOHOLS,8\n"
-                "GADGET,ALCOHOLS,8\n",
-                encoding="utf-8",
-            )
-            qbo_csv = tdp / "qbo.csv"
-            qbo_csv.write_text(
-                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
-                "10,WIDGET,Inventory,true,1\n"
-                "99,GADGET*12,Inventory,true,1\n",
-                encoding="utf-8",
-            )
-
-            env = {**os.environ, "OIAT_RUNTIME_ENV": "production"}
-            calls: list[dict] = []
-
-            def fake_post(_token_mgr, _realm_id, payload):
-                calls.append(payload)
-                return {"InventoryAdjustment": {"Id": "99"}}
-
-            with mock.patch.dict(os.environ, env, clear=True), \
-                 mock.patch.object(inventory_sync, "load_company_config", return_value=fake_config), \
-                 mock.patch.object(inventory_sync, "get_available_companies", return_value=["company_a"]), \
-                 mock.patch.object(inventory_sync, "verify_realm_match"), \
-                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
-                 mock.patch.object(inventory_sync, "post_inventory_adjustment", side_effect=fake_post), \
-                 mock.patch.object(inventory_sync, "mark_qbo_snapshot_stale"), \
-                 redirect_stdout(io.StringIO()):
-                exit_code = inventory_sync.main([
-                    "--company", "company_a",
-                    "--stock-csv", str(stock_csv),
-                    "--qbo-csv", str(qbo_csv),
-                    "--apply",
-                    "--allow-fallback-picks",
-                    "--txn-date", "2026-04-28",
-                    "--max-adjustments", "10",
-                ])
-
-            self.assertEqual(exit_code, 0)
-            self.assertEqual(len(calls), 2)
+            output = buf.getvalue()
+            self.assertIn("Manual starting-value correction preview", output)
+            self.assertIn("item_id=9124", output)
+            self.assertIn("delta=7.0", output)
 
     def test_dry_run_previews_fallback_rows(self):
         import tempfile

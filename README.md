@@ -15,8 +15,8 @@ A unified automation platform for syncing **Sales** and **Inventory** between EP
   - EPOS Stock Report download
   - QBO Inventory Item snapshot (includes diagnostic fields where QBO supports them)
   - Audit EPOS expected stock vs QBO `QtyOnHand`
-  - Supported catalog cleanup (pack variants / duplicate base items / missing base items where supported)
-  - Exact-match QBO `InventoryAdjustment` quantity sync
+  - Catalog and quantity review reports for pack variants, duplicate base items, and missing base items
+  - Manual QBO starting-value correction previews; automated QBO quantity apply is disabled
   - Final audit + pipeline JSON/CSV summary (always includes `child_reports.final_audit`)
   - Dashboard artifact ingestion + compact Slack summary
   - Negative EPOS stock policy: **clamp negative row quantities to 0 before grouping**

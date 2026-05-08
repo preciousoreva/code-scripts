@@ -448,7 +448,8 @@ class InventoryTriggerViewTests(TestCase):
         self.assertIn("Preview only", html)
         self.assertIn("preview_quantity_adjustments", html)
         self.assertIn("QBO write attempted", html)
-        self.assertIn("Quantity apply enabled", html)
+        self.assertIn("Missing item create enabled", html)
+        self.assertNotIn("Quantity apply enabled", html)
 
     def test_report_download_rejects_existing_file_outside_trusted_roots(self):
         self.client.login(username="op", password="pw")

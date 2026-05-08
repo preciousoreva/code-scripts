@@ -238,19 +238,18 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
         self.assertIn("Resolve Review Items", html)
-        self.assertIn("Review scoped cleanup apply", html)
-        self.assertIn("Review scoped quantity apply", html)
+        self.assertIn("Manual review required", html)
+        self.assertIn("Use starting-value correction", html)
         self.assertIn("Preview items", html)
-        self.assertIn("Retry actions are scoped to reviewed rows and capped.", html)
-        self.assertIn("Production inventory apply is blocked by default.", html)
-        self.assertIn(
+        self.assertIn("Inventory quantity apply is removed.", html)
+        self.assertNotIn(
             reverse(
                 "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
                 kwargs={"company_key": "company_a"},
             ),
             html,
         )
-        self.assertIn(
+        self.assertNotIn(
             reverse(
                 "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
                 kwargs={"company_key": "company_a"},
@@ -258,7 +257,7 @@ class InventoryReviewActionViewTests(TestCase):
             html,
         )
 
-    def test_catalog_cleanup_confirm_page_renders_preview_and_confirm_post(self):
+    def test_catalog_cleanup_confirm_redirects_without_queueing(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
@@ -271,25 +270,16 @@ class InventoryReviewActionViewTests(TestCase):
                 )
             )
 
-        self.assertEqual(response.status_code, 200)
-        html = response.content.decode("utf-8")
-        self.assertIn("Confirm Scoped Catalog Apply", html)
-        self.assertIn("Catalog cleanup applied", html)
-        self.assertIn("Admin catalog apply", html)
-        self.assertIn("This queues catalog_apply_admin_only for the reviewed rows only.", html)
-        self.assertIn("Production apply remains blocked unless explicitly unlocked.", html)
-        self.assertIn("Affected items", html)
-        self.assertIn("Pack Conflict", html)
-        self.assertIn(
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
             reverse(
-                "epos_qbo:company_inventory_retry_catalog_cleanup",
+                "epos_qbo:company_inventory_review",
                 kwargs={"company_key": "company_a"},
             ),
-            html,
         )
-        self.assertIn("Confirm and queue", html)
 
-    def test_quantity_adjustments_confirm_page_renders_preview_and_confirm_post(self):
+    def test_quantity_adjustments_confirm_redirects_without_queueing(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
@@ -302,23 +292,14 @@ class InventoryReviewActionViewTests(TestCase):
                 )
             )
 
-        self.assertEqual(response.status_code, 200)
-        html = response.content.decode("utf-8")
-        self.assertIn("Confirm Scoped Quantity Apply", html)
-        self.assertIn("Applied quantity adjustments", html)
-        self.assertIn("Apply quantity adjustments", html)
-        self.assertIn("This queues quantity_apply for the reviewed rows only.", html)
-        self.assertIn("Production apply remains blocked unless explicitly unlocked.", html)
-        self.assertIn("Affected items", html)
-        self.assertIn("BENSON &amp; HEDGES CIGARETTES", html)
-        self.assertIn(
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
             reverse(
-                "epos_qbo:company_inventory_retry_quantity_adjustments",
+                "epos_qbo:company_inventory_review",
                 kwargs={"company_key": "company_a"},
             ),
-            html,
         )
-        self.assertIn("Confirm and queue", html)
 
     def test_retry_catalog_cleanup_rejects_inventory_disabled_company(self):
         self._login()
@@ -342,78 +323,48 @@ class InventoryReviewActionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(RunJob.objects.filter(company_key="company_b").count(), 0)
 
-    def test_retry_catalog_cleanup_queues_inventory_pipeline_job(self):
+    def test_retry_catalog_cleanup_does_not_queue_inventory_pipeline_job(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
             self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
 
-            with mock.patch(
-                "apps.epos_qbo.views.dispatch_next_queued_job",
-                return_value=(None, "queued"),
-            ):
-                response = self.client.post(
-                    reverse(
-                        "epos_qbo:company_inventory_retry_catalog_cleanup",
-                        kwargs={"company_key": "company_a"},
-                    )
+            response = self.client.post(
+                reverse(
+                    "epos_qbo:company_inventory_retry_catalog_cleanup",
+                    kwargs={"company_key": "company_a"},
                 )
+            )
 
         self.assertEqual(response.status_code, 302)
-        # Original artifact RunJob plus the retry RunJob.
-        retry_jobs = RunJob.objects.filter(
-            company_key="company_a", status=RunJob.STATUS_QUEUED
+        self.assertEqual(
+            RunJob.objects.filter(
+                company_key="company_a", status=RunJob.STATUS_QUEUED
+            ).count(),
+            0,
         )
-        self.assertEqual(retry_jobs.count(), 1)
-        retry_job = retry_jobs.first()
-        self.assertEqual(retry_job.scope, RunJob.SCOPE_INVENTORY_PIPELINE)
-        review_retry = (retry_job.inventory_options_json or {}).get("review_retry", {})
-        self.assertEqual(review_retry.get("intent"), actions.RETRY_INTENT_CATALOG)
-        self.assertEqual(review_retry.get("row_count"), 1)
-        self.assertIn("Pack Conflict", review_retry.get("affected_base_names", []))
-        opts = retry_job.inventory_options_json or {}
-        self.assertEqual(opts.get("mode"), "catalog_apply_admin_only")
-        self.assertIn("Pack Conflict", opts.get("base_names", []))
-        self.assertEqual(opts.get("max_catalog_fixes"), 1)
-        self.assertEqual(opts.get("max_quantity_adjustments"), 0)
 
-    def test_retry_quantity_adjustments_uses_only_trusted_audit_rows(self):
-        """The view must ignore POST product names and only use parsed audit rows."""
+    def test_retry_quantity_adjustments_does_not_queue_from_untrusted_post_rows(self):
+        """The view must not queue a quantity apply job from POST product names."""
 
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
             self._create_inventory_artifact(company_key="company_a", final_audit=final_audit)
 
-            with mock.patch(
-                "apps.epos_qbo.views.dispatch_next_queued_job",
-                return_value=(None, "queued"),
-            ):
-                response = self.client.post(
-                    reverse(
-                        "epos_qbo:company_inventory_retry_quantity_adjustments",
-                        kwargs={"company_key": "company_a"},
-                    ),
-                    # Attempt to inject untrusted product names — they must be ignored.
-                    {"product": "ATTACKER PRODUCT", "products[]": "MALICIOUS"},
-                )
+            response = self.client.post(
+                reverse(
+                    "epos_qbo:company_inventory_retry_quantity_adjustments",
+                    kwargs={"company_key": "company_a"},
+                ),
+                {"product": "ATTACKER PRODUCT", "products[]": "MALICIOUS"},
+            )
 
         self.assertEqual(response.status_code, 302)
         retry_jobs = RunJob.objects.filter(
             company_key="company_a", status=RunJob.STATUS_QUEUED
         )
-        self.assertEqual(retry_jobs.count(), 1)
-        retry_job = retry_jobs.first()
-        review_retry = (retry_job.inventory_options_json or {}).get("review_retry", {})
-        affected = review_retry.get("affected_base_names", [])
-        self.assertIn("BENSON & HEDGES CIGARETTES", affected)
-        self.assertNotIn("ATTACKER PRODUCT", affected)
-        self.assertNotIn("MALICIOUS", affected)
-        opts = retry_job.inventory_options_json or {}
-        self.assertEqual(opts.get("mode"), "quantity_apply")
-        self.assertIn("BENSON & HEDGES CIGARETTES", opts.get("base_names", []))
-        self.assertEqual(opts.get("max_catalog_fixes"), 0)
-        self.assertEqual(opts.get("max_quantity_adjustments"), 1)
+        self.assertEqual(retry_jobs.count(), 0)
 
     def test_missing_preview_renders_and_writes_no_jobs(self):
         self._login()
@@ -687,7 +638,7 @@ class InventoryReviewActionViewTests(TestCase):
             baseline_queued,
         )
 
-    def test_catalog_cleanup_post_sends_one_queued_slack_notification(self):
+    def test_catalog_cleanup_post_does_not_send_queued_slack_notification(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
@@ -712,15 +663,9 @@ class InventoryReviewActionViewTests(TestCase):
                 )
 
         self.assertEqual(response.status_code, 302)
-        slack_mock.assert_called_once()
-        msg = slack_mock.call_args.args[0]
-        self.assertIn("Catalog cleanup retry", msg)
-        self.assertIn("Affected items: 1", msg)
-        self.assertIn("op", msg)
-        self.assertIn("Source audit:", msg)
-        self.assertIn("inventory_pipeline_company_a_", msg)
+        slack_mock.assert_not_called()
 
-    def test_quantity_adjustment_post_sends_one_queued_slack_notification(self):
+    def test_quantity_adjustment_post_does_not_send_queued_slack_notification(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
@@ -745,11 +690,7 @@ class InventoryReviewActionViewTests(TestCase):
                 )
 
         self.assertEqual(response.status_code, 302)
-        slack_mock.assert_called_once()
-        msg = slack_mock.call_args.args[0]
-        self.assertIn("Quantity adjustment retry", msg)
-        self.assertIn("Affected items: 1", msg)
-        self.assertIn("op", msg)
+        slack_mock.assert_not_called()
 
     def test_missing_create_post_sends_one_queued_slack_notification(self):
         self._login()

@@ -262,7 +262,7 @@ class RunsAndRunDetailRenderingTests(TestCase):
             company_key="company_a",
             status=RunJob.STATUS_QUEUED,
             inventory_options_json={
-                "mode": "catalog_apply_admin_only",
+                "mode": "catalog_plan_only",
                 "base_names": affected,
                 "max_catalog_fixes": 12,
                 "max_quantity_adjustments": 0,
@@ -279,8 +279,8 @@ class RunsAndRunDetailRenderingTests(TestCase):
         self.assertIn("Inventory Review Action", html)
         self.assertIn("Catalog cleanup retry", html)
         self.assertIn("Inventory Mode", html)
-        self.assertIn("Catalog cleanup applied", html)
-        self.assertIn("Admin catalog apply", html)
+        self.assertIn("Catalog plan only", html)
+        self.assertIn("Plan catalog cleanup", html)
         self.assertIn("This run was queued from the Inventory Review page", html)
         self.assertIn("Selected base names only", html)
         self.assertIn("final_audit_company_a.csv", html)
@@ -302,7 +302,7 @@ class RunsAndRunDetailRenderingTests(TestCase):
             company_key="company_a",
             status=RunJob.STATUS_QUEUED,
             inventory_options_json={
-                "mode": "quantity_apply",
+                "mode": "opening_balance_correction_preview",
                 "base_names": affected,
                 "max_catalog_fixes": 0,
                 "max_quantity_adjustments": 3,
@@ -318,8 +318,8 @@ class RunsAndRunDetailRenderingTests(TestCase):
         html = self.client.get(reverse("epos_qbo:run-detail", kwargs={"job_id": job.id})).content.decode("utf-8")
         self.assertIn("Quantity adjustment retry", html)
         self.assertIn("Inventory Mode", html)
-        self.assertIn("Applied quantity adjustments", html)
-        self.assertIn("Apply quantity adjustments", html)
+        self.assertIn("Opening balance correction preview", html)
+        self.assertIn("Preview opening balance correction", html)
         self.assertIn("other_final.csv", html)
         self.assertIn("WIDGET A", html)
         self.assertIn("Catalog fixes: 0", html)

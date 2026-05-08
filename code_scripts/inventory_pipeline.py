@@ -38,7 +38,6 @@ from code_scripts.company_config import (
     load_company_config,
 )
 from code_scripts.inventory_catalog_cleanup import (
-    _run_apply_for_existing_base_pack_variants,
     _write_csv as _write_catalog_csv,
     plan_catalog_cleanup,
 )
@@ -57,17 +56,13 @@ from code_scripts.inventory_sync import (
     _write_audit_metadata,
     _write_csv as _write_audit_csv,
     build_audit_report,
-    build_inventory_adjustment_doc_number,
-    build_inventory_adjustment_payload,
     choose_canonical_qbo_item_row,
     fetch_qbo_inventory_items_snapshot,
     load_epos_stock_snapshot,
     load_qbo_inventory_item_rows,
     load_qbo_inventory_snapshot,
-    mark_qbo_snapshot_stale,
-    post_inventory_adjustment,
 )
-from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path
+from code_scripts.qbo_snapshot_cache import get_qbo_snapshot_path, mark_qbo_snapshot_stale
 from code_scripts.qbo_upload import (
     create_inventory_item,
     get_or_create_item_category_id,
@@ -130,11 +125,8 @@ UNSUPPORTED_CATALOG_ISSUE_TYPES = {
 INVENTORY_MODES = (
     "audit_only",
     "quantity_preview",
-    "quantity_apply",
     "opening_balance_correction_preview",
-    "opening_balance_correction_apply",
     "catalog_plan_only",
-    "catalog_apply_admin_only",
 )
 DEFAULT_INVENTORY_MODE = "audit_only"
 
@@ -239,22 +231,38 @@ def _inventory_mode(args: argparse.Namespace) -> str:
 
 def _mode_flags(mode: str) -> dict[str, bool]:
     return {
-        "catalog_plan_enabled": mode in {"catalog_plan_only", "catalog_apply_admin_only"},
-        "catalog_apply_enabled": mode == "catalog_apply_admin_only",
+        "catalog_plan_enabled": mode == "catalog_plan_only",
+        "catalog_apply_enabled": False,
         "quantity_preview_enabled": mode == "quantity_preview",
-        "quantity_apply_enabled": mode == "quantity_apply",
+        "quantity_apply_enabled": False,
         "baseline_correction_preview_enabled": mode == "opening_balance_correction_preview",
-        "baseline_correction_apply_enabled": mode == "opening_balance_correction_apply",
+        "baseline_correction_apply_enabled": False,
         "missing_item_create_enabled": False,
     }
 
 
 def _write_intent_for_mode(mode: str) -> str:
-    if mode in {"quantity_apply", "opening_balance_correction_apply", "catalog_apply_admin_only", "review_create_missing_items"}:
+    if mode == "review_create_missing_items":
         return "apply"
     if mode in {"quantity_preview", "opening_balance_correction_preview", "catalog_plan_only"}:
         return "preview"
     return "none"
+
+
+def post_inventory_adjustment(*_args, **_kwargs):
+    """Legacy compatibility stub: QBO quantity adjustment posting is removed."""
+    raise RuntimeError(
+        "QBO InventoryAdjustment posting has been removed. "
+        "Use preview reports and manual QBO Adjust starting value corrections instead."
+    )
+
+
+def _run_apply_for_existing_base_pack_variants(*_args, **_kwargs):
+    """Legacy compatibility stub: catalog quantity apply is removed."""
+    raise RuntimeError(
+        "QBO catalog quantity apply has been removed. "
+        "Use catalog plans and manual QBO starting-value corrections instead."
+    )
 
 
 def _resolve_stock_path(args: argparse.Namespace, cfg) -> Path:
@@ -433,43 +441,11 @@ def _apply_catalog_cleanup(
         "exit_code": 0,
     }
 
-    if supported.empty or (max_catalog_fixes is not None and max_catalog_fixes <= 0):
-        if unsupported.empty:
-            print("[INFO] No catalog cleanup rows require action.")
-        else:
-            _print_unsupported_catalog_rows(unsupported)
-            print("[INFO] Catalog rows needing manual review were reported; none were applied.")
-        return result
-
-    apply_limit = len(supported) if max_catalog_fixes is None else int(max_catalog_fixes)
-
-    apply_result = _run_apply_for_existing_base_pack_variants(
-        cfg=cfg,
-        plan_df=action_plan,
-        qbo_item_rows=qbo_item_rows,
-        txn_date=txn_date,
-        max_products=int(apply_limit),
-        dry_run=bool(dry_run),
-        return_stats=True,
-    )
-    if isinstance(apply_result, dict):
-        exit_code = int(apply_result.get("exit_code", 0))
-        consolidated = int(apply_result.get("consolidated", 0))
-        cleaned_up = int(apply_result.get("cleaned_up", 0))
-        result["base_items_created"] = int(apply_result.get("base_items_created", 0))
-        result["duplicate_base_items_resolved"] = int(apply_result.get("duplicate_base_items_resolved", 0))
-        result["created_base_details"] = list(apply_result.get("created_base_details") or [])
+    if unsupported.empty:
+        print("[INFO] Catalog cleanup rows were reported for review; QBO write apply is disabled.")
     else:
-        exit_code = int(apply_result)
-        consolidated = min(int(apply_limit), len(supported))
-        cleaned_up = consolidated
-    result["exit_code"] = int(exit_code)
-    if exit_code != 0:
-        return result
-
-    applied = min(consolidated, cleaned_up) if cleaned_up else consolidated
-    result["applied"] = 0 if dry_run else int(applied)
-    result["changed_qbo"] = bool(applied and not dry_run)
+        _print_unsupported_catalog_rows(unsupported)
+        print("[INFO] Catalog rows needing manual review were reported; QBO write apply is disabled.")
     return result
 
 
@@ -882,59 +858,14 @@ def _apply_opening_balance_corrections(
     )
     result["risk_flag_counts"] = _quantity_risk_flag_counts(details)
 
-    if not dry_run:
-        assert_inventory_apply_allowed(cfg, action="opening_balance_correction_apply")
-        verify_realm_match(cfg.company_key, cfg.realm_id)
-        token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
-        run_lock = GlobalRunLock(holder=f"inventory_pipeline:{cfg.company_key}")
-        lock_result = run_lock.acquire()
-        if not lock_result.acquired:
-            raise RuntimeError(
-                f"another pipeline run is active ({lock_result.reason}); refusing opening balance corrections."
-            )
-    else:
-        token_mgr = None
-        run_lock = None
-
-    try:
-        for detail in details:
-            if not bool(detail.get("apply_eligible")):
-                result["skipped"] += 1
-                result["skipped_blocked_by_risk"] += 1
-                continue
-            item_id = str(detail.get("item_id") or "").strip()
-            qty_diff = float(detail.get("delta", 0.0) or 0.0)
-            if abs(qty_diff) <= 0:
-                continue
-            doc_number = build_inventory_adjustment_doc_number(txn_date=txn_date, item_id=item_id)
-            payload = build_inventory_adjustment_payload(
-                adjust_account_id=account_id,
-                txn_date=txn_date,
-                doc_number=doc_number,
-                private_note=(
-                    "OIAT baseline/opening-balance-style inventory quantity correction | "
-                    f"type={detail.get('correction_type')} | base={detail.get('base_name')!r} | "
-                    f"qbo_item_qty={detail.get('qbo_qty')} | target_qty={detail.get('epos_expected_qty')} | "
-                    f"delta={qty_diff}"
-                )[:950],
-                lines=[{"item_id": item_id, "qty_diff": qty_diff}],
-            )
-            if dry_run:
-                result["planned"] += 1
-                detail["dry_run"] = True
-                continue
-            assert token_mgr is not None
-            result["attempted"] += 1
-            post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
-            result["posted"] += 1
-            detail["applied"] = True
-    finally:
-        if run_lock is not None:
-            run_lock.release()
-
-    if result["posted"] > 0:
-        mark_qbo_snapshot_stale(cfg.company_key, reason="inventory_pipeline_opening_balance_corrections_posted")
-        result["changed_qbo"] = True
+    for detail in details:
+        detail["dry_run"] = True
+        detail["applied"] = False
+        if bool(detail.get("apply_eligible")):
+            result["planned"] += 1
+        else:
+            result["skipped"] += 1
+            result["skipped_blocked_by_risk"] += 1
     return result
 
 
@@ -989,10 +920,6 @@ def _apply_exact_match_quantity_adjustments(
     account_id = (adjust_account_id or "").strip() or str(
         getattr(cfg, "inventory_adjustment_account_id", "") or ""
     ).strip()
-    if not account_id and not dry_run:
-        raise RuntimeError(
-            "missing inventory adjustment account id for quantity adjustments."
-        )
 
     effective_max_delta = max_qty_delta
     if effective_max_delta is None:
@@ -1000,21 +927,7 @@ def _apply_exact_match_quantity_adjustments(
     if effective_max_delta is not None and effective_max_delta <= 0:
         effective_max_delta = None
 
-    token_mgr: Optional[TokenManager] = None
-    run_lock: Optional[GlobalRunLock] = None
-    if not dry_run:
-        assert_inventory_apply_allowed(cfg, action="quantity_adjustment_apply")
-        verify_realm_match(cfg.company_key, cfg.realm_id)
-        token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
-        run_lock = GlobalRunLock(holder=f"inventory_pipeline:{cfg.company_key}")
-        lock_result = run_lock.acquire()
-        if not lock_result.acquired:
-            raise RuntimeError(
-                f"another pipeline run is active ({lock_result.reason}); refusing quantity adjustments."
-            )
-
-    try:
-        for _, row in candidates.iterrows():
+    for _, row in candidates.iterrows():
             base = str(row.get("base_name") or "").strip()
             base_norm = _normalize_name_key(base)
             if "base_name_norm" in qbo_item_rows.columns:
@@ -1067,40 +980,15 @@ def _apply_exact_match_quantity_adjustments(
                 result["skipped_blocked_by_risk"] += 1
                 continue
 
-            doc_number = build_inventory_adjustment_doc_number(txn_date=txn_date, item_id=item_id)
-            payload = build_inventory_adjustment_payload(
-                adjust_account_id=account_id,
-                txn_date=txn_date,
-                doc_number=doc_number,
-                private_note=(
-                    "OIAT inventory pipeline | "
-                    f"base={base!r} | epos_single_units={epos_target} | "
-                    f"qbo_item_qty={current_qty} | delta={qty_diff}"
-                )[:950],
-                lines=[{"item_id": item_id, "qty_diff": qty_diff}],
+            print(
+                f"[PREVIEW] manual starting-value correction needed for {base!r}: "
+                f"qbo_qty={current_qty} epos_qty={epos_target} delta={qty_diff}"
             )
-
-            if dry_run:
-                print(f"[DRY-RUN] would post quantity adjustment for {base!r}: {payload}")
-                result["planned"] += 1
-                detail["dry_run"] = True
-                continue
-
-            assert token_mgr is not None
-            result["attempted"] += 1
-            post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
-            print(f"[OK] Posted quantity adjustment for {base!r} item_id={item_id}")
-            result["posted"] += 1
-            detail["applied"] = True
-            detail["dry_run"] = False
-    finally:
-        if run_lock is not None:
-            run_lock.release()
+            result["planned"] += 1
+            detail["dry_run"] = True
+            detail["applied"] = False
 
     result["risk_flag_counts"] = _quantity_risk_flag_counts(result["details"])
-    if result["posted"] > 0:
-        mark_qbo_snapshot_stale(cfg.company_key, reason="inventory_pipeline_quantity_adjustments_posted")
-        result["changed_qbo"] = True
     return result
 
 
@@ -2259,8 +2147,6 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     max_catalog_fixes = _optional_non_negative_int(args.max_catalog_fixes)
     max_quantity_adjustments = _optional_non_negative_int(args.max_quantity_adjustments)
-    if mode == "catalog_apply_admin_only" and max_catalog_fixes is None:
-        raise RuntimeError("catalog_apply_admin_only requires --max-catalog-fixes.")
     categories = [str(c).strip() for c in list(args.categories or []) if str(c).strip()]
     product_filter = (args.product_filter or "").strip() or None
     base_names = [str(v).strip() for v in list(getattr(args, "base_names", []) or []) if str(v).strip()]

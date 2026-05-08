@@ -160,7 +160,7 @@ class InventoryPipelineBuildCommandTests(TestCase):
         cmd = build_command_for_job(job)
 
         self.assertEqual(cmd[cmd.index("--base-name") + 1], "Pack Conflict")
-        self.assertEqual(cmd[cmd.index("--mode") + 1], "catalog_apply_admin_only")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "catalog_plan_only")
         self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "1")
         self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "0")
         self.assertNotIn("--dry-run", cmd)
@@ -183,7 +183,7 @@ class InventoryPipelineBuildCommandTests(TestCase):
         cmd = build_command_for_job(job)
 
         self.assertEqual(cmd[cmd.index("--base-name") + 1], "BENSON & HEDGES CIGARETTES")
-        self.assertEqual(cmd[cmd.index("--mode") + 1], "quantity_apply")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "opening_balance_correction_preview")
         self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "0")
         self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "1")
         self.assertNotIn("--dry-run", cmd)
@@ -336,7 +336,7 @@ class InventoryBuildCommandTests(TestCase):
                 "product_filter": "WIDGET",
                 "categories": ["Beverages"],
                 "tolerance": 0.5,
-                "apply": True,
+                "dry_run": True,
                 "allow_ambiguous": True,
                 "max_adjustments": 5,
                 "max_qty_delta": 100,
@@ -354,7 +354,8 @@ class InventoryBuildCommandTests(TestCase):
         self.assertIn("Beverages", cmd)
         self.assertIn("--tolerance", cmd)
         self.assertIn("0.5", cmd)
-        self.assertIn("--apply", cmd)
+        self.assertNotIn("--apply", cmd)
+        self.assertIn("--dry-run", cmd)
         self.assertIn("--allow-ambiguous", cmd)
         self.assertNotIn("--allow-fallback-picks", cmd)
         self.assertIn("--max-adjustments", cmd)
@@ -392,7 +393,7 @@ class InventoryBuildCommandTests(TestCase):
         self.assertIn("--max-adjustments", cmd)
         self.assertIn("3", cmd)
 
-    def test_build_command_for_job_uses_inventory_options(self):
+    def test_build_command_for_job_rejects_removed_apply_option(self):
         job = RunJob.objects.create(
             scope=RunJob.SCOPE_INVENTORY_SYNC,
             company_key="company_a",
@@ -401,12 +402,8 @@ class InventoryBuildCommandTests(TestCase):
                 "max_qty_delta": 50,
             },
         )
-        cmd = build_command_for_job(job)
-        self.assertIn("--auto-download", cmd)
-        self.assertIn("--apply", cmd)
-        self.assertIn("--max-qty-delta", cmd)
-        self.assertIn("50", cmd)
-        self.assertNotIn("--allow-fallback-picks", cmd)
+        with self.assertRaisesRegex(ValueError, "apply mode has been removed"):
+            build_command_for_job(job)
 
     def test_missing_company_key_raises(self):
         with self.assertRaises(ValueError):

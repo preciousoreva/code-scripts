@@ -2,17 +2,15 @@
 
 When a pack-variant item like ``WIDGET 330ml*12`` still holds non-zero
 ``QtyOnHand`` in QBO, the existing :mod:`code_scripts.qbo_pack_variant_cleanup`
-tool refuses to inactivate it (we'd lose stock).  Before we build any "move
-the qty into the base item then inactivate" apply behaviour, we want to see
-**what that migration would actually do**: how many units would shift from
-each pack variant into the corresponding base item, in single-unit terms.
+tool refuses to inactivate it (we'd lose stock). This planner shows the manual
+starting-value corrections that would be needed: how many units would shift
+from each pack variant into the corresponding base item, in single-unit terms.
 
 This module is a thin, audit-only planner on top of
 :func:`code_scripts.qbo_pack_variant_cleanup.audit_pack_variants` — the
 **same** classification logic the cleanup tool uses.  No QBO writes happen
-here.  No InventoryAdjustment payloads are constructed here.  Apply
-behaviour for migration is intentionally out of scope and will be a follow
--up.
+here.  No InventoryAdjustment payloads are constructed here.  Automated apply
+behaviour for migration is intentionally out of scope.
 
 Per-row math
 ============

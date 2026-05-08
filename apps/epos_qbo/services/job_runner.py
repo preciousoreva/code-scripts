@@ -194,10 +194,10 @@ def _validate_inventory_review_options(opts: dict) -> None:
     row_count = int(review_retry.get("row_count") or len(scoped_base_names))
     if intent == "review_retry_catalog_cleanup":
         if max_catalog is None or max_catalog > row_count or max_quantity != 0:
-            raise ValueError("catalog review retry jobs must be scoped by row count and disable quantity")
+            raise ValueError("catalog review jobs must be scoped by row count and disable quantity")
     elif intent == "review_retry_quantity_adjustments":
         if max_catalog != 0 or max_quantity is None or max_quantity > row_count:
-            raise ValueError("quantity review retry jobs must disable catalog and be scoped by row count")
+            raise ValueError("quantity review jobs must disable catalog and be scoped by row count")
     else:
         raise ValueError("unknown inventory review retry intent")
 
@@ -210,9 +210,9 @@ def _inventory_pipeline_mode(opts: dict) -> str:
     if isinstance(review_retry, dict):
         intent = str(review_retry.get("intent") or "").strip()
         if intent == "review_retry_catalog_cleanup":
-            return "catalog_apply_admin_only"
+            return "catalog_plan_only"
         if intent == "review_retry_quantity_adjustments":
-            return "quantity_apply"
+            return "opening_balance_correction_preview"
     if isinstance(opts.get("review_create_missing_items"), dict):
         return "audit_only"
     return "audit_only"
@@ -274,7 +274,7 @@ def _build_inventory_command(python_exe: str, cleaned: dict) -> list[str]:
     if opts.get("tolerance") is not None:
         cmd.extend(["--tolerance", str(opts["tolerance"])])
     if opts.get("apply"):
-        cmd.append("--apply")
+        raise ValueError("inventory_sync apply mode has been removed; use preview/manual correction workflow")
     if opts.get("dry_run"):
         cmd.append("--dry-run")
     if opts.get("allow_ambiguous"):

@@ -379,20 +379,19 @@ class OverviewUIContextTests(TestCase):
 
         self.assertEqual(company_row["inventory_status"]["label"], "Preview only")
 
-    def test_latest_inventory_status_shows_catalog_apply_blocked(self):
+    def test_latest_inventory_status_uses_catalog_plan_label(self):
         self._create_inventory_run(
             products_checked=147,
             in_sync=147,
             blocked_items=0,
             inventory_stats_extra={
-                "inventory_mode": "catalog_apply_admin_only",
-                "qbo_write_blocked": True,
+                "inventory_mode": "catalog_plan_only",
             },
         )
 
         company_row = self._company_row()
 
-        self.assertEqual(company_row["inventory_status"]["label"], "Catalog apply blocked")
+        self.assertEqual(company_row["inventory_status"]["label"], "Catalog plan only")
 
     def test_company_last_run_falls_back_to_latest_artifact_time(self):
         RunArtifact.objects.create(

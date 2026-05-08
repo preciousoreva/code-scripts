@@ -373,7 +373,9 @@ class CompanyConfig:
     @property
     def inventory_adjustment_account_id(self) -> Optional[str]:
         """
-        Chart of Accounts Id used as AdjustAccountRef on InventoryAdjustment (QBO).
+        Legacy Chart of Accounts Id for historical InventoryAdjustment workflows.
+        Forward inventory quantity apply is disabled; prefer
+        opening_balance_adjust_account_id for manual correction previews.
 
         Config: qbo.inventory_adjustment_account_id
         ENV:    {COMPANY_KEY}_INVENTORY_ADJUSTMENT_ACCOUNT_ID
@@ -428,10 +430,10 @@ class CompanyConfig:
     @property
     def inventory_max_qty_delta(self) -> Optional[float]:
         """
-        Per-item absolute qty-delta safety cap used by inventory_sync --apply.
+        Per-item absolute qty-delta safety cap used by inventory preview modes.
 
-        Any InventoryAdjustment whose |QtyDiff| exceeds this cap is skipped
-        (not posted). A value of 0 or negative disables the cap.
+        Any manual correction candidate whose |QtyDiff| exceeds this cap is
+        skipped for review. A value of 0 or negative disables the cap.
 
         Config: qbo.inventory_max_qty_delta
         ENV:    {COMPANY_KEY}_INVENTORY_MAX_QTY_DELTA

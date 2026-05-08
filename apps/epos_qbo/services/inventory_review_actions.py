@@ -5,15 +5,10 @@ audit CSV for a company and renders read-only review rows.
 
 This module adds Phase 1 remediation actions that work on top of that artifact:
 
-* ``retry_catalog_cleanup_for_review`` queues an inventory pipeline run scoped to
-  duplicate/base conflicts that the user wants to retry. The inventory pipeline
-  already does catalog cleanup as one of its phases — we record a retry intent
-  and reuse that path so we don't fork the supported sequence.
-
-* ``retry_quantity_adjustments_for_review`` queues an inventory pipeline run for
-  exact-match ``needs_adjustment`` rows. Same reasoning: the unified pipeline
-  already posts inventory adjustments for exact-name matches; we just record a
-  scoped retry.
+* ``retry_catalog_cleanup_for_review`` and
+  ``retry_quantity_adjustments_for_review`` are retained as no-op compatibility
+  wrappers. QBO quantity apply paths are intentionally removed; operators use
+  read-only plans and manual QBO starting-value corrections instead.
 
 * ``build_missing_item_creation_preview`` is a read-only classifier for
   ``missing_from_qbo`` rows (shared logic lives in
@@ -268,9 +263,9 @@ def _build_retry_inventory_options(
     affected_base_names = _affected_base_names(rows)
     mode = ""
     if intent == RETRY_INTENT_CATALOG:
-        mode = "catalog_apply_admin_only"
+        mode = "catalog_plan_only"
     elif intent == RETRY_INTENT_QUANTITY:
-        mode = "quantity_apply"
+        mode = "opening_balance_correction_preview"
     options: dict[str, Any] = {
         "mode": mode,
         # Scoped execution inputs for the unified inventory pipeline runner.
@@ -326,34 +321,16 @@ def retry_catalog_cleanup_for_review(
     requested_by,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Phase 1: queue an inventory pipeline retry for catalog conflicts.
-
-    Returns a dict describing what was queued (or what would be queued in
-    dry-run mode). Raises no exceptions for empty input — the caller is
-    expected to gate on the count.
-    """
+    """Return catalog-conflict rows without queuing QBO quantity writes."""
 
     rows = get_catalog_cleanup_rows(context.rows)
-    if dry_run or not rows:
-        return {
-            "queued": False,
-            "row_count": len(rows),
-            "rows": rows,
-            "intent": RETRY_INTENT_CATALOG,
-        }
-    job = queue_retry_run_job(
-        company=context.company,
-        intent=RETRY_INTENT_CATALOG,
-        rows=rows,
-        artifact=context.artifact,
-        requested_by=requested_by,
-    )
     return {
-        "queued": True,
+        "queued": False,
         "row_count": len(rows),
         "rows": rows,
         "intent": RETRY_INTENT_CATALOG,
-        "job_id": job.id,
+        "manual_required": True,
+        "reason": "qbo_quantity_apply_removed",
     }
 
 
@@ -363,29 +340,16 @@ def retry_quantity_adjustments_for_review(
     requested_by,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Phase 1: queue an inventory pipeline retry for exact-match adjustments."""
+    """Return quantity-mismatch rows without queuing QBO quantity writes."""
 
     rows = get_quantity_adjustment_rows(context.rows)
-    if dry_run or not rows:
-        return {
-            "queued": False,
-            "row_count": len(rows),
-            "rows": rows,
-            "intent": RETRY_INTENT_QUANTITY,
-        }
-    job = queue_retry_run_job(
-        company=context.company,
-        intent=RETRY_INTENT_QUANTITY,
-        rows=rows,
-        artifact=context.artifact,
-        requested_by=requested_by,
-    )
     return {
-        "queued": True,
+        "queued": False,
         "row_count": len(rows),
         "rows": rows,
         "intent": RETRY_INTENT_QUANTITY,
-        "job_id": job.id,
+        "manual_required": True,
+        "reason": "qbo_quantity_apply_removed",
     }
 
 

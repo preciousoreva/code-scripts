@@ -87,8 +87,6 @@ from .services.inventory_review_actions import (
     queue_missing_item_creation_job,
     resolve_category_scope_labels,
     resolve_txn_date_for_review_missing_item_creation,
-    retry_catalog_cleanup_for_review,
-    retry_quantity_adjustments_for_review,
     validate_inventory_start_date_for_missing_queue,
 )
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
@@ -180,24 +178,18 @@ RUN_ARTIFACT_REPORT_SUFFIXES = {".csv", ".json"}
 INVENTORY_MODE_LABELS = {
     "audit_only": "Audit only",
     "quantity_preview": "Preview only",
-    "quantity_apply": "Applied quantity adjustments",
     "opening_balance_correction_preview": "Opening balance correction preview",
-    "opening_balance_correction_apply": "Opening balance correction applied",
     "catalog_plan_only": "Catalog plan only",
-    "catalog_apply_admin_only": "Catalog cleanup applied",
     "review_create_missing_items": "Missing item creation",
 }
 INVENTORY_MODE_WRITE_INTENT_LABELS = {
     "audit_only": "No QBO writes",
     "quantity_preview": "Preview quantity adjustments",
-    "quantity_apply": "Apply quantity adjustments",
     "opening_balance_correction_preview": "Preview opening balance correction",
-    "opening_balance_correction_apply": "Apply opening balance correction",
     "catalog_plan_only": "Plan catalog cleanup",
-    "catalog_apply_admin_only": "Admin catalog apply",
     "review_create_missing_items": "Create missing inventory items",
 }
-INVENTORY_SAFE_APPLY_COPY = "Production inventory apply is blocked by default. Audit and preview are safe."
+INVENTORY_SAFE_APPLY_COPY = "Inventory quantity apply is removed. Audit, preview, and manual correction exports are safe."
 
 
 def _unique_existing_resolved_dirs(paths: list[Path]) -> list[Path]:
@@ -690,8 +682,6 @@ def _coerce_bool_stat(value: object) -> bool:
 def _inventory_mode_label(mode: object, summary: dict | None = None) -> str:
     raw_mode = str(mode or "").strip()
     summary = summary if isinstance(summary, dict) else {}
-    if raw_mode == "catalog_apply_admin_only" and _coerce_bool_stat(summary.get("qbo_write_blocked")):
-        return "Catalog apply blocked"
     return INVENTORY_MODE_LABELS.get(raw_mode, raw_mode.replace("_", " ").title() if raw_mode else "")
 
 
@@ -4213,22 +4203,10 @@ def company_inventory_review(request, company_key):
             "catalog_cleanup_count": len(get_catalog_cleanup_rows(rows)),
             "quantity_adjustment_count": len(get_quantity_adjustment_rows(rows)),
             "missing_count": len(get_review_rows_by_reason(rows, REASON_GROUP_MISSING)),
-            "retry_catalog_cleanup_url": reverse(
-                "epos_qbo:company_inventory_retry_catalog_cleanup",
-                kwargs={"company_key": company.company_key},
-            ),
-            "retry_catalog_cleanup_confirm_url": reverse(
-                "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",
-                kwargs={"company_key": company.company_key},
-            ),
-            "retry_quantity_adjustments_url": reverse(
-                "epos_qbo:company_inventory_retry_quantity_adjustments",
-                kwargs={"company_key": company.company_key},
-            ),
-            "retry_quantity_adjustments_confirm_url": reverse(
-                "epos_qbo:company_inventory_retry_quantity_adjustments_confirm",
-                kwargs={"company_key": company.company_key},
-            ),
+            "retry_catalog_cleanup_url": "",
+            "retry_catalog_cleanup_confirm_url": "",
+            "retry_quantity_adjustments_url": "",
+            "retry_quantity_adjustments_confirm_url": "",
             "missing_preview_url": reverse(
                 "epos_qbo:company_inventory_missing_preview",
                 kwargs={"company_key": company.company_key},
@@ -4346,196 +4324,72 @@ def _inventory_retry_confirm_context(
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_GET
 def company_inventory_retry_catalog_cleanup_confirm(request, company_key):
-    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
     if error_redirect is not None:
         return error_redirect
     review_url = reverse(
         "epos_qbo:company_inventory_review",
         kwargs={"company_key": company.company_key},
     )
-    rows = get_catalog_cleanup_rows(context.rows)
-    if not rows:
-        messages.info(request, "No duplicate/base conflicts found in the latest final audit.")
-        return redirect(review_url)
-
-    template_context = _inventory_retry_confirm_context(
-        company=company,
-        context=context,
-        action_title="Confirm Scoped Catalog Apply",
-        action_label="Scoped catalog apply",
-        inventory_mode="catalog_apply_admin_only",
-        warning_text=(
-            "This queues catalog_apply_admin_only for the reviewed rows only. When the job runs, it may update "
-            "QuickBooks inventory by consolidating/inactivating duplicate or pack-variant items "
-            "and adjusting base quantities. Production apply remains blocked unless explicitly unlocked."
-        ),
-        rows=rows,
+    messages.info(
+        request,
+        "Catalog apply has been removed. Use the review counts and manual QBO starting-value correction workflow.",
     )
-    template_context.update(
-        {
-            "review_url": review_url,
-            "confirm_post_url": reverse(
-                "epos_qbo:company_inventory_retry_catalog_cleanup",
-                kwargs={"company_key": company.company_key},
-            ),
-            "confirm_button_text": "Confirm and queue",
-        }
-    )
-    template_context.update(_nav_context())
-    template_context.update(
-        _breadcrumb_context(
-            [
-                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
-                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
-                {
-                    "label": company.display_name,
-                    "url": reverse(
-                        "epos_qbo:company-detail",
-                        kwargs={"company_key": company.company_key},
-                    ),
-                },
-                {"label": "Inventory Review", "url": review_url},
-                {"label": "Confirm retry", "url": None},
-            ],
-            back_url=review_url,
-            back_label="Inventory Review",
-        )
-    )
-    return render(request, "epos_qbo/company_inventory_retry_confirm.html", template_context)
+    return redirect(review_url)
 
 
 @login_required
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_GET
 def company_inventory_retry_quantity_adjustments_confirm(request, company_key):
-    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
     if error_redirect is not None:
         return error_redirect
     review_url = reverse(
         "epos_qbo:company_inventory_review",
         kwargs={"company_key": company.company_key},
     )
-    rows = get_quantity_adjustment_rows(context.rows)
-    if not rows:
-        messages.info(request, "No exact-match quantity adjustments needed in the latest final audit.")
-        return redirect(review_url)
-
-    template_context = _inventory_retry_confirm_context(
-        company=company,
-        context=context,
-        action_title="Confirm Scoped Quantity Apply",
-        action_label="Scoped quantity apply",
-        inventory_mode="quantity_apply",
-        warning_text=(
-            "This queues quantity_apply for the reviewed rows only. When the job runs, it may post "
-            "QuickBooks InventoryAdjustment entries so QBO QtyOnHand matches EPOS. EPOS is the "
-            "source of truth. Production apply remains blocked unless explicitly unlocked."
-        ),
-        rows=rows,
+    messages.info(
+        request,
+        "Quantity apply has been removed. Use QBO Adjust starting value for reviewed quantity mismatches.",
     )
-    template_context.update(
-        {
-            "review_url": review_url,
-            "confirm_post_url": reverse(
-                "epos_qbo:company_inventory_retry_quantity_adjustments",
-                kwargs={"company_key": company.company_key},
-            ),
-            "confirm_button_text": "Confirm and queue",
-        }
-    )
-    template_context.update(_nav_context())
-    template_context.update(
-        _breadcrumb_context(
-            [
-                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
-                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
-                {
-                    "label": company.display_name,
-                    "url": reverse(
-                        "epos_qbo:company-detail",
-                        kwargs={"company_key": company.company_key},
-                    ),
-                },
-                {"label": "Inventory Review", "url": review_url},
-                {"label": "Confirm retry", "url": None},
-            ],
-            back_url=review_url,
-            back_label="Inventory Review",
-        )
-    )
-    return render(request, "epos_qbo/company_inventory_retry_confirm.html", template_context)
+    return redirect(review_url)
 
 
 @login_required
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_POST
 def company_inventory_retry_catalog_cleanup(request, company_key):
-    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
     if error_redirect is not None:
         return error_redirect
     review_url = reverse(
         "epos_qbo:company_inventory_review",
         kwargs={"company_key": company.company_key},
     )
-
-    rows = get_catalog_cleanup_rows(context.rows)
-    if not rows:
-        messages.info(request, "No duplicate/base conflicts found in the latest final audit.")
-        return redirect(review_url)
-
-    result = retry_catalog_cleanup_for_review(
-        context=context,
-        requested_by=request.user,
-    )
-    job_id = result.get("job_id")
-    if job_id is None:
-        messages.info(request, "No catalog cleanup actions were queued.")
-        return redirect(review_url)
-
-    dispatch_next_queued_job()
-    job = RunJob.objects.get(pk=job_id)
-    send_inventory_review_action_queued(company=company, job=job, request=request)
-    messages.success(
+    messages.info(
         request,
-        f"Catalog cleanup retry queued for {result['row_count']} item(s).",
+        "Catalog apply has been removed. Use the review counts and manual QBO starting-value correction workflow.",
     )
-    return redirect("epos_qbo:run-detail", job_id=job_id)
+    return redirect(review_url)
 
 
 @login_required
 @permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
 @require_POST
 def company_inventory_retry_quantity_adjustments(request, company_key):
-    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
     if error_redirect is not None:
         return error_redirect
     review_url = reverse(
         "epos_qbo:company_inventory_review",
         kwargs={"company_key": company.company_key},
     )
-
-    rows = get_quantity_adjustment_rows(context.rows)
-    if not rows:
-        messages.info(request, "No exact-match quantity adjustments needed in the latest final audit.")
-        return redirect(review_url)
-
-    result = retry_quantity_adjustments_for_review(
-        context=context,
-        requested_by=request.user,
-    )
-    job_id = result.get("job_id")
-    if job_id is None:
-        messages.info(request, "No quantity adjustment actions were queued.")
-        return redirect(review_url)
-
-    dispatch_next_queued_job()
-    job = RunJob.objects.get(pk=job_id)
-    send_inventory_review_action_queued(company=company, job=job, request=request)
-    messages.success(
+    messages.info(
         request,
-        f"Quantity adjustment retry queued for {result['row_count']} item(s).",
+        "Quantity apply has been removed. Use QBO Adjust starting value for reviewed quantity mismatches.",
     )
-    return redirect("epos_qbo:run-detail", job_id=job_id)
+    return redirect(review_url)
 
 
 def _inventory_missing_preview_url(

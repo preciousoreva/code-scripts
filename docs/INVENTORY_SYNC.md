@@ -8,10 +8,13 @@ The unified pipeline:
 2. Fetches a fresh QBO inventory item snapshot.
 3. Normalizes EPOS stock into base-unit quantities.
 4. Audits EPOS against QBO.
-5. Applies supported catalog cleanup.
-6. Re-audits.
-7. Applies exact-match quantity adjustments.
-8. Writes final CSV/JSON reports and sends a Slack summary when configured.
+5. Produces catalog and quantity review plans.
+6. Writes final CSV/JSON reports and sends a Slack summary when configured.
+
+The forward workflow is preview-first. Automated QBO quantity apply is removed:
+the pipeline does not post public QBO `InventoryAdjustment` transactions. Use
+the preview outputs to perform QBO UI **Adjust starting value** corrections with
+`300100 - Opening Balance Equity` where approved.
 
 ## Django Run
 
@@ -42,9 +45,13 @@ The main Inventory card intentionally exposes only the operator workflow:
 
 Dry-run, audit-only, and low-level catalog cleanup controls stay out of the main Runs UI.
 
-### Inventory apply freeze
+### Inventory Quantity Apply Removed
 
-Production inventory apply paths are blocked by default during QBO remediation. Audit, preview, stock download, and QBO snapshot fetch paths remain allowed. To intentionally allow inventory apply actions, set `OIAT_ALLOW_INVENTORY_APPLY=true` only for an approved remediation run.
+Public QBO quantity adjustment apply paths are removed, not just hidden in the
+portal. `OIAT_ALLOW_INVENTORY_APPLY=true` does not re-enable quantity apply.
+Audit, preview, stock download, and QBO snapshot fetch paths remain allowed.
+Reviewed missing-item creation is a separate catalog action and stays behind its
+own explicit review/permission flow.
 
 ## CLI Examples
 
@@ -118,10 +125,10 @@ Slack summarizes:
 - scope
 - products checked
 - in sync
-- catalog fixes
+- catalog review counts
 - base items created
 - duplicate base items resolved
-- quantity updates
+- manual quantity correction previews
 - blocked items
 - EPOS negative rows clamped to zero, only when nonzero
 - final report path
@@ -142,7 +149,9 @@ Blocked items mean the final audit is not fully `in_sync`. Common causes:
 - `multiple_active_base_items`: QBO has duplicate active base items.
 - `needs_adjustment`: quantity still differs after safe catalog cleanup.
 
-Supported cases are fixed automatically. Unsupported or ambiguous cases remain visible in the final audit and summary.
+Catalog and quantity issues remain visible in the final audit and summary.
+Operators use those reports to decide the manual QBO starting-value correction
+or separate reviewed catalog action.
 
 ## Quantity Semantics
 
@@ -167,7 +176,11 @@ The audit and pipeline summary expose the policy through:
 - `epos_negative_stock_policy`
 - `epos_negative_clamped_row_names` in the audit CSV
 
-QBO pack variant rows are treated as separate QBO inventory items with their own raw `QtyOnHand` during catalog cleanup. QBO pack `QtyOnHand` is not multiplier-expanded. After cleanup, the final exact-match quantity adjustment forces the base item to the EPOS expected quantity.
+QBO pack variant rows are treated as separate QBO inventory items with their own raw `QtyOnHand` during catalog review. QBO pack `QtyOnHand` is not multiplier-expanded. The expected end state is:
+
+- the active canonical/base QBO inventory item equals EPOS consolidated single-unit quantity;
+- pack-variant QBO items are corrected to zero before inactivation;
+- corrections are performed through QBO UI starting-value changes, not automated QBO quantity adjustments.
 
 This assumption should be revisited if future categories show QBO pack quantity semantics that differ by product family or company setup.
 
@@ -179,6 +192,6 @@ Future improvement: derive base item price/cost from EPOS sale/cost fields or an
 
 ## During Runs
 
-Avoid manual QBO inventory edits while a run is active. The pipeline relies on a fresh QBO snapshot, posts catalog and quantity changes, marks the snapshot stale after writes, then refreshes before re-auditing.
+Avoid manual QBO inventory edits while a run is active. The pipeline relies on a fresh QBO snapshot for its audit and preview outputs. After making manual QBO starting-value corrections, rerun the audit with a fresh QBO snapshot to confirm QBO matches EPOS.
 
 Retention and destructive cleanup are intentionally separate from this workflow. See `docs/ARTIFACT_RETENTION_PLAN.md`.
