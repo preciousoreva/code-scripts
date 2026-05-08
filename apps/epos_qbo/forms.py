@@ -97,6 +97,7 @@ class InventoryTriggerForm(forms.Form):
     SAFE_INVENTORY_MODE_CHOICES = [
         ("audit_only", "Run Inventory Audit"),
         ("quantity_preview", "Preview Quantity Adjustments"),
+        ("opening_balance_correction_preview", "Preview Opening Balance Correction"),
         ("catalog_plan_only", "Catalog Cleanup Plan"),
     ]
 

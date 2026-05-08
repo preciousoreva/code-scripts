@@ -49,6 +49,15 @@
             <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="inline">
                 {% csrf_token %}
                 <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
+                <input type="hidden" name="mode" value="opening_balance_correction_preview">
+                <button type="submit" class="btn btn-secondary">
+                    <iconify-icon icon="solar:eye-scan-linear" width="20"></iconify-icon>
+                    Preview Opening Balance Correction
+                </button>
+            </form>
+            <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="inline">
+                {% csrf_token %}
+                <input type="hidden" name="company_key" value="{{ company_data.company.company_key }}">
                 <input type="hidden" name="mode" value="catalog_plan_only">
                 <button type="submit" class="btn btn-secondary">
                     <iconify-icon icon="solar:document-add-linear" width="20"></iconify-icon>

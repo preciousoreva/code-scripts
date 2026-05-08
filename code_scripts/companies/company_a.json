@@ -10,7 +10,9 @@
     "tax_rate": 0.075,
     "default_item_id": "1",
     "default_income_account_id": "1",
-    "default_department_id": "2"
+    "default_department_id": "2",
+    "opening_balance_adjust_account_id": "73",
+    "opening_balance_adjust_account_name": "300100 - Opening Balance Equity"
   },
   "epos": {
     "username_env_key": "EPOS_USERNAME_A",

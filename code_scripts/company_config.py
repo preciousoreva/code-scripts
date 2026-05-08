@@ -389,6 +389,43 @@ class CompanyConfig:
         return s or None
 
     @property
+    def opening_balance_adjust_account_id(self) -> Optional[str]:
+        """
+        Chart of Accounts Id used as AdjustAccountRef for baseline/opening-balance-style
+        inventory quantity corrections.
+
+        Config: qbo.opening_balance_adjust_account_id
+        ENV:    {COMPANY_KEY}_OPENING_BALANCE_ADJUST_ACCOUNT_ID
+        """
+        env_key = f"{self.company_key.upper().replace('-', '_')}_OPENING_BALANCE_ADJUST_ACCOUNT_ID"
+        value = os.environ.get(env_key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        raw = self._data.get("qbo", {}).get("opening_balance_adjust_account_id")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        return s or None
+
+    @property
+    def opening_balance_adjust_account_name(self) -> Optional[str]:
+        """
+        Display name for the account configured by opening_balance_adjust_account_id.
+
+        Config: qbo.opening_balance_adjust_account_name
+        ENV:    {COMPANY_KEY}_OPENING_BALANCE_ADJUST_ACCOUNT_NAME
+        """
+        env_key = f"{self.company_key.upper().replace('-', '_')}_OPENING_BALANCE_ADJUST_ACCOUNT_NAME"
+        value = os.environ.get(env_key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        raw = self._data.get("qbo", {}).get("opening_balance_adjust_account_name")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        return s or None
+
+    @property
     def inventory_max_qty_delta(self) -> Optional[float]:
         """
         Per-item absolute qty-delta safety cap used by inventory_sync --apply.

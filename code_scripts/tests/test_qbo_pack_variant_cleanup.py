@@ -45,6 +45,21 @@ class StripPackMultiplierTest(unittest.TestCase):
     def test_two_digit_multiplier(self):
         self.assertEqual(strip_pack_multiplier("AQUAFINA 50CL*12"), ("AQUAFINA 50CL", 12))
 
+    def test_strips_pack_suffix_parenthetical(self):
+        self.assertEqual(strip_pack_multiplier("PRODUCT*5(pack)"), ("PRODUCT", 5))
+        self.assertEqual(strip_pack_multiplier("PRODUCT*5 (pack)"), ("PRODUCT", 5))
+        self.assertEqual(strip_pack_multiplier("PRODUCT*12(PACK)"), ("PRODUCT", 12))
+
+    def test_strictly_uses_final_trailing_multiplier_suffix(self):
+        self.assertEqual(
+            strip_pack_multiplier("BACKWOODS RUSSIAN CREAM CIGARS 5X1*40"),
+            ("BACKWOODS RUSSIAN CREAM CIGARS 5X1", 40),
+        )
+        self.assertEqual(
+            strip_pack_multiplier("BACKWOODS RUSSIAN CREAM CIGARS 5X1(pcs)"),
+            ("BACKWOODS RUSSIAN CREAM CIGARS 5X1(pcs)", 1),
+        )
+
 
 # ---------------------------------------------------------------------------
 # audit_pack_variants classification

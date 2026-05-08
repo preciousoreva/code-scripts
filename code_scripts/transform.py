@@ -45,9 +45,9 @@ def ensure_required_columns(df: pd.DataFrame) -> None:
         )
 
 
-# Matches a trailing pack-size multiplier, e.g. "*12" at end of "AQUAFINA 50CL*12".
-# Tolerates optional whitespace around the asterisk: "50CL*12", "50CL *12", "50CL * 12".
-_PACK_MULTIPLIER_RE = re.compile(r"\s*\*\s*(\d+)\s*$")
+# Matches a final trailing pack-size multiplier, e.g. "*12" or "*12(pack)".
+# Tolerates optional whitespace around the asterisk and optional trailing "(pack)".
+_PACK_MULTIPLIER_RE = re.compile(r"\s*\*\s*(\d+)\s*(?:\(\s*pack\s*\))?\s*$", re.IGNORECASE)
 
 
 def strip_pack_multiplier(product_name: str) -> Tuple[str, int]:

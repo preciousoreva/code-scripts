@@ -102,6 +102,21 @@ QUANTITY_PREVIEW_FIELDNAMES = [
     "recommended_action",
     "apply_eligible",
 ]
+BASELINE_CORRECTION_FIELDNAMES = [
+    "correction_type",
+    "base_name",
+    "qbo_item_id",
+    "qbo_item_name",
+    "qbo_qty",
+    "epos_expected_qty",
+    "qty_delta",
+    "adjustment_account_id",
+    "adjustment_account_name",
+    "risk_flags",
+    "risk_level",
+    "recommended_action",
+    "apply_eligible",
+]
 SAFE_CATALOG_ISSUE_TYPES = {
     "base_with_pack_variants",
     "only_pack_variant_exists",
@@ -116,6 +131,8 @@ INVENTORY_MODES = (
     "audit_only",
     "quantity_preview",
     "quantity_apply",
+    "opening_balance_correction_preview",
+    "opening_balance_correction_apply",
     "catalog_plan_only",
     "catalog_apply_admin_only",
 )
@@ -226,14 +243,16 @@ def _mode_flags(mode: str) -> dict[str, bool]:
         "catalog_apply_enabled": mode == "catalog_apply_admin_only",
         "quantity_preview_enabled": mode == "quantity_preview",
         "quantity_apply_enabled": mode == "quantity_apply",
+        "baseline_correction_preview_enabled": mode == "opening_balance_correction_preview",
+        "baseline_correction_apply_enabled": mode == "opening_balance_correction_apply",
         "missing_item_create_enabled": False,
     }
 
 
 def _write_intent_for_mode(mode: str) -> str:
-    if mode in {"quantity_apply", "catalog_apply_admin_only", "review_create_missing_items"}:
+    if mode in {"quantity_apply", "opening_balance_correction_apply", "catalog_apply_admin_only", "review_create_missing_items"}:
         return "apply"
-    if mode in {"quantity_preview", "catalog_plan_only"}:
+    if mode in {"quantity_preview", "opening_balance_correction_preview", "catalog_plan_only"}:
         return "preview"
     return "none"
 
@@ -600,6 +619,325 @@ def _quantity_risk_flag_counts(details: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _empty_quantity_result() -> dict[str, Any]:
+    return {
+        "posted": 0,
+        "planned": 0,
+        "skipped": 0,
+        "skipped_due_to_cap": 0,
+        "skipped_non_exact": 0,
+        "skipped_blocked_by_risk": 0,
+        "quantity_preview_candidates": 0,
+        "quantity_apply_eligible": 0,
+        "quantity_blocked_by_risk": 0,
+        "quantity_manual_review_required": 0,
+        "risk_flag_counts": {},
+        "attempted": 0,
+        "changed_qbo": False,
+        "details": [],
+    }
+
+
+def _opening_balance_account(cfg, *, override_id: str | None = None) -> tuple[str, str]:
+    account_id = (override_id or "").strip() or str(
+        getattr(cfg, "opening_balance_adjust_account_id", "") or ""
+    ).strip()
+    account_name = str(getattr(cfg, "opening_balance_adjust_account_name", "") or "").strip()
+    return account_id, account_name
+
+
+def _opening_balance_correction_candidates(
+    *,
+    audit_df: pd.DataFrame,
+    qbo_item_rows: pd.DataFrame,
+    account_id: str,
+    account_name: str,
+    include_qbo_absent_from_epos: bool = False,
+) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    if audit_df.empty or qbo_item_rows.empty:
+        return details
+
+    qbo_rows = qbo_item_rows.copy()
+    if "base_name_norm" not in qbo_rows.columns:
+        qbo_rows["base_name_norm"] = qbo_rows["base_name"].map(_normalize_name_key)
+
+    seen_base_norms: set[str] = set()
+    for _, row in audit_df.iterrows():
+        base = str(row.get("base_name") or "").strip()
+        base_norm = _normalize_name_key(base)
+        seen_base_norms.add(base_norm)
+        group = qbo_rows[qbo_rows["base_name_norm"] == base_norm].copy()
+        base_items = group[group["qbo_has_pack"] == False]  # noqa: E712
+        pack_items = group[group["qbo_has_pack"] == True]  # noqa: E712
+        epos_target = _numeric(row.get("epos_single_units", 0.0))
+
+        if len(base_items) == 1:
+            chosen = base_items.iloc[0]
+            qbo_qty = _numeric(chosen.get("qbo_qty_on_hand", 0.0))
+            qty_delta = epos_target - qbo_qty
+            flags: list[str] = []
+            if not account_id:
+                flags.append("missing_opening_balance_adjust_account")
+            eligible = abs(qty_delta) > 0 and not flags
+            details.append(
+                {
+                    "correction_type": "base_quantity_to_epos",
+                    "base_name": base,
+                    "qbo_item_id": str(chosen.get("Id", "") or "").strip(),
+                    "qbo_item_name": str(chosen.get("Name", "") or "").strip(),
+                    "qbo_qty": qbo_qty,
+                    "epos_expected_qty": epos_target,
+                    "qty_delta": qty_delta,
+                    "adjustment_account_id": account_id,
+                    "adjustment_account_name": account_name,
+                    "risk_flags": "|".join(flags),
+                    "risk_level": "low" if eligible else "medium",
+                    "recommended_action": "eligible_for_opening_balance_correction" if eligible else "manual_review_required",
+                    "apply_eligible": eligible,
+                    "item_id": str(chosen.get("Id", "") or "").strip(),
+                    "delta": qty_delta,
+                    "dry_run": False,
+                    "applied": False,
+                }
+            )
+        elif len(base_items) > 1:
+            details.append(
+                {
+                    "correction_type": "base_quantity_to_epos",
+                    "base_name": base,
+                    "qbo_item_id": "",
+                    "qbo_item_name": "",
+                    "qbo_qty": "",
+                    "epos_expected_qty": epos_target,
+                    "qty_delta": "",
+                    "adjustment_account_id": account_id,
+                    "adjustment_account_name": account_name,
+                    "risk_flags": "multiple_active_base_items",
+                    "risk_level": "high",
+                    "recommended_action": "manual_review_required",
+                    "apply_eligible": False,
+                    "item_id": "",
+                    "delta": 0.0,
+                    "dry_run": False,
+                    "applied": False,
+                }
+            )
+
+        for _, pack in pack_items.iterrows():
+            qbo_qty = _numeric(pack.get("qbo_qty_on_hand", 0.0))
+            qty_delta = -qbo_qty
+            flags = []
+            if not account_id:
+                flags.append("missing_opening_balance_adjust_account")
+            eligible = abs(qty_delta) > 0 and not flags
+            details.append(
+                {
+                    "correction_type": "pack_variant_zero",
+                    "base_name": base,
+                    "qbo_item_id": str(pack.get("Id", "") or "").strip(),
+                    "qbo_item_name": str(pack.get("Name", "") or "").strip(),
+                    "qbo_qty": qbo_qty,
+                    "epos_expected_qty": 0.0,
+                    "qty_delta": qty_delta,
+                    "adjustment_account_id": account_id,
+                    "adjustment_account_name": account_name,
+                    "risk_flags": "|".join(flags),
+                    "risk_level": "low" if eligible else "medium",
+                    "recommended_action": "eligible_for_pack_variant_zero" if eligible else "manual_review_required",
+                    "apply_eligible": eligible,
+                    "item_id": str(pack.get("Id", "") or "").strip(),
+                    "delta": qty_delta,
+                    "dry_run": False,
+                    "applied": False,
+                }
+            )
+
+    if include_qbo_absent_from_epos:
+        orphan_groups = qbo_rows[~qbo_rows["base_name_norm"].isin(seen_base_norms)]
+        for _, group in orphan_groups.groupby("base_name_norm", sort=False):
+            base = str(group.iloc[0].get("base_name") or "").strip()
+            base_items = group[group["qbo_has_pack"] == False]  # noqa: E712
+            pack_items = group[group["qbo_has_pack"] == True]  # noqa: E712
+            if len(base_items) == 1:
+                base_item = base_items.iloc[0]
+                qbo_qty = _numeric(base_item.get("qbo_qty_on_hand", 0.0))
+                qty_delta = -qbo_qty
+                flags: list[str] = []
+                if not account_id:
+                    flags.append("missing_opening_balance_adjust_account")
+                eligible = abs(qty_delta) > 0 and not flags
+                details.append(
+                    {
+                        "correction_type": "base_quantity_to_epos",
+                        "base_name": base,
+                        "qbo_item_id": str(base_item.get("Id", "") or "").strip(),
+                        "qbo_item_name": str(base_item.get("Name", "") or "").strip(),
+                        "qbo_qty": qbo_qty,
+                        "epos_expected_qty": 0.0,
+                        "qty_delta": qty_delta,
+                        "adjustment_account_id": account_id,
+                        "adjustment_account_name": account_name,
+                        "risk_flags": "|".join(flags),
+                        "risk_level": "low" if eligible else "medium",
+                        "recommended_action": "eligible_for_opening_balance_correction" if eligible else "manual_review_required",
+                        "apply_eligible": eligible,
+                        "item_id": str(base_item.get("Id", "") or "").strip(),
+                        "delta": qty_delta,
+                        "dry_run": False,
+                        "applied": False,
+                    }
+                )
+            elif len(base_items) > 1:
+                details.append(
+                    {
+                        "correction_type": "base_quantity_to_epos",
+                        "base_name": base,
+                        "qbo_item_id": "",
+                        "qbo_item_name": "",
+                        "qbo_qty": "",
+                        "epos_expected_qty": 0.0,
+                        "qty_delta": "",
+                        "adjustment_account_id": account_id,
+                        "adjustment_account_name": account_name,
+                        "risk_flags": "multiple_active_base_items",
+                        "risk_level": "high",
+                        "recommended_action": "manual_review_required",
+                        "apply_eligible": False,
+                        "item_id": "",
+                        "delta": 0.0,
+                        "dry_run": False,
+                        "applied": False,
+                    }
+                )
+            for _, pack in pack_items.iterrows():
+                qbo_qty = _numeric(pack.get("qbo_qty_on_hand", 0.0))
+                qty_delta = -qbo_qty
+                flags = []
+                if not account_id:
+                    flags.append("missing_opening_balance_adjust_account")
+                eligible = abs(qty_delta) > 0 and not flags
+                details.append(
+                    {
+                        "correction_type": "pack_variant_zero",
+                        "base_name": base,
+                        "qbo_item_id": str(pack.get("Id", "") or "").strip(),
+                        "qbo_item_name": str(pack.get("Name", "") or "").strip(),
+                        "qbo_qty": qbo_qty,
+                        "epos_expected_qty": 0.0,
+                        "qty_delta": qty_delta,
+                        "adjustment_account_id": account_id,
+                        "adjustment_account_name": account_name,
+                        "risk_flags": "|".join(flags),
+                        "risk_level": "low" if eligible else "medium",
+                        "recommended_action": "eligible_for_pack_variant_zero" if eligible else "manual_review_required",
+                        "apply_eligible": eligible,
+                        "item_id": str(pack.get("Id", "") or "").strip(),
+                        "delta": qty_delta,
+                        "dry_run": False,
+                        "applied": False,
+                    }
+                )
+    return details
+
+
+def _apply_opening_balance_corrections(
+    *,
+    cfg,
+    audit_df: pd.DataFrame,
+    qbo_item_rows: pd.DataFrame,
+    max_quantity_adjustments: int | None,
+    adjust_account_id: str | None,
+    txn_date: str,
+    dry_run: bool,
+    include_qbo_absent_from_epos: bool = False,
+) -> dict[str, Any]:
+    result = _empty_quantity_result()
+    account_id, account_name = _opening_balance_account(cfg, override_id=adjust_account_id)
+    details = _opening_balance_correction_candidates(
+        audit_df=audit_df,
+        qbo_item_rows=qbo_item_rows,
+        account_id=account_id,
+        account_name=account_name,
+        include_qbo_absent_from_epos=include_qbo_absent_from_epos,
+    )
+    if max_quantity_adjustments is not None and max_quantity_adjustments >= 0:
+        eligible_seen = 0
+        capped: list[dict[str, Any]] = []
+        for detail in details:
+            if bool(detail.get("apply_eligible")):
+                if eligible_seen >= int(max_quantity_adjustments):
+                    result["skipped_due_to_cap"] += 1
+                    continue
+                eligible_seen += 1
+            capped.append(detail)
+        details = capped
+
+    result["details"] = details
+    result["quantity_preview_candidates"] = len(details)
+    result["quantity_apply_eligible"] = sum(1 for d in details if bool(d.get("apply_eligible")))
+    result["quantity_blocked_by_risk"] = len(details) - int(result["quantity_apply_eligible"])
+    result["quantity_manual_review_required"] = sum(
+        1 for d in details if d.get("recommended_action") == "manual_review_required"
+    )
+    result["risk_flag_counts"] = _quantity_risk_flag_counts(details)
+
+    if not dry_run:
+        assert_inventory_apply_allowed(cfg, action="opening_balance_correction_apply")
+        verify_realm_match(cfg.company_key, cfg.realm_id)
+        token_mgr = TokenManager(cfg.company_key, cfg.realm_id)
+        run_lock = GlobalRunLock(holder=f"inventory_pipeline:{cfg.company_key}")
+        lock_result = run_lock.acquire()
+        if not lock_result.acquired:
+            raise RuntimeError(
+                f"another pipeline run is active ({lock_result.reason}); refusing opening balance corrections."
+            )
+    else:
+        token_mgr = None
+        run_lock = None
+
+    try:
+        for detail in details:
+            if not bool(detail.get("apply_eligible")):
+                result["skipped"] += 1
+                result["skipped_blocked_by_risk"] += 1
+                continue
+            item_id = str(detail.get("item_id") or "").strip()
+            qty_diff = float(detail.get("delta", 0.0) or 0.0)
+            if abs(qty_diff) <= 0:
+                continue
+            doc_number = build_inventory_adjustment_doc_number(txn_date=txn_date, item_id=item_id)
+            payload = build_inventory_adjustment_payload(
+                adjust_account_id=account_id,
+                txn_date=txn_date,
+                doc_number=doc_number,
+                private_note=(
+                    "OIAT baseline/opening-balance-style inventory quantity correction | "
+                    f"type={detail.get('correction_type')} | base={detail.get('base_name')!r} | "
+                    f"qbo_item_qty={detail.get('qbo_qty')} | target_qty={detail.get('epos_expected_qty')} | "
+                    f"delta={qty_diff}"
+                )[:950],
+                lines=[{"item_id": item_id, "qty_diff": qty_diff}],
+            )
+            if dry_run:
+                result["planned"] += 1
+                detail["dry_run"] = True
+                continue
+            assert token_mgr is not None
+            result["attempted"] += 1
+            post_inventory_adjustment(token_mgr, cfg.realm_id, payload)
+            result["posted"] += 1
+            detail["applied"] = True
+    finally:
+        if run_lock is not None:
+            run_lock.release()
+
+    if result["posted"] > 0:
+        mark_qbo_snapshot_stale(cfg.company_key, reason="inventory_pipeline_opening_balance_corrections_posted")
+        result["changed_qbo"] = True
+    return result
+
+
 def _apply_exact_match_quantity_adjustments(
     *,
     cfg,
@@ -839,6 +1177,30 @@ def _write_quantity_preview_reports(
         handle.write("\n")
     with open(csv_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=QUANTITY_PREVIEW_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+    return json_path, csv_path
+
+
+def _write_opening_balance_correction_reports(
+    *,
+    company_key: str,
+    details: list[dict[str, Any]],
+    output_dir: str | None = None,
+) -> tuple[Path, Path] | None:
+    if not details:
+        return None
+    directory = Path(output_dir).expanduser() if output_dir else inventory_pipeline_reports_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%H%M%S")
+    json_path = directory / f"inventory_opening_balance_correction_{company_key}_{stamp}.json"
+    csv_path = directory / f"inventory_opening_balance_correction_{company_key}_{stamp}.csv"
+    rows = [{field: detail.get(field, "") for field in BASELINE_CORRECTION_FIELDNAMES} for detail in details]
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(rows, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=BASELINE_CORRECTION_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
     return json_path, csv_path
@@ -2010,22 +2372,7 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         )
         child_reports["post_catalog_audit"] = str(audit_after_catalog.report_path)
 
-    quantity_result = {
-        "posted": 0,
-        "planned": 0,
-        "skipped": 0,
-        "skipped_due_to_cap": 0,
-        "skipped_non_exact": 0,
-        "skipped_blocked_by_risk": 0,
-        "quantity_preview_candidates": 0,
-        "quantity_apply_eligible": 0,
-        "quantity_blocked_by_risk": 0,
-        "quantity_manual_review_required": 0,
-        "risk_flag_counts": {},
-        "attempted": 0,
-        "changed_qbo": False,
-        "details": [],
-    }
+    quantity_result = _empty_quantity_result()
     if mode_flags["quantity_preview_enabled"] or mode_flags["quantity_apply_enabled"]:
         quantity_result = _apply_exact_match_quantity_adjustments(
             cfg=cfg,
@@ -2048,6 +2395,26 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
             quantity_json, quantity_csv = quantity_reports
             child_reports["quantity_preview_json"] = str(quantity_json)
             child_reports["quantity_preview_csv"] = str(quantity_csv)
+    if mode_flags["baseline_correction_preview_enabled"] or mode_flags["baseline_correction_apply_enabled"]:
+        quantity_result = _apply_opening_balance_corrections(
+            cfg=cfg,
+            audit_df=audit_after_catalog.report,
+            qbo_item_rows=qbo_item_rows,
+            max_quantity_adjustments=max_quantity_adjustments,
+            adjust_account_id=args.adjust_account_id,
+            txn_date=txn_date,
+            dry_run=bool(args.dry_run or mode_flags["baseline_correction_preview_enabled"]),
+            include_qbo_absent_from_epos=not bool(categories or product_filter or base_names),
+        )
+        correction_reports = _write_opening_balance_correction_reports(
+            company_key=cfg.company_key,
+            details=list(quantity_result.get("details") or []),
+            output_dir=args.summary_output_dir,
+        )
+        if correction_reports is not None:
+            correction_json, correction_csv = correction_reports
+            child_reports["opening_balance_correction_json"] = str(correction_json)
+            child_reports["opening_balance_correction_csv"] = str(correction_csv)
 
     final = audit_after_catalog
     if quantity_result["changed_qbo"]:
@@ -2150,10 +2517,13 @@ def run_inventory_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "qbo_write_attempted": bool(
             (mode_flags["catalog_apply_enabled"] and int(catalog_result.get("applied", 0) or 0) > 0)
             or (mode_flags["quantity_apply_enabled"] and int(quantity_result.get("posted", 0) or 0) > 0)
+            or (mode_flags["baseline_correction_apply_enabled"] and int(quantity_result.get("posted", 0) or 0) > 0)
         ),
         "qbo_write_blocked": False,
         "catalog_apply_enabled": bool(mode_flags["catalog_apply_enabled"] and not args.dry_run),
-        "quantity_apply_enabled": bool(mode_flags["quantity_apply_enabled"] and not args.dry_run),
+        "quantity_apply_enabled": bool(
+            (mode_flags["quantity_apply_enabled"] or mode_flags["baseline_correction_apply_enabled"]) and not args.dry_run
+        ),
         "missing_item_create_enabled": False,
         "scope": scope_text,
         "dry_run": bool(args.dry_run),

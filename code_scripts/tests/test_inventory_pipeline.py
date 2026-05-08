@@ -65,6 +65,8 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
             display_name="Company A",
             realm_id="123",
             inventory_adjustment_account_id="99",
+            opening_balance_adjust_account_id="73",
+            opening_balance_adjust_account_name="300100 - Opening Balance Equity",
             inventory_max_qty_delta=None,
             _data={},
             slack_webhook_url="",
@@ -1029,6 +1031,124 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertEqual(result["skipped_blocked_by_risk"], 1)
         self.assertEqual(result["quantity_apply_eligible"], 1)
         self.assertEqual(result["quantity_blocked_by_risk"], 1)
+
+    def test_opening_balance_preview_corrects_base_to_epos_and_pack_to_zero(self):
+        qbo_rows = pd.DataFrame(
+            [
+                {
+                    "base_name": "Widget 1",
+                    "base_name_norm": "widget 1",
+                    "Name": "Widget 1",
+                    "Id": "1",
+                    "qbo_qty_on_hand": 2.0,
+                    "qbo_has_pack": False,
+                    "PurchaseCost": 0.0,
+                },
+                {
+                    "base_name": "Widget 1",
+                    "base_name_norm": "widget 1",
+                    "Name": "Widget 1*24",
+                    "Id": "2",
+                    "qbo_qty_on_hand": 4.0,
+                    "qbo_has_pack": True,
+                    "PurchaseCost": 0.0,
+                },
+            ]
+        )
+
+        result = inventory_pipeline._apply_opening_balance_corrections(
+            cfg=self._cfg(),
+            audit_df=self._quantity_report(),
+            qbo_item_rows=qbo_rows,
+            max_quantity_adjustments=None,
+            adjust_account_id=None,
+            txn_date="2026-04-28",
+            dry_run=True,
+        )
+
+        self.assertEqual(result["planned"], 2)
+        self.assertEqual(result["quantity_apply_eligible"], 2)
+        base, pack = result["details"]
+        self.assertEqual(base["correction_type"], "base_quantity_to_epos")
+        self.assertEqual(base["qbo_item_id"], "1")
+        self.assertEqual(base["qty_delta"], 3.0)
+        self.assertEqual(pack["correction_type"], "pack_variant_zero")
+        self.assertEqual(pack["qbo_item_id"], "2")
+        self.assertEqual(pack["epos_expected_qty"], 0.0)
+        self.assertEqual(pack["qty_delta"], -4.0)
+        self.assertEqual(pack["adjustment_account_id"], "73")
+        self.assertEqual(pack["adjustment_account_name"], "300100 - Opening Balance Equity")
+
+    def test_opening_balance_apply_posts_with_existing_inventory_apply_guard(self):
+        lock = mock.Mock()
+        lock.acquire.return_value = SimpleNamespace(acquired=True, reason="")
+        with mock.patch.object(inventory_pipeline, "verify_realm_match"), \
+             mock.patch.object(inventory_pipeline, "TokenManager"), \
+             mock.patch.object(inventory_pipeline, "GlobalRunLock", return_value=lock), \
+             mock.patch.object(inventory_pipeline, "post_inventory_adjustment", return_value={}) as post_mock, \
+             mock.patch.object(inventory_pipeline, "mark_qbo_snapshot_stale"):
+            result = inventory_pipeline._apply_opening_balance_corrections(
+                cfg=self._cfg(),
+                audit_df=self._quantity_report(),
+                qbo_item_rows=self._qbo_rows(),
+                max_quantity_adjustments=None,
+                adjust_account_id=None,
+                txn_date="2026-04-28",
+                dry_run=False,
+            )
+
+        self.assertEqual(result["posted"], 1)
+        payload = post_mock.call_args.args[2]
+        self.assertEqual(payload["AdjustAccountRef"]["value"], "73")
+        self.assertIn("baseline/opening-balance-style inventory quantity correction", payload["PrivateNote"])
+
+    def test_opening_balance_full_company_includes_qbo_items_absent_from_epos(self):
+        qbo_rows = pd.DataFrame(
+            [
+                {
+                    "base_name": "EPOS Widget",
+                    "base_name_norm": "epos widget",
+                    "Name": "EPOS Widget",
+                    "Id": "1",
+                    "qbo_qty_on_hand": 2.0,
+                    "qbo_has_pack": False,
+                },
+                {
+                    "base_name": "QBO Only",
+                    "base_name_norm": "qbo only",
+                    "Name": "QBO Only",
+                    "Id": "2",
+                    "qbo_qty_on_hand": 7.0,
+                    "qbo_has_pack": False,
+                },
+            ]
+        )
+        audit = pd.DataFrame(
+            [
+                {
+                    "base_name": "EPOS Widget",
+                    "epos_single_units": 5.0,
+                    "qbo_qty_on_hand": 2.0,
+                    "status": "needs_adjustment",
+                    "catalog_issue_type": "exact_name_match",
+                }
+            ]
+        )
+
+        result = inventory_pipeline._apply_opening_balance_corrections(
+            cfg=self._cfg(),
+            audit_df=audit,
+            qbo_item_rows=qbo_rows,
+            max_quantity_adjustments=None,
+            adjust_account_id=None,
+            txn_date="2026-04-28",
+            dry_run=True,
+            include_qbo_absent_from_epos=True,
+        )
+
+        absent = [d for d in result["details"] if d["base_name"] == "QBO Only"][0]
+        self.assertEqual(absent["epos_expected_qty"], 0.0)
+        self.assertEqual(absent["qty_delta"], -7.0)
 
     def test_audit_only_summary_includes_mode_write_fields(self):
         with tempfile.TemporaryDirectory() as td:
