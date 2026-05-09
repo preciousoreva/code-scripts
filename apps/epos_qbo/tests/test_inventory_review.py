@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from django.conf import settings
+from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from django.template.loader import render_to_string
 from django.test import TestCase
@@ -12,7 +13,12 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.epos_qbo import views
-from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
+from apps.epos_qbo.models import (
+    CompanyConfigRecord,
+    InventoryReviewAcknowledgement,
+    RunArtifact,
+    RunJob,
+)
 from apps.epos_qbo.services.inventory_review import parse_inventory_review_csv
 
 
@@ -109,6 +115,10 @@ class InventoryReviewViewTests(TestCase):
 
     def _login(self):
         self.client.login(username="op", password="pw")
+
+    def _grant_trigger_permission(self):
+        permission = Permission.objects.get(codename="can_trigger_runs", content_type__app_label="epos_qbo")
+        self.user.user_permissions.add(permission)
 
     def _source_hash(self) -> str:
         self._source_hash_counter += 1
@@ -238,6 +248,85 @@ class InventoryReviewViewTests(TestCase):
             reverse("epos_qbo:company_inventory_review", kwargs={"company_key": "company_a"}),
             html,
         )
+
+    def test_mark_reviewed_clears_overview_warning_for_current_inventory_artifact(self):
+        self._login()
+        self._grant_trigger_permission()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = Path(td) / "inventory_audit_company_a_final.csv"
+            final_audit.write_text("base_name,status\nBlocked,missing_in_qbo\n", encoding="utf-8")
+            _job, artifact = self._create_inventory_artifact(final_audit=final_audit)
+
+            response = self.client.post(
+                reverse("epos_qbo:company_inventory_review_mark_reviewed", kwargs={"company_key": "company_a"}),
+                {"artifact_id": str(artifact.id)},
+            )
+
+            self.assertEqual(response.status_code, 302)
+            acknowledgement = InventoryReviewAcknowledgement.objects.get(artifact=artifact)
+            self.assertEqual(acknowledgement.company_key, "company_a")
+            self.assertEqual(acknowledgement.reviewed_by, self.user)
+
+            company_row = next(row for row in self._overview_company_rows() if row["company_key"] == "company_a")
+            html = render_to_string(
+                "components/company_list.html",
+                {
+                    "companies": [company_row],
+                    "revenue_company_options": [],
+                    "revenue_period_options": [],
+                    "revenue_chart_payload": {},
+                },
+            )
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Reviewed")
+        self.assertEqual(company_row["inventory_status"]["severity"], "healthy")
+        self.assertFalse(company_row["inventory_review_required"])
+        self.assertIn("Inventory: Reviewed", html)
+        self.assertNotIn("Review 139 items", html)
+
+    def test_new_inventory_artifact_reopens_review_after_previous_artifact_was_reviewed(self):
+        self._login()
+        self._grant_trigger_permission()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            first_audit = Path(td) / "inventory_audit_company_a_first.csv"
+            first_audit.write_text("base_name,status\nBlocked,missing_in_qbo\n", encoding="utf-8")
+            _job, first_artifact = self._create_inventory_artifact(final_audit=first_audit)
+            self.client.post(
+                reverse("epos_qbo:company_inventory_review_mark_reviewed", kwargs={"company_key": "company_a"}),
+                {"artifact_id": str(first_artifact.id)},
+            )
+
+            second_audit = Path(td) / "inventory_audit_company_a_second.csv"
+            second_audit.write_text("base_name,status\nStill Blocked,missing_in_qbo\n", encoding="utf-8")
+            self._create_inventory_artifact(final_audit=second_audit, blocked_items=7, in_sync=3338)
+
+            company_row = next(row for row in self._overview_company_rows() if row["company_key"] == "company_a")
+
+        self.assertEqual(company_row["inventory_status"]["label"], "Needs review")
+        self.assertTrue(company_row["inventory_review_required"])
+        self.assertEqual(company_row["inventory_status"]["blocked_items"], 7)
+
+    def test_review_page_shows_acknowledged_state_after_marking_reviewed(self):
+        self._login()
+        self._grant_trigger_permission()
+        with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
+            final_audit = Path(td) / "inventory_audit_company_a_final.csv"
+            final_audit.write_text("base_name,status\nBlocked,missing_in_qbo\n", encoding="utf-8")
+            _job, artifact = self._create_inventory_artifact(final_audit=final_audit)
+            self.client.post(
+                reverse("epos_qbo:company_inventory_review_mark_reviewed", kwargs={"company_key": "company_a"}),
+                {"artifact_id": str(artifact.id)},
+            )
+
+            response = self.client.get(
+                reverse("epos_qbo:company_inventory_review", kwargs={"company_key": "company_a"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Reviewed", html)
+        self.assertIn("Dashboard warning is cleared for this audit only.", html)
+        self.assertNotIn("Mark Reviewed", html)
 
     def test_overview_omits_review_link_for_inventory_disabled_company(self):
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:

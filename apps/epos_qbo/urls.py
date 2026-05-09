@@ -36,6 +36,11 @@ urlpatterns = [
         name="company_inventory_review",
     ),
     path(
+        "companies/<slug:company_key>/inventory/review/mark-reviewed/",
+        views.company_inventory_review_mark_reviewed,
+        name="company_inventory_review_mark_reviewed",
+    ),
+    path(
         "companies/<slug:company_key>/inventory/review/retry-catalog-cleanup/",
         views.company_inventory_retry_catalog_cleanup,
         name="company_inventory_retry_catalog_cleanup",

@@ -51,6 +51,7 @@ from .forms import (
 from .models import (
     CompanyConfigRecord,
     DashboardUserPreference,
+    InventoryReviewAcknowledgement,
     PortalSettings,
     RunArtifact,
     RunJob,
@@ -720,6 +721,17 @@ def _has_non_in_sync_inventory_rows(summary: dict) -> bool:
     return False
 
 
+def _inventory_review_acknowledgement_for_artifact(
+    artifact: RunArtifact | None,
+) -> InventoryReviewAcknowledgement | None:
+    if artifact is None:
+        return None
+    try:
+        return artifact.inventory_review_acknowledgement
+    except InventoryReviewAcknowledgement.DoesNotExist:
+        return None
+
+
 def _sales_status_for_company(
     *,
     latest_job: RunJob | None,
@@ -846,6 +858,20 @@ def _inventory_status_for_company(
     )
     clean = products_checked > 0 and in_sync == products_checked and blocked == 0 and still_needs_review == 0
     if needs_review:
+        acknowledgement = _inventory_review_acknowledgement_for_artifact(latest_artifact)
+        if acknowledgement is not None:
+            return {
+                "label": "Reviewed",
+                "severity": "healthy",
+                "last_sync": last_sync,
+                "products_checked": products_checked,
+                "blocked_items": blocked,
+                "updates_applied": updates,
+                "subtext": "Manual inventory review acknowledged.",
+                "reviewed_at": acknowledgement.reviewed_at,
+                "reviewed_by": acknowledgement.reviewed_by,
+                "inventory_review_acknowledged": True,
+            }
         return {
             "label": "Needs review",
             "severity": "warning",
@@ -4138,6 +4164,7 @@ def company_inventory_review(request, company_key):
             empty_message = "No inventory review is currently required for this company."
         else:
             summary = _inventory_summary_from_artifact(artifact)
+            acknowledgement = _inventory_review_acknowledgement_for_artifact(artifact)
             final_audit_raw = _artifact_report_path_value(artifact, "final_audit")
             if not final_audit_raw:
                 empty_message = "No final inventory audit was found for the latest inventory run."
@@ -4167,14 +4194,19 @@ def company_inventory_review(request, company_key):
                 parsed_healthy_rows,
             )
             if rows or summary_cards["blocked_items"] > 0 or _has_non_in_sync_inventory_rows(summary):
-                status_label = "Needs review"
-                status_color = "amber"
+                if acknowledgement is not None:
+                    status_label = "Reviewed"
+                    status_color = "emerald"
+                else:
+                    status_label = "Needs review"
+                    status_color = "amber"
             else:
                 status_label = "Healthy"
                 status_color = "emerald"
 
     if not inventory_enabled or artifact is None:
         summary_cards = _inventory_review_summary_cards(summary, rows, parsed_total_rows, parsed_healthy_rows)
+        acknowledgement = None
 
     report_links = _inventory_review_report_links(artifact)
     run = artifact.run_job if artifact and artifact.run_job_id else None
@@ -4236,6 +4268,12 @@ def company_inventory_review(request, company_key):
             "parse_error": parse_error,
             "has_negative_summary": has_negative_summary,
             "actions": actions,
+            "acknowledgement": acknowledgement,
+            "is_acknowledged": acknowledgement is not None,
+            "acknowledge_url": reverse(
+                "epos_qbo:company_inventory_review_mark_reviewed",
+                kwargs={"company_key": company.company_key},
+            ) if artifact else "",
         },
     }
     context.update(_nav_context())
@@ -4255,6 +4293,59 @@ def company_inventory_review(request, company_key):
         )
     )
     return render(request, "epos_qbo/company_inventory_review.html", context)
+
+
+def _inventory_review_acknowledgement_snapshot(summary: dict) -> dict:
+    counts = summary.get("final_status_counts") if isinstance(summary.get("final_status_counts"), dict) else {}
+    return {
+        "products_checked": _safe_int_stat(summary, "products_checked"),
+        "in_sync": _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct")),
+        "blocked_items": _safe_int_stat(summary, "blocked_items"),
+        "still_needs_review": _safe_int_stat(summary, "still_needs_review"),
+        "inventory_mode": str(summary.get("inventory_mode") or "").strip(),
+        "final_status_counts": counts,
+    }
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_review_mark_reviewed(request, company_key):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    if not _company_inventory_enabled(company):
+        messages.error(request, "Inventory is not enabled for this company.")
+        return redirect("epos_qbo:company-detail", company_key=company.company_key)
+
+    artifact = _latest_inventory_review_artifact(company.company_key)
+    if artifact is None:
+        messages.error(request, "No inventory final audit is available for this company yet.")
+        return redirect(review_url)
+
+    posted_artifact_id = str(request.POST.get("artifact_id") or "").strip()
+    if posted_artifact_id and posted_artifact_id != str(artifact.id):
+        messages.error(request, "The inventory review changed. Refresh the page and review the latest audit before marking it reviewed.")
+        return redirect(review_url)
+
+    summary = _inventory_summary_from_artifact(artifact)
+    InventoryReviewAcknowledgement.objects.update_or_create(
+        artifact=artifact,
+        defaults={
+            "company_key": company.company_key,
+            "run_job": artifact.run_job if artifact.run_job_id else None,
+            "reviewed_by": request.user,
+            "reviewed_at": timezone.now(),
+            "summary_json": _inventory_review_acknowledgement_snapshot(summary),
+        },
+    )
+    messages.success(
+        request,
+        "Inventory review marked reviewed. The dashboard warning will reopen automatically after the next inventory audit if issues remain.",
+    )
+    return redirect(review_url)
 
 
 def _inventory_review_action_context(request, company_key: str):

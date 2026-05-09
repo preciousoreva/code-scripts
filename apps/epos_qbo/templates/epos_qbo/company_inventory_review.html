@@ -49,6 +49,16 @@
                 Run Detail
             </a>
             {% endif %}
+            {% if review.status_label == "Needs review" and review.acknowledge_url and perms.epos_qbo.can_trigger_runs %}
+            <form method="post" action="{{ review.acknowledge_url }}">
+                {% csrf_token %}
+                <input type="hidden" name="artifact_id" value="{{ review.artifact.id }}">
+                <button type="submit" class="btn btn-secondary">
+                    <iconify-icon icon="solar:check-circle-linear" width="16"></iconify-icon>
+                    Mark Reviewed
+                </button>
+            </form>
+            {% endif %}
             {% if review.final_audit_download_url %}
             <a href="{{ review.final_audit_download_url }}" class="btn btn-primary">
                 <iconify-icon icon="solar:download-linear" width="16"></iconify-icon>
@@ -73,6 +83,20 @@
     {% elif review.parse_error %}
     <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
         {{ review.parse_error }}
+    </div>
+    {% endif %}
+
+    {% if review.is_acknowledged %}
+    <div class="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 p-4">
+        <div class="flex items-start gap-3">
+            <iconify-icon icon="solar:check-circle-linear" width="20" class="text-emerald-600 dark:text-emerald-400 mt-0.5"></iconify-icon>
+            <div class="text-sm text-emerald-900 dark:text-emerald-200">
+                <p>
+                    This inventory audit was marked reviewed{% if review.acknowledgement.reviewed_by %} by {{ review.acknowledgement.reviewed_by.get_username }}{% endif %}{% if review.acknowledgement.reviewed_at %} on {{ review.acknowledgement.reviewed_at|date:"M j, Y H:i" }}{% endif %}.
+                </p>
+                <p class="mt-1">Dashboard warning is cleared for this audit only. A newer inventory audit will reopen review if issues remain.</p>
+            </div>
+        </div>
     </div>
     {% endif %}
 

@@ -528,6 +528,46 @@ class RunArtifact(models.Model):
         return "slate"
 
 
+class InventoryReviewAcknowledgement(models.Model):
+    """Operator acknowledgement for a specific inventory review artifact.
+
+    This is intentionally tied to the artifact, not the company alone, so a
+    newer inventory audit automatically reopens review if it still finds issues.
+    """
+
+    company_key = models.SlugField(max_length=64)
+    artifact = models.OneToOneField(
+        RunArtifact,
+        on_delete=models.CASCADE,
+        related_name="inventory_review_acknowledgement",
+    )
+    run_job = models.ForeignKey(
+        RunJob,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="inventory_review_acknowledgements",
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="inventory_review_acknowledgements",
+    )
+    reviewed_at = models.DateTimeField(default=timezone.now)
+    summary_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-reviewed_at"]
+        indexes = [
+            models.Index(fields=["company_key", "-reviewed_at"], name="epos_qbo_inv_ack_company_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Inventory review acknowledged for {self.company_key} artifact {self.artifact_id}"
+
+
 class RunLock(models.Model):
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
     active = models.BooleanField(default=False)
