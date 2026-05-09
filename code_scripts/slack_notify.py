@@ -348,6 +348,16 @@ def _summarize_blockers_csv(repo_root: Path, company_key: str, target_date: str)
         return None
 
 
+def _inventory_start_date_blockers_summary(summary: Dict[str, Any]) -> Optional[str]:
+    """Return the current run's InvStartDate blocker summary when the report exists."""
+    target_date = str(summary.get("target_date") or "").strip()
+    company_key = str(summary.get("company_key") or "").strip()
+    if not target_date or not company_key:
+        return None
+    repo_root = Path(__file__).resolve().parent
+    return _summarize_blockers_csv(repo_root, company_key, target_date)
+
+
 def format_run_summary(
     pipeline_name: str,
     log_file: Path,
@@ -399,7 +409,11 @@ def format_run_summary(
     
     # Failure reason
     if status == "failure" and error:
-        reason = extract_error_reason(error)
+        blockers_summary = _inventory_start_date_blockers_summary(summary)
+        if blockers_summary:
+            reason = "QuickBooks rejected one or more receipts because an inventory item's InvStartDate is after the receipt date (QBO 6270)."
+        else:
+            reason = extract_error_reason(error)
         message += f"• Reason: {reason}\n"
     
     # Row statistics (for update / non-success)
@@ -524,6 +538,7 @@ def format_run_summary(
         items_patched = upload_stats.get("items_patched_count", 0)
         inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
         inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
+        inventory_start_date_issues = upload_stats.get("inventory_start_date_issues_count", 0)
         if items_created > 0 or items_patched > 0 or inventory_warnings > 0 or inventory_rejections > 0:
             parts = []
             if inventory_items_created > 0:
@@ -537,6 +552,12 @@ def format_run_summary(
             if inventory_rejections > 0:
                 parts.append(f"{inventory_rejections} rejections")
             message += f"• Items: {', '.join(parts)}\n"
+        target_date = summary.get("target_date", "")
+        if inventory_start_date_issues > 0 and target_date:
+            message += f"• InvStartDate: {inventory_start_date_issues} item(s) have InvStartDate after {target_date}\n"
+        blockers_summary = _inventory_start_date_blockers_summary(summary)
+        if blockers_summary:
+            message += f"• InvStartDate blockers (QBO 6270): {blockers_summary}\n"
     
     # Trading day boundary stats (if available)
     trading_day_stats = summary.get("trading_day_stats")

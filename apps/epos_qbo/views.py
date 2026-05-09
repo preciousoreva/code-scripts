@@ -4343,7 +4343,7 @@ def company_inventory_review_mark_reviewed(request, company_key):
     )
     messages.success(
         request,
-        "Inventory review marked reviewed. The dashboard warning will reopen automatically after the next inventory audit if issues remain.",
+        "Items have been marked reviewed.",
     )
     return redirect(review_url)
 

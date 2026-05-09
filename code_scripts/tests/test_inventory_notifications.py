@@ -193,6 +193,36 @@ class InventoryAuditSummaryTest(unittest.TestCase):
 
         self.assertNotIn("Run: http", msg)
 
+    def test_sales_failure_surfaces_invstart_blockers_when_report_exists(self):
+        blockers = "1 blocker row(s) — e.g. WAW MULTI-USE DETERGENT800g (2026-05-02)\n  Report: `reports/inventory_start_date_blockers_company_a_2026-05-01.csv`"
+        with mock.patch("code_scripts.slack_notify._summarize_blockers_csv", return_value=blockers):
+            msg = format_run_summary(
+                "AKPONORA VENTURES LTD. -> Sales Receipt Pipeline",
+                Path("/tmp/pipeline.log"),
+                {
+                    "target_date": "2026-05-01",
+                    "company_key": "company_a",
+                    "rows_total": 1569,
+                    "rows_kept": 1569,
+                    "rows_spilled": 0,
+                    "upload_stats": {
+                        "attempted": 5,
+                        "uploaded": 3,
+                        "skipped": 0,
+                        "failed": 2,
+                        "inventory_items_created_count": 1,
+                        "items_created_count": 1,
+                    },
+                },
+                status="failure",
+                error="[ERROR] Phase 3: Upload to QBO (qbo_upload) failed with exit code 1",
+            )
+
+        self.assertIn("QBO 6270", msg)
+        self.assertIn("InvStartDate is after the receipt date", msg)
+        self.assertIn("WAW MULTI-USE DETERGENT800g", msg)
+        self.assertNotIn("Check API credentials and data format", msg)
+
     def test_failure_branch_includes_error_and_red_x(self):
         msg = format_inventory_audit_summary(
             company_display_name="Co A", company_key="company_a",
