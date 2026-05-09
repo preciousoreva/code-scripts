@@ -170,13 +170,15 @@ class InventoryTriggerViewTests(TestCase):
         self.assertIn(">Inventory", html)
         self.assertEqual(html.count('role="tab"'), 2)
         self.assertIn(f'action="{reverse("epos_qbo:run-trigger-inventory")}"', html)
-        self.assertIn("Run Inventory Audit", html)
-        self.assertIn("Preview Quantity Adjustments", html)
-        self.assertIn("Catalog Cleanup Plan", html)
+        self.assertIn("Run Inventory Review", html)
+        self.assertNotIn("Run Inventory Audit", html)
+        self.assertNotIn("Preview Quantity Adjustments", html)
+        self.assertNotIn("Catalog Cleanup Plan", html)
         self.assertIn(
-            "Production inventory apply is blocked by default. Audit and preview are safe.",
+            "Run one read-only inventory review.",
             html,
         )
+        self.assertIn("no QBO inventory writes are made", html)
         self.assertIn("aria-controls=\"sales-run-panel\"", html)
         self.assertIn("aria-controls=\"inventory-run-panel\"", html)
         self.assertNotIn("Catalog fixes limit", html)
@@ -187,6 +189,21 @@ class InventoryTriggerViewTests(TestCase):
         self.assertNotIn("Max catalog fixes per run", html)
         self.assertNotIn("Max quantity adjustments per run", html)
         self.assertNotIn("Catalog Apply", html)
+
+    def test_company_detail_consolidates_inventory_actions(self):
+        self.client.login(username="op", password="pw")
+        response = self.client.get(
+            reverse("epos_qbo:company-detail", kwargs={"company_key": "company_a"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn("Run Inventory Review", html)
+        self.assertIn("Run Sales Sync", html)
+        self.assertNotIn("Run Inventory Audit", html)
+        self.assertNotIn("Preview Quantity Adjustments", html)
+        self.assertNotIn("Preview Opening Balance Correction", html)
+        self.assertNotIn("Catalog Cleanup Plan", html)
 
     def test_runs_page_hides_inventory_trigger_when_no_company_enabled(self):
         CompanyConfigRecord.objects.update(

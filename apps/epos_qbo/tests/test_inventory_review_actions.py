@@ -225,7 +225,7 @@ class InventoryReviewActionViewTests(TestCase):
         )
         return job, artifact
 
-    def test_review_page_renders_resolve_review_items_section(self):
+    def test_review_page_renders_consolidated_review_results_section(self):
         self._login()
         with TemporaryDirectory(dir=str(settings.BASE_DIR)) as td:
             final_audit = _write_final_audit(Path(td))
@@ -237,11 +237,12 @@ class InventoryReviewActionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.content.decode("utf-8")
-        self.assertIn("Resolve Review Items", html)
+        self.assertIn("Inventory Review Results", html)
+        self.assertIn("This review combines catalog issues", html)
         self.assertIn("Manual review required", html)
         self.assertIn("Use starting-value correction", html)
-        self.assertIn("Preview items", html)
-        self.assertIn("Inventory quantity apply is removed.", html)
+        self.assertIn("Preview missing items", html)
+        self.assertIn("No QBO inventory writes are made from this page.", html)
         self.assertNotIn(
             reverse(
                 "epos_qbo:company_inventory_retry_catalog_cleanup_confirm",

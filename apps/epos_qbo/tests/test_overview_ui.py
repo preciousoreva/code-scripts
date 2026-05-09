@@ -364,7 +364,7 @@ class OverviewUIContextTests(TestCase):
 
         company_row = self._company_row()
 
-        self.assertEqual(company_row["inventory_status"]["label"], "Audit only")
+        self.assertEqual(company_row["inventory_status"]["label"], "Inventory review")
         self.assertEqual(company_row["inventory_status"]["severity"], "healthy")
 
     def test_latest_inventory_status_uses_preview_mode_label(self):

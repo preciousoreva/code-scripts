@@ -95,7 +95,7 @@ class InventoryTriggerForm(forms.Form):
     """Operator-facing form for the unified Inventory pipeline."""
 
     SAFE_INVENTORY_MODE_CHOICES = [
-        ("audit_only", "Run Inventory Audit"),
+        ("audit_only", "Run Inventory Review"),
         ("quantity_preview", "Preview Quantity Adjustments"),
         ("opening_balance_correction_preview", "Preview Opening Balance Correction"),
         ("catalog_plan_only", "Catalog Cleanup Plan"),

@@ -177,20 +177,20 @@ RUN_ARTIFACT_REPORT_ORDER = [
 ]
 RUN_ARTIFACT_REPORT_SUFFIXES = {".csv", ".json"}
 INVENTORY_MODE_LABELS = {
-    "audit_only": "Audit only",
+    "audit_only": "Inventory review",
     "quantity_preview": "Preview only",
     "opening_balance_correction_preview": "Opening balance correction preview",
     "catalog_plan_only": "Catalog plan only",
     "review_create_missing_items": "Missing item creation",
 }
 INVENTORY_MODE_WRITE_INTENT_LABELS = {
-    "audit_only": "No QBO writes",
+    "audit_only": "No QBO inventory writes",
     "quantity_preview": "Preview quantity adjustments",
     "opening_balance_correction_preview": "Preview opening balance correction",
     "catalog_plan_only": "Plan catalog cleanup",
     "review_create_missing_items": "Create missing inventory items",
 }
-INVENTORY_SAFE_APPLY_COPY = "Inventory quantity apply is removed. Audit, preview, and manual correction exports are safe."
+INVENTORY_SAFE_APPLY_COPY = "Inventory review is read-only. Quantity apply is removed; use the review results for manual QBO corrections."
 
 
 def _unique_existing_resolved_dirs(paths: list[Path]) -> list[Path]:

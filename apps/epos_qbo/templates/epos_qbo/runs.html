@@ -121,7 +121,7 @@
              x-data="inventoryForm()">
         <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory</h2>
         <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
-            Production inventory apply is blocked by default. Audit and preview are safe.
+            Run one read-only inventory review. Results are shown in the company Inventory Review page; no QBO inventory writes are made.
         </p>
         {% if inventory_companies %}
         <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
@@ -156,9 +156,10 @@
             </div>
 
             <div class="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2">
-                <button type="submit" name="mode" value="audit_only" class="btn btn-secondary justify-center">Run Inventory Audit</button>
-                <button type="submit" name="mode" value="quantity_preview" class="btn btn-secondary justify-center">Preview Quantity Adjustments</button>
-                <button type="submit" name="mode" value="catalog_plan_only" class="btn btn-primary justify-center">Catalog Cleanup Plan</button>
+                <button type="submit" name="mode" value="audit_only" class="btn btn-primary justify-center">
+                    <iconify-icon icon="solar:clipboard-check-linear" width="18"></iconify-icon>
+                    Run Inventory Review
+                </button>
             </div>
         </form>
         {% else %}
