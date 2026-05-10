@@ -1083,6 +1083,9 @@ def build_audit_report(
         merged[col] = merged[col].fillna("")
 
     merged["delta"] = merged["epos_single_units"] - merged["qbo_qty_on_hand"]
+    merged["qbo_current_starting_qty"] = ""
+    merged["qbo_new_initial_qty_to_enter"] = ""
+    merged["qbo_starting_qty_source"] = ""
 
     def classify(row: pd.Series) -> str:
         if row["qbo_item_count_for_base"] <= 0:
@@ -1145,6 +1148,9 @@ def build_audit_report(
         "epos_single_units",
         "qbo_qty_on_hand",
         "delta",
+        "qbo_current_starting_qty",
+        "qbo_new_initial_qty_to_enter",
+        "qbo_starting_qty_source",
         "status",
         "catalog_issue_type",
         "catalog_issue_detail",

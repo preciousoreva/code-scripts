@@ -89,6 +89,25 @@ class InventoryReviewParserTests(TestCase):
         self.assertEqual(result.rows[0]["delta"], "3")
         self.assertEqual(result.rows[1]["raw"]["risk_flags"], "negative_qbo_qty")
 
+    def test_parser_computes_new_initial_qty_when_starting_qty_is_available(self):
+        with TemporaryDirectory() as td:
+            final_audit = Path(td) / "final.csv"
+            final_audit.write_text(
+                "\n".join(
+                    [
+                        "product,status,catalog_issue_type,epos_expected_qty,qbo_qty,delta,qbo_current_starting_qty",
+                        "Real Product,needs_adjustment,exact_name_match,1039,-217,1256,10",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = parse_inventory_review_csv(final_audit)
+
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0]["current_starting_qty"], "10")
+        self.assertEqual(result.rows[0]["new_initial_qty_to_enter"], "1266")
+
 
 class InventoryReviewViewTests(TestCase):
     def setUp(self):
@@ -209,6 +228,12 @@ class InventoryReviewViewTests(TestCase):
         self.assertIn("139", html)
         self.assertIn("31N1 CHILDREN BAND", html)
         self.assertIn("Missing from QuickBooks", html)
+        self.assertIn("Target Current Qty", html)
+        self.assertIn("Current QBO Qty", html)
+        self.assertIn("Difference Needed", html)
+        self.assertIn("Current Starting Qty", html)
+        self.assertIn("New Initial Qty", html)
+        self.assertIn("Category: Children", html)
         self.assertIn("475 negative EPOS rows were clamped to 0 by policy.", html)
         self.assertIn("23,267 units were ignored/clamped before grouping.", html)
         self.assertIn("Run Detail", html)

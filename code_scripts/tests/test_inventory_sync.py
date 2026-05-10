@@ -1685,6 +1685,9 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["epos_single_units"], 623.0)
         self.assertEqual(row["qbo_qty_on_hand"], 600.0)
         self.assertEqual(row["delta"], 23.0)
+        self.assertEqual(row["qbo_current_starting_qty"], "")
+        self.assertEqual(row["qbo_new_initial_qty_to_enter"], "")
+        self.assertEqual(row["qbo_starting_qty_source"], "")
         self.assertEqual(row["status"], "needs_adjustment")
 
     def test_product_filter_with_regex_chars_is_literal_text(self):

@@ -49,6 +49,26 @@ QBO_QTY_ALIASES = (
     "qbo_final_qty",
 )
 DELTA_ALIASES = ("delta", "difference", "qty_delta")
+CURRENT_STARTING_QTY_ALIASES = (
+    "qbo_current_starting_qty",
+    "current_starting_qty",
+    "qbo_starting_qty",
+    "starting_qty",
+    "current_initial_qty",
+    "initial_qty",
+)
+NEW_INITIAL_QTY_ALIASES = (
+    "qbo_new_initial_qty_to_enter",
+    "new_initial_qty_to_enter",
+    "new_starting_qty_to_enter",
+    "recommended_initial_qty",
+    "recommended_starting_qty",
+)
+STARTING_QTY_SOURCE_ALIASES = (
+    "qbo_starting_qty_source",
+    "starting_qty_source",
+    "initial_qty_source",
+)
 CATEGORY_ALIASES = ("category", "categories", "epos_categories", "item_category")
 
 HEALTHY_KEYS = {"in_sync", "synced", "ok", "matched"}
@@ -109,6 +129,31 @@ def _clean_display_value(value: object) -> str:
     if normalize_inventory_review_key(text) in {"nan", "none", "null"}:
         return ""
     return text
+
+
+def _parse_quantity(value: object) -> float | None:
+    text = _clean_display_value(value)
+    if not text:
+        return None
+    text = text.replace(",", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _format_quantity(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _computed_new_initial_qty(current_starting_qty: object, delta: object) -> str:
+    current = _parse_quantity(current_starting_qty)
+    qty_delta = _parse_quantity(delta)
+    if current is None or qty_delta is None:
+        return ""
+    return _format_quantity(current + qty_delta)
 
 
 def _normalize_row(raw_row: dict[Any, Any]) -> dict[str, str]:
@@ -287,6 +332,9 @@ def parse_inventory_review_csv(path: Path) -> InventoryReviewParseResult:
 
                 reason_label_source = reason or issue_type or status or "Needs review"
                 group = inventory_review_reason_group(status, reason, issue_type)
+                current_starting_qty = _pick(normalized, CURRENT_STARTING_QTY_ALIASES)
+                explicit_new_initial_qty = _pick(normalized, NEW_INITIAL_QTY_ALIASES)
+                delta = _pick(normalized, DELTA_ALIASES)
                 rows.append(
                     {
                         "product": product or "(Unnamed product)",
@@ -299,7 +347,11 @@ def parse_inventory_review_csv(path: Path) -> InventoryReviewParseResult:
                         "reason_group_slug": group["slug"],
                         "epos_expected_qty": _pick(normalized, EPOS_QTY_ALIASES),
                         "qbo_qty": _pick(normalized, QBO_QTY_ALIASES),
-                        "delta": _pick(normalized, DELTA_ALIASES),
+                        "delta": delta,
+                        "current_starting_qty": _clean_display_value(current_starting_qty),
+                        "new_initial_qty_to_enter": _clean_display_value(explicit_new_initial_qty)
+                        or _computed_new_initial_qty(current_starting_qty, delta),
+                        "starting_qty_source": _clean_display_value(_pick(normalized, STARTING_QTY_SOURCE_ALIASES)),
                         "category": _clean_display_value(_pick(normalized, CATEGORY_ALIASES)),
                         "suggested_next_step": inventory_review_suggested_next_step(
                             status,
