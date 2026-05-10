@@ -105,6 +105,10 @@ BASELINE_CORRECTION_FIELDNAMES = [
     "qbo_qty",
     "epos_expected_qty",
     "qty_delta",
+    "current_starting_qty",
+    "new_initial_qty",
+    "starting_qty_source",
+    "starting_qty_status",
     "adjustment_account_id",
     "adjustment_account_name",
     "risk_flags",
@@ -622,6 +626,26 @@ def _opening_balance_account(cfg, *, override_id: str | None = None) -> tuple[st
     return account_id, account_name
 
 
+def _starting_quantity_fields(row: pd.Series, qty_delta: float) -> dict[str, Any]:
+    raw_start = row.get("qbo_current_starting_qty", "")
+    status = str(row.get("qbo_starting_qty_status") or "not_found").strip() or "not_found"
+    source = str(row.get("qbo_starting_qty_source") or "").strip()
+    if str(raw_start).strip() == "":
+        return {
+            "current_starting_qty": "",
+            "new_initial_qty": "",
+            "starting_qty_source": source,
+            "starting_qty_status": status,
+        }
+    start = _numeric(raw_start)
+    return {
+        "current_starting_qty": start,
+        "new_initial_qty": start + qty_delta,
+        "starting_qty_source": source,
+        "starting_qty_status": status,
+    }
+
+
 def _opening_balance_correction_candidates(
     *,
     audit_df: pd.DataFrame,
@@ -665,6 +689,7 @@ def _opening_balance_correction_candidates(
                     "qbo_qty": qbo_qty,
                     "epos_expected_qty": epos_target,
                     "qty_delta": qty_delta,
+                    **_starting_quantity_fields(chosen, qty_delta),
                     "adjustment_account_id": account_id,
                     "adjustment_account_name": account_name,
                     "risk_flags": "|".join(flags),
@@ -716,6 +741,7 @@ def _opening_balance_correction_candidates(
                     "qbo_qty": qbo_qty,
                     "epos_expected_qty": 0.0,
                     "qty_delta": qty_delta,
+                    **_starting_quantity_fields(pack, qty_delta),
                     "adjustment_account_id": account_id,
                     "adjustment_account_name": account_name,
                     "risk_flags": "|".join(flags),
@@ -752,6 +778,7 @@ def _opening_balance_correction_candidates(
                         "qbo_qty": qbo_qty,
                         "epos_expected_qty": 0.0,
                         "qty_delta": qty_delta,
+                        **_starting_quantity_fields(base_item, qty_delta),
                         "adjustment_account_id": account_id,
                         "adjustment_account_name": account_name,
                         "risk_flags": "|".join(flags),
@@ -802,6 +829,7 @@ def _opening_balance_correction_candidates(
                         "qbo_qty": qbo_qty,
                         "epos_expected_qty": 0.0,
                         "qty_delta": qty_delta,
+                        **_starting_quantity_fields(pack, qty_delta),
                         "adjustment_account_id": account_id,
                         "adjustment_account_name": account_name,
                         "risk_flags": "|".join(flags),

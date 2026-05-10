@@ -189,7 +189,7 @@
                 <div>
                     <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Items Needing Review</h2>
                     <p class="text-xs text-slate-500 dark:text-slate-400 mt-1"><span data-review-visible-count>{{ review.row_count }}</span> item{{ review.row_count|pluralize }} shown from {{ review.run_label }}</p>
-                    <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">New Initial Qty is shown only when the current QBO starting qty is available.</p>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">New Initial Qty is shown when QBO's InventoryValuationDetail report exposes the START row; otherwise starting qty is unavailable from QBO report.</p>
                 </div>
                 <div class="flex flex-col sm:flex-row gap-2">
                     <label for="inventory-review-search" class="sr-only">Search product</label>

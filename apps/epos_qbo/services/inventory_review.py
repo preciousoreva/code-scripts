@@ -59,6 +59,8 @@ CURRENT_STARTING_QTY_ALIASES = (
 )
 NEW_INITIAL_QTY_ALIASES = (
     "qbo_new_initial_qty_to_enter",
+    "qbo_new_initial_qty",
+    "new_initial_qty",
     "new_initial_qty_to_enter",
     "new_starting_qty_to_enter",
     "recommended_initial_qty",

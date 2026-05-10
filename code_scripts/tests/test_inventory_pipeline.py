@@ -196,6 +196,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "Name": f"Widget {i}",
                     "Id": str(i),
                     "qbo_qty_on_hand": 2.0,
+                    "qbo_current_starting_qty": 10.0,
+                    "qbo_starting_qty_source": "inventory_valuation_detail_start_row",
+                    "qbo_starting_qty_status": "found",
                     "qbo_has_pack": False,
                     "PurchaseCost": 10.0,
                 }
@@ -1029,6 +1032,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "Name": "Widget 1",
                     "Id": "1",
                     "qbo_qty_on_hand": 2.0,
+                    "qbo_current_starting_qty": 10.0,
+                    "qbo_starting_qty_source": "inventory_valuation_detail_start_row",
+                    "qbo_starting_qty_status": "found",
                     "qbo_has_pack": False,
                     "PurchaseCost": 0.0,
                 },
@@ -1038,6 +1044,9 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
                     "Name": "Widget 1*24",
                     "Id": "2",
                     "qbo_qty_on_hand": 4.0,
+                    "qbo_current_starting_qty": 6.0,
+                    "qbo_starting_qty_source": "inventory_valuation_detail_start_row",
+                    "qbo_starting_qty_status": "found",
                     "qbo_has_pack": True,
                     "PurchaseCost": 0.0,
                 },
@@ -1060,10 +1069,15 @@ class InventoryPipelineOrchestrationTests(unittest.TestCase):
         self.assertEqual(base["correction_type"], "base_quantity_to_epos")
         self.assertEqual(base["qbo_item_id"], "1")
         self.assertEqual(base["qty_delta"], 3.0)
+        self.assertEqual(base["current_starting_qty"], 10.0)
+        self.assertEqual(base["new_initial_qty"], 13.0)
         self.assertEqual(pack["correction_type"], "pack_variant_zero")
         self.assertEqual(pack["qbo_item_id"], "2")
         self.assertEqual(pack["epos_expected_qty"], 0.0)
         self.assertEqual(pack["qty_delta"], -4.0)
+        self.assertEqual(pack["current_starting_qty"], 6.0)
+        self.assertEqual(pack["new_initial_qty"], 2.0)
+        self.assertEqual(pack["starting_qty_status"], "found")
         self.assertEqual(pack["adjustment_account_id"], "73")
         self.assertEqual(pack["adjustment_account_name"], "300100 - Opening Balance Equity")
 

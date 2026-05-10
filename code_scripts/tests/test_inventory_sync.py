@@ -711,6 +711,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                     output_path=output_path,
                     cache_max_age_hours=24,
                     force_refresh=False,
+                    enrich_starting_quantities=False,
                 )
 
         self.assertEqual(result, output_path)
@@ -749,6 +750,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                     output_path=output_path,
                     cache_max_age_hours=24,
                     force_refresh=False,
+                    enrich_starting_quantities=False,
                 )
 
             self.assertEqual(result, output_path)
@@ -794,6 +796,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                         realm_id="REALM123",
                         output_path=output_path,
                         force_refresh=True,
+                        enrich_starting_quantities=False,
                     )
 
             rows = pd.read_csv(output_path)
@@ -836,6 +839,88 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(len(queries), 1)
         self.assertIn("ParentRef", queries[0])
         self.assertNotIn("SubItem", queries[0])
+
+    def test_parse_inventory_valuation_detail_start_rows_by_item_id(self):
+        payload = {
+            "Rows": {
+                "Row": [
+                    {
+                        "Header": {"ColData": [{"value": "BADIA COMPLETE SEASONING 340.2g", "id": "13706"}]},
+                        "Rows": {
+                            "Row": [
+                                {
+                                    "ColData": [
+                                        {"value": "2026-04-15"},
+                                        {"value": "Inventory Starting Value", "id": "67623"},
+                                        {"value": "START"},
+                                        {"value": ""},
+                                        {"value": "10.00"},
+                                        {"value": "6500.00"},
+                                        {"value": "65000.00"},
+                                        {"value": "10.00"},
+                                        {"value": "65000.00"},
+                                    ],
+                                    "type": "Data",
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "Header": {"ColData": [{"value": "BAMA-MAYONNAISE226ml*12", "id": "14641"}]},
+                        "Rows": {
+                            "Row": [
+                                {
+                                    "ColData": [
+                                        {"value": "2026-04-15"},
+                                        {"value": "Inventory Starting Value"},
+                                        {"value": "START"},
+                                        {"value": ""},
+                                        {"value": "2.00"},
+                                        {"value": ""},
+                                        {"value": ""},
+                                        {"value": "2.00"},
+                                        {"value": ""},
+                                    ],
+                                    "type": "Data",
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "Header": {"ColData": [{"value": "ZERO START", "id": "14700"}]},
+                        "Rows": {
+                            "Row": [
+                                {
+                                    "ColData": [
+                                        {"value": "2026-04-15"},
+                                        {"value": "Inventory Starting Value"},
+                                        {"value": "START"},
+                                        {"value": ""},
+                                        {"value": ".00"},
+                                        {"value": "500.00"},
+                                    ],
+                                    "type": "Data",
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "Header": {"ColData": [{"value": "BEGINNING ONLY", "id": "14701"}]},
+                        "Rows": {"Row": [{"ColData": [{"value": ""}, {"value": "Beginning Balance"}], "type": "Data"}]},
+                    },
+                ]
+            }
+        }
+
+        parsed = inventory_sync.parse_inventory_valuation_starting_quantities(payload)
+
+        self.assertEqual(parsed["13706"]["current_starting_qty"], 10.0)
+        self.assertEqual(parsed["13706"]["rate"], 6500.0)
+        self.assertEqual(parsed["13706"]["inventory_cost"], 65000.0)
+        self.assertEqual(parsed["14641"]["current_starting_qty"], 2.0)
+        self.assertEqual(parsed["14700"]["current_starting_qty"], 0.0)
+        self.assertEqual(parsed["14701"]["status"], "beginning_balance_only")
+        self.assertIsNone(parsed["14701"]["current_starting_qty"])
 
     def test_fetch_qbo_snapshot_retries_safe_baseline_when_optional_field_rejected(self):
         import tempfile
@@ -893,6 +978,7 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
                     token_mgr=mock.Mock(),
                     output_path=output_path,
                     force_refresh=True,
+                    enrich_starting_quantities=False,
                 )
             rows = pd.read_csv(output_path)
 
@@ -907,6 +993,60 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["Name"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
         self.assertEqual(row["qbo_name_original"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
         self.assertEqual(row["qbo_name_raw"], "SMIRNOFF ICE DOUBLE BLACK CAN 330ml")
+
+    def test_fetch_qbo_snapshot_enriches_starting_qty_from_inventory_valuation_detail(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            output_path = Path(td) / "exports" / "company_a_products.csv"
+            with mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(
+                     inventory_sync,
+                     "_qbo_query_items_page",
+                     side_effect=[
+                         [
+                             {
+                                 "Id": "13706",
+                                 "Name": "BADIA COMPLETE SEASONING 340.2g",
+                                 "Type": "Inventory",
+                                 "TrackQtyOnHand": True,
+                                 "QtyOnHand": -217,
+                                 "Active": True,
+                             }
+                         ],
+                         [],
+                     ],
+                 ), \
+                 mock.patch.object(
+                     inventory_sync,
+                     "fetch_qbo_inventory_starting_quantities",
+                     return_value={
+                         "13706": {
+                             "current_starting_qty": 10.0,
+                             "rate": 6500.0,
+                             "inventory_cost": 65000.0,
+                             "asset_value": 65000.0,
+                             "source": "inventory_valuation_detail_start_row",
+                             "status": "found",
+                         }
+                     },
+                 ):
+                    inventory_sync.fetch_qbo_inventory_items_snapshot(
+                        company_key="company_a",
+                        realm_id="REALM123",
+                        output_path=output_path,
+                        force_refresh=True,
+                    )
+
+            rows = pd.read_csv(output_path)
+
+        row = rows.iloc[0].to_dict()
+        self.assertEqual(row["qbo_current_starting_qty"], 10)
+        self.assertEqual(row["qbo_starting_qty_rate"], 6500)
+        self.assertEqual(row["qbo_starting_qty_source"], "inventory_valuation_detail_start_row")
+        self.assertEqual(row["qbo_starting_qty_status"], "found")
 
     def test_auto_fetch_qbo_writes_default_path_and_uses_it(self):
         import tempfile
@@ -1689,6 +1829,34 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["qbo_new_initial_qty_to_enter"], "")
         self.assertEqual(row["qbo_starting_qty_source"], "")
         self.assertEqual(row["status"], "needs_adjustment")
+
+    def test_audit_report_calculates_new_initial_qty_from_qbo_starting_qty(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            stock_csv = tdp / "stock.csv"
+            stock_csv.write_text(
+                "Name,CategoryName,MeasuredCurrentStock\n"
+                "REAL PRODUCT,PROVISIONS,1039\n",
+                encoding="utf-8",
+            )
+            qbo_csv = tdp / "qbo.csv"
+            qbo_csv.write_text(
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand,qbo_current_starting_qty,qbo_starting_qty_source,qbo_starting_qty_status\n"
+                "13706,REAL PRODUCT,Inventory,true,-217,10,inventory_valuation_detail_start_row,found\n",
+                encoding="utf-8",
+            )
+            epos = inventory_sync.load_epos_stock_snapshot(str(stock_csv))
+            qbo = inventory_sync.load_qbo_inventory_snapshot(str(qbo_csv))
+            report = inventory_sync.build_audit_report(epos, qbo, tolerance=0.0)
+
+        row = report.iloc[0].to_dict()
+        self.assertEqual(row["delta"], 1256.0)
+        self.assertEqual(row["qbo_current_starting_qty"], "10")
+        self.assertEqual(row["qbo_new_initial_qty_to_enter"], "1266")
+        self.assertEqual(row["qbo_starting_qty_status"], "found")
 
     def test_product_filter_with_regex_chars_is_literal_text(self):
         import tempfile

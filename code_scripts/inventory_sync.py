@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
+from urllib.parse import urlencode
 
 import pandas as pd
 
@@ -69,6 +70,12 @@ _QBO_SNAPSHOT_COLUMNS = [
     "ParentRef",
     "UnitPrice",
     "PurchaseCost",
+    "qbo_current_starting_qty",
+    "qbo_starting_qty_rate",
+    "qbo_starting_inventory_cost",
+    "qbo_starting_asset_value",
+    "qbo_starting_qty_source",
+    "qbo_starting_qty_status",
     "qbo_name_original",
     "qbo_name_raw",
     "qbo_name_display",
@@ -88,6 +95,11 @@ _QBO_ITEM_DIAGNOSTIC_SELECT_FIELDS = [
     "UnitPrice",
     "PurchaseCost",
 ]
+_QBO_STARTING_QTY_SNAPSHOT_COLUMNS = {
+    "qbo_current_starting_qty",
+    "qbo_starting_qty_source",
+    "qbo_starting_qty_status",
+}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -115,6 +127,14 @@ def _safe_float_optional(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _format_optional_qty(value: float | None) -> str:
+    if value is None:
+        return ""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{float(value):.4f}".rstrip("0").rstrip(".")
 
 
 def _safe_bool_str(value: Any) -> bool:
@@ -532,6 +552,17 @@ def _is_cache_fresh(path: Path, *, max_age_hours: int) -> bool:
     return age_s <= float(max_age_hours) * 3600.0
 
 
+def _snapshot_has_required_columns(path: Path, required_columns: Iterable[str]) -> bool:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+    except (OSError, StopIteration):
+        return False
+    present = {str(col).strip() for col in header}
+    return set(required_columns).issubset(present)
+
+
 class QBOItemQueryValidationError(RuntimeError):
     """Raised when QBO rejects an Item query SELECT field."""
 
@@ -539,6 +570,114 @@ class QBOItemQueryValidationError(RuntimeError):
 def _is_query_validation_error_response(status_code: int, text: str | None) -> bool:
     body = str(text or "").lower()
     return int(status_code) == 400 and "queryvalidationerror" in body
+
+
+def _report_rows(container: Any) -> list[dict[str, Any]]:
+    if not container:
+        return []
+    if isinstance(container, list):
+        return [row for row in container if isinstance(row, dict)]
+    if not isinstance(container, dict):
+        return []
+    rows = container.get("Row")
+    if rows is None:
+        rows = container.get("Rows")
+    if isinstance(rows, dict):
+        return _report_rows(rows)
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _col_value(row: dict[str, Any], index: int) -> str:
+    cols = row.get("ColData")
+    if not isinstance(cols, list) or index >= len(cols):
+        return ""
+    cell = cols[index]
+    if not isinstance(cell, dict):
+        return ""
+    return str(cell.get("value") or "").strip()
+
+
+def _header_item(section: dict[str, Any]) -> tuple[str, str]:
+    header = section.get("Header")
+    if not isinstance(header, dict):
+        return "", ""
+    cols = header.get("ColData")
+    if not isinstance(cols, list) or not cols or not isinstance(cols[0], dict):
+        return "", ""
+    item_name = str(cols[0].get("value") or "").strip()
+    item_id = str(cols[0].get("id") or "").strip()
+    return item_id, item_name
+
+
+def parse_inventory_valuation_starting_quantities(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Parse QBO InventoryValuationDetail item sections into starting-quantity rows keyed by Item.Id."""
+
+    results: dict[str, dict[str, Any]] = {}
+
+    def walk(rows: list[dict[str, Any]]) -> None:
+        for section in rows:
+            item_id, item_name = _header_item(section)
+            child_rows = _report_rows(section.get("Rows"))
+            if item_id or item_name:
+                start_rows: list[dict[str, Any]] = []
+                has_beginning_balance = False
+                for child in child_rows:
+                    txn_type = _col_value(child, 1).lower()
+                    doc_no = _col_value(child, 2).lower()
+                    if txn_type == "inventory starting value" and doc_no == "start":
+                        start_rows.append(child)
+                    elif txn_type == "beginning balance":
+                        has_beginning_balance = True
+                key = item_id or f"name:{_normalize_name_key(item_name)}"
+                if start_rows:
+                    qty_values = [_safe_float_optional(_col_value(row, 4)) for row in start_rows]
+                    qty_values = [value for value in qty_values if value is not None]
+                    qty = sum(qty_values) if qty_values else None
+                    latest = start_rows[-1]
+                    status = "found" if len(start_rows) == 1 else "found_multiple_start_rows"
+                    results[key] = {
+                        "item_id": item_id,
+                        "item_name": item_name,
+                        "current_starting_qty": qty,
+                        "rate": _safe_float_optional(_col_value(latest, 5)),
+                        "inventory_cost": _safe_float_optional(_col_value(latest, 6)),
+                        "qty_on_hand_at_start": _safe_float_optional(_col_value(latest, 7)),
+                        "asset_value": _safe_float_optional(_col_value(latest, 8)),
+                        "source": "inventory_valuation_detail_start_row",
+                        "status": status,
+                        "start_row_count": len(start_rows),
+                    }
+                elif has_beginning_balance:
+                    results[key] = {
+                        "item_id": item_id,
+                        "item_name": item_name,
+                        "current_starting_qty": None,
+                        "source": "inventory_valuation_detail",
+                        "status": "beginning_balance_only",
+                        "start_row_count": 0,
+                    }
+            walk(child_rows)
+
+    walk(_report_rows(payload.get("Rows")))
+    return results
+
+
+def fetch_qbo_inventory_starting_quantities(
+    *,
+    token_mgr: TokenManager,
+    realm_id: str,
+) -> dict[str, dict[str, Any]]:
+    base_url = get_qbo_api_base_url()
+    params = urlencode({"minorversion": _QBO_MINOR_VERSION})
+    url = f"{base_url}/v3/company/{realm_id}/reports/InventoryValuationDetail?{params}"
+    resp = _make_qbo_request("GET", url, token_mgr)
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"QBO InventoryValuationDetail failed: HTTP {resp.status_code}: {resp.text[:2000] if resp.text else ''}"
+        )
+    return parse_inventory_valuation_starting_quantities(resp.json())
 
 
 def _qbo_query_items_page(
@@ -588,6 +727,7 @@ def fetch_qbo_inventory_items_snapshot(
     cache_max_age_hours: int = 24,
     force_refresh: bool = False,
     print_company_info: bool = False,
+    enrich_starting_quantities: bool = True,
 ) -> Path:
     """Query QBO for Inventory items and write a snapshot CSV, optionally reusing a fresh cache."""
     output_path = output_path.expanduser()
@@ -597,7 +737,20 @@ def fetch_qbo_inventory_items_snapshot(
     if stale_reason:
         print(f"[INFO] Ignoring cached QBO snapshot: invalidated ({stale_reason})")
 
-    if not force_refresh and stale_reason is None and _is_cache_fresh(output_path, max_age_hours=cache_max_age_hours):
+    missing_starting_columns = bool(
+        enrich_starting_quantities
+        and output_path.exists()
+        and not _snapshot_has_required_columns(output_path, _QBO_STARTING_QTY_SNAPSHOT_COLUMNS)
+    )
+    if missing_starting_columns:
+        print("[INFO] Ignoring cached QBO snapshot: missing starting-quantity columns")
+
+    if (
+        not force_refresh
+        and stale_reason is None
+        and not missing_starting_columns
+        and _is_cache_fresh(output_path, max_age_hours=cache_max_age_hours)
+    ):
         print(f"[INFO] Reusing fresh QBO snapshot: {output_path}")
         return output_path
 
@@ -650,6 +803,15 @@ def fetch_qbo_inventory_items_snapshot(
         )
         rows = _fetch_all_pages(_QBO_ITEM_SAFE_SELECT_FIELDS)
 
+    starting_by_id: dict[str, dict[str, Any]] = {}
+    if enrich_starting_quantities:
+        try:
+            starting_by_id = fetch_qbo_inventory_starting_quantities(token_mgr=token_mgr, realm_id=realm_id)
+            found = sum(1 for value in starting_by_id.values() if value.get("current_starting_qty") is not None)
+            print(f"[INFO] QBO InventoryValuationDetail START rows discovered: {found}")
+        except Exception as exc:
+            print(f"[WARN] Failed to fetch QBO inventory starting quantities: {exc}")
+
     with open(output_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
@@ -659,9 +821,11 @@ def fetch_qbo_inventory_items_snapshot(
         for it in rows:
             name_original = str(it.get("Name", ""))
             name_display = _collapse_spaces(name_original)
+            item_id = str(it.get("Id", "")).strip()
+            start = starting_by_id.get(item_id) or starting_by_id.get(f"name:{_normalize_name_key(name_display)}") or {}
             writer.writerow(
                 {
-                    "Id": str(it.get("Id", "")).strip(),
+                    "Id": item_id,
                     "Name": name_original,
                     "Type": str(it.get("Type", "")).strip(),
                     "TrackQtyOnHand": str(it.get("TrackQtyOnHand", "")).strip(),
@@ -671,6 +835,12 @@ def fetch_qbo_inventory_items_snapshot(
                     "ParentRef": _qbo_parent_ref_value(it.get("ParentRef")),
                     "UnitPrice": str(it.get("UnitPrice", "")).strip(),
                     "PurchaseCost": str(it.get("PurchaseCost", "")).strip(),
+                    "qbo_current_starting_qty": _format_optional_qty(start.get("current_starting_qty")),
+                    "qbo_starting_qty_rate": _format_optional_qty(start.get("rate")),
+                    "qbo_starting_inventory_cost": _format_optional_qty(start.get("inventory_cost")),
+                    "qbo_starting_asset_value": _format_optional_qty(start.get("asset_value")),
+                    "qbo_starting_qty_source": str(start.get("source") or "").strip(),
+                    "qbo_starting_qty_status": str(start.get("status") or "not_found").strip(),
                     "qbo_name_original": name_original,
                     "qbo_name_raw": name_original,
                     "qbo_name_display": name_display,
@@ -852,6 +1022,15 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
     inv["qbo_has_pack"] = had_pack
     inv["qbo_qty_on_hand"] = inv.get("QtyOnHand", 0).map(_safe_float)
     inv["qbo_is_base_item"] = [not v for v in had_pack]
+    inv["qbo_current_starting_qty"] = inv.get(
+        "qbo_current_starting_qty", pd.Series([""] * len(inv), index=inv.index)
+    ).map(_safe_float_optional)
+    inv["qbo_starting_qty_source"] = inv.get(
+        "qbo_starting_qty_source", pd.Series([""] * len(inv), index=inv.index)
+    ).astype(str)
+    inv["qbo_starting_qty_status"] = inv.get(
+        "qbo_starting_qty_status", pd.Series(["not_found"] * len(inv), index=inv.index)
+    ).astype(str)
 
     if requested_base_names:
         requested = {
@@ -887,6 +1066,22 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
         items = df_group[df_group["qbo_has_pack"] == False]  # noqa: E712
         return _join_names(items["qbo_name_display"].tolist())
 
+    def _single_starting_qty(df_group: pd.DataFrame, active: pd.DataFrame) -> tuple[str, str, str]:
+        if active.empty:
+            return "", "", "not_found"
+        if len(active) != 1:
+            return "", "", "ambiguous_multiple_qbo_items"
+        row = active.iloc[0]
+        status = str(row.get("qbo_starting_qty_status") or "not_found").strip() or "not_found"
+        qty = row.get("qbo_current_starting_qty")
+        if qty is None or pd.isna(qty):
+            return "", str(row.get("qbo_starting_qty_source") or "").strip(), status
+        return (
+            _format_optional_qty(float(qty)),
+            str(row.get("qbo_starting_qty_source") or "").strip(),
+            status,
+        )
+
     grouped_rows: list[dict[str, Any]] = []
     for base_norm, g in inv.groupby("base_name_norm"):
         active = g[g["qbo_is_active"] == True]  # noqa: E712
@@ -895,6 +1090,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
         inactive_base = g[
             (g["qbo_is_active"] != True) & (g["qbo_has_pack"] == False)  # noqa: E712
         ]
+        starting_qty, starting_source, starting_status = _single_starting_qty(g, active)
         grouped_rows.append(
             {
                 "base_name_norm": str(base_norm),
@@ -910,6 +1106,9 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
                 "qbo_item_names_for_base": _join_names(active["qbo_name_display"].tolist()),
                 "qbo_base_item_names": _join_base_names(active),
                 "qbo_pack_variant_names": _join_pack_names(active),
+                "qbo_current_starting_qty": starting_qty,
+                "qbo_starting_qty_source": starting_source,
+                "qbo_starting_qty_status": starting_status,
                 "qbo_active_base_item_ids": _join_ids(active_base["Id"].tolist()),
                 "qbo_base_item_ids": _join_ids(active_base["Id"].tolist()),
                 "qbo_inactive_base_item_ids": _join_ids(inactive_base["Id"].tolist()),
@@ -984,6 +1183,9 @@ def load_qbo_inventory_item_rows(qbo_csv_path: str) -> pd.DataFrame:
             "SubItem": inv.get("SubItem", pd.Series([""] * len(inv))).astype(str),
             "UnitPrice": inv.get("UnitPrice", pd.Series([""] * len(inv))),
             "PurchaseCost": inv.get("PurchaseCost", pd.Series([""] * len(inv))),
+            "qbo_current_starting_qty": inv.get("qbo_current_starting_qty", pd.Series([""] * len(inv))).map(_safe_float_optional),
+            "qbo_starting_qty_source": inv.get("qbo_starting_qty_source", pd.Series([""] * len(inv))).astype(str),
+            "qbo_starting_qty_status": inv.get("qbo_starting_qty_status", pd.Series(["not_found"] * len(inv))).astype(str),
         }
     )
     out["Id"] = out["Id"].map(lambda x: str(x).strip())
@@ -1083,9 +1285,25 @@ def build_audit_report(
         merged[col] = merged[col].fillna("")
 
     merged["delta"] = merged["epos_single_units"] - merged["qbo_qty_on_hand"]
-    merged["qbo_current_starting_qty"] = ""
-    merged["qbo_new_initial_qty_to_enter"] = ""
-    merged["qbo_starting_qty_source"] = ""
+    if "qbo_current_starting_qty" not in merged.columns:
+        merged["qbo_current_starting_qty"] = ""
+    if "qbo_starting_qty_source" not in merged.columns:
+        merged["qbo_starting_qty_source"] = ""
+    if "qbo_starting_qty_status" not in merged.columns:
+        merged["qbo_starting_qty_status"] = "not_found"
+
+    def _new_initial_qty(row: pd.Series) -> str:
+        start = _safe_float_optional(row.get("qbo_current_starting_qty"))
+        if start is None:
+            return ""
+        return _format_optional_qty(start + _safe_float(row.get("delta"), 0.0))
+
+    merged["qbo_current_starting_qty"] = merged["qbo_current_starting_qty"].map(
+        lambda value: _format_optional_qty(_safe_float_optional(value))
+    )
+    merged["qbo_new_initial_qty_to_enter"] = [_new_initial_qty(row) for _, row in merged.iterrows()]
+    merged["qbo_starting_qty_source"] = merged["qbo_starting_qty_source"].fillna("").astype(str)
+    merged["qbo_starting_qty_status"] = merged["qbo_starting_qty_status"].fillna("not_found").astype(str)
 
     def classify(row: pd.Series) -> str:
         if row["qbo_item_count_for_base"] <= 0:
@@ -1151,6 +1369,7 @@ def build_audit_report(
         "qbo_current_starting_qty",
         "qbo_new_initial_qty_to_enter",
         "qbo_starting_qty_source",
+        "qbo_starting_qty_status",
         "status",
         "catalog_issue_type",
         "catalog_issue_detail",

@@ -233,6 +233,7 @@ class InventoryReviewViewTests(TestCase):
         self.assertIn("Difference Needed", html)
         self.assertIn("Current Starting Qty", html)
         self.assertIn("New Initial Qty", html)
+        self.assertIn("starting qty is unavailable from QBO report", html)
         self.assertIn("Category: Children", html)
         self.assertIn("475 negative EPOS rows were clamped to 0 by policy.", html)
         self.assertIn("23,267 units were ignored/clamped before grouping.", html)
