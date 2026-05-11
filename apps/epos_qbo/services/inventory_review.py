@@ -71,6 +71,11 @@ STARTING_QTY_SOURCE_ALIASES = (
     "starting_qty_source",
     "initial_qty_source",
 )
+PACK_VARIANT_PLAN_ALIASES = (
+    "qbo_pack_variant_starting_value_plan",
+    "pack_variant_starting_value_plan",
+    "pack_variant_initial_qty_plan",
+)
 CATEGORY_ALIASES = ("category", "categories", "epos_categories", "item_category")
 
 HEALTHY_KEYS = {"in_sync", "synced", "ok", "matched"}
@@ -354,6 +359,7 @@ def parse_inventory_review_csv(path: Path) -> InventoryReviewParseResult:
                         "new_initial_qty_to_enter": _clean_display_value(explicit_new_initial_qty)
                         or _computed_new_initial_qty(current_starting_qty, delta),
                         "starting_qty_source": _clean_display_value(_pick(normalized, STARTING_QTY_SOURCE_ALIASES)),
+                        "pack_variant_plan": _clean_display_value(_pick(normalized, PACK_VARIANT_PLAN_ALIASES)),
                         "category": _clean_display_value(_pick(normalized, CATEGORY_ALIASES)),
                         "suggested_next_step": inventory_review_suggested_next_step(
                             status,

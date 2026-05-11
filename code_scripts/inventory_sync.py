@@ -24,7 +24,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlencode
@@ -670,7 +670,13 @@ def fetch_qbo_inventory_starting_quantities(
     realm_id: str,
 ) -> dict[str, dict[str, Any]]:
     base_url = get_qbo_api_base_url()
-    params = urlencode({"minorversion": _QBO_MINOR_VERSION})
+    params = urlencode(
+        {
+            "minorversion": _QBO_MINOR_VERSION,
+            "start_date": "1900-01-01",
+            "end_date": date.today().isoformat(),
+        }
+    )
     url = f"{base_url}/v3/company/{realm_id}/reports/InventoryValuationDetail?{params}"
     resp = _make_qbo_request("GET", url, token_mgr)
     if resp.status_code != 200:
@@ -1066,12 +1072,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
         items = df_group[df_group["qbo_has_pack"] == False]  # noqa: E712
         return _join_names(items["qbo_name_display"].tolist())
 
-    def _single_starting_qty(df_group: pd.DataFrame, active: pd.DataFrame) -> tuple[str, str, str]:
-        if active.empty:
-            return "", "", "not_found"
-        if len(active) != 1:
-            return "", "", "ambiguous_multiple_qbo_items"
-        row = active.iloc[0]
+    def _starting_qty_from_row(row: pd.Series) -> tuple[str, str, str]:
         status = str(row.get("qbo_starting_qty_status") or "not_found").strip() or "not_found"
         qty = row.get("qbo_current_starting_qty")
         if qty is None or pd.isna(qty):
@@ -1082,6 +1083,33 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
             status,
         )
 
+    def _target_starting_qty(active: pd.DataFrame, active_base: pd.DataFrame) -> tuple[str, str, str]:
+        if active.empty:
+            return "", "", "missing_qbo_item"
+        if len(active_base) == 1:
+            return _starting_qty_from_row(active_base.iloc[0])
+        if len(active_base) > 1:
+            return "", "", "ambiguous_multiple_base_items"
+        if len(active) == 1:
+            return _starting_qty_from_row(active.iloc[0])
+        return "", "", "missing_qbo_base_item"
+
+    def _pack_starting_value_plan(active_pack: pd.DataFrame) -> str:
+        plan: list[str] = []
+        for _, row in active_pack.sort_values("qbo_name_display").iterrows():
+            name = str(row.get("qbo_name_display") or row.get("Name") or "").strip()
+            if not name:
+                continue
+            qbo_qty = _safe_float(row.get("qbo_qty_on_hand"), 0.0)
+            start_qty = row.get("qbo_current_starting_qty")
+            if start_qty is None or pd.isna(start_qty):
+                status = str(row.get("qbo_starting_qty_status") or "not_found").strip() or "not_found"
+                plan.append(f"{name}: current QBO {_format_optional_qty(qbo_qty)} -> START unavailable ({status})")
+                continue
+            new_initial = float(start_qty) - qbo_qty
+            plan.append(f"{name}: set New Initial Qty {_format_optional_qty(new_initial)} to make current QBO 0")
+        return " | ".join(plan[:10])
+
     grouped_rows: list[dict[str, Any]] = []
     for base_norm, g in inv.groupby("base_name_norm"):
         active = g[g["qbo_is_active"] == True]  # noqa: E712
@@ -1090,12 +1118,14 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
         inactive_base = g[
             (g["qbo_is_active"] != True) & (g["qbo_has_pack"] == False)  # noqa: E712
         ]
-        starting_qty, starting_source, starting_status = _single_starting_qty(g, active)
+        starting_qty, starting_source, starting_status = _target_starting_qty(active, active_base)
         grouped_rows.append(
             {
                 "base_name_norm": str(base_norm),
                 "base_name": str(g.iloc[0]["base_name"]),
                 "qbo_qty_on_hand": float(active["qbo_qty_on_hand"].sum()) if not active.empty else 0.0,
+                "qbo_base_qty_on_hand": float(active_base["qbo_qty_on_hand"].sum()) if not active_base.empty else 0.0,
+                "qbo_pack_variant_qty_on_hand": float(active_pack["qbo_qty_on_hand"].sum()) if not active_pack.empty else 0.0,
                 "qbo_item_row_count_for_base": int(len(active)),
                 "qbo_unique_item_count_for_base": int(active["qbo_name_display"].astype(str).str.strip().nunique()) if not active.empty else 0,
                 "qbo_item_count_for_base": int(len(active)),
@@ -1109,6 +1139,7 @@ def load_qbo_inventory_snapshot(qbo_csv_path: str, *, base_names: Optional[list[
                 "qbo_current_starting_qty": starting_qty,
                 "qbo_starting_qty_source": starting_source,
                 "qbo_starting_qty_status": starting_status,
+                "qbo_pack_variant_starting_value_plan": _pack_starting_value_plan(active_pack),
                 "qbo_active_base_item_ids": _join_ids(active_base["Id"].tolist()),
                 "qbo_base_item_ids": _join_ids(active_base["Id"].tolist()),
                 "qbo_inactive_base_item_ids": _join_ids(inactive_base["Id"].tolist()),
@@ -1255,6 +1286,10 @@ def build_audit_report(
         merged["epos_negative_clamped_row_names"] = ""
     merged["epos_negative_clamped_row_names"] = merged["epos_negative_clamped_row_names"].fillna("")
     merged["qbo_qty_on_hand"] = merged["qbo_qty_on_hand"].fillna(0.0)
+    for col in ["qbo_base_qty_on_hand", "qbo_pack_variant_qty_on_hand"]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        merged[col] = merged[col].fillna(0.0).astype(float)
     merged["qbo_item_count_for_base"] = merged["qbo_item_count_for_base"].fillna(0).astype(int)
     merged["qbo_has_pack_variants"] = (
         merged["qbo_has_pack_variants"].astype("boolean").fillna(False).astype(bool)
@@ -1263,6 +1298,9 @@ def build_audit_report(
     merged["qbo_base_item_ids"] = merged["qbo_base_item_ids"].fillna("")
     merged["qbo_base_item_names"] = merged.get("qbo_base_item_names", "").fillna("")
     merged["qbo_pack_variant_names"] = merged.get("qbo_pack_variant_names", "").fillna("")
+    if "qbo_pack_variant_starting_value_plan" not in merged.columns:
+        merged["qbo_pack_variant_starting_value_plan"] = ""
+    merged["qbo_pack_variant_starting_value_plan"] = merged["qbo_pack_variant_starting_value_plan"].fillna("")
     merged["qbo_item_names_for_base"] = merged.get("qbo_item_names_for_base", "").fillna("")
     merged["qbo_base_item_names_for_base"] = merged.get("qbo_base_item_names_for_base", "").fillna("")
     merged["qbo_pack_variant_names_for_base"] = merged.get("qbo_pack_variant_names_for_base", "").fillna("")
@@ -1293,9 +1331,18 @@ def build_audit_report(
         merged["qbo_starting_qty_status"] = "not_found"
 
     def _new_initial_qty(row: pd.Series) -> str:
+        if int(row.get("qbo_item_count_for_base", 0) or 0) <= 0:
+            return _format_optional_qty(_safe_float(row.get("epos_single_units"), 0.0))
+        if bool(row.get("qbo_has_pack_variants")) and int(row.get("qbo_base_item_count", 0) or 0) == 0:
+            return _format_optional_qty(_safe_float(row.get("epos_single_units"), 0.0))
         start = _safe_float_optional(row.get("qbo_current_starting_qty"))
         if start is None:
             return ""
+        if bool(row.get("qbo_has_pack_variants")) and int(row.get("qbo_base_item_count", 0) or 0) == 1:
+            base_delta = _safe_float(row.get("epos_single_units"), 0.0) - _safe_float(
+                row.get("qbo_base_qty_on_hand"), 0.0
+            )
+            return _format_optional_qty(start + base_delta)
         return _format_optional_qty(start + _safe_float(row.get("delta"), 0.0))
 
     merged["qbo_current_starting_qty"] = merged["qbo_current_starting_qty"].map(
@@ -1329,6 +1376,13 @@ def build_audit_report(
         return "exact_name_match"
 
     merged["catalog_issue_type"] = [str(_catalog_type(row)) for _, row in merged.iterrows()]
+
+    missing_mask = merged["qbo_item_count_for_base"] <= 0
+    only_pack_mask = merged["catalog_issue_type"] == "only_pack_variant_exists"
+    merged.loc[missing_mask, "qbo_starting_qty_source"] = "new_qbo_item"
+    merged.loc[missing_mask, "qbo_starting_qty_status"] = "create_item_initial_qty"
+    merged.loc[only_pack_mask, "qbo_starting_qty_source"] = "new_qbo_base_item"
+    merged.loc[only_pack_mask, "qbo_starting_qty_status"] = "create_base_item_initial_qty"
 
     def _catalog_detail(row: pd.Series) -> str:
         t = str(row.get("catalog_issue_type") or "")
@@ -1365,11 +1419,14 @@ def build_audit_report(
         "base_name",
         "epos_single_units",
         "qbo_qty_on_hand",
+        "qbo_base_qty_on_hand",
+        "qbo_pack_variant_qty_on_hand",
         "delta",
         "qbo_current_starting_qty",
         "qbo_new_initial_qty_to_enter",
         "qbo_starting_qty_source",
         "qbo_starting_qty_status",
+        "qbo_pack_variant_starting_value_plan",
         "status",
         "catalog_issue_type",
         "catalog_issue_detail",

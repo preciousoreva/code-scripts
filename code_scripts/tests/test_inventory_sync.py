@@ -922,6 +922,34 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(parsed["14701"]["status"], "beginning_balance_only")
         self.assertIsNone(parsed["14701"]["current_starting_qty"])
 
+    def test_fetch_inventory_valuation_detail_uses_full_date_range(self):
+        from urllib.parse import parse_qs, urlparse
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"Rows": {"Row": []}}
+
+        seen_urls = []
+
+        def fake_request(_method, url, _token_mgr):
+            seen_urls.append(url)
+            return FakeResponse()
+
+        with mock.patch.object(inventory_sync, "get_qbo_api_base_url", return_value="https://qbo.example"), \
+             mock.patch.object(inventory_sync, "_make_qbo_request", side_effect=fake_request):
+            inventory_sync.fetch_qbo_inventory_starting_quantities(
+                token_mgr=mock.Mock(),
+                realm_id="REALM123",
+            )
+
+        params = parse_qs(urlparse(seen_urls[0]).query)
+        self.assertEqual(params["start_date"], ["1900-01-01"])
+        self.assertIn("end_date", params)
+        self.assertEqual(params["minorversion"], [str(inventory_sync._QBO_MINOR_VERSION)])
+
     def test_fetch_qbo_snapshot_retries_safe_baseline_when_optional_field_rejected(self):
         import tempfile
         from pathlib import Path
@@ -1330,6 +1358,9 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertIn("qbo_item_names_for_base", report.columns)
         self.assertIn("qbo_pack_variant_names_for_base", report.columns)
         self.assertIn("BACARDI WHITE RUM 750ml*12", str(row.get("qbo_pack_variant_names_for_base")))
+        self.assertEqual(row["qbo_current_starting_qty"], "")
+        self.assertEqual(row["qbo_new_initial_qty_to_enter"], "8")
+        self.assertEqual(row["qbo_starting_qty_status"], "create_base_item_initial_qty")
 
     def test_catalog_issue_classification_base_with_pack_variants(self):
         import tempfile
@@ -1531,10 +1562,10 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
             )
             qbo_csv = tdp / "qbo.csv"
             qbo_csv.write_text(
-                "Id,Name,Type,TrackQtyOnHand,QtyOnHand\n"
-                "10,LEGEND EXTRA STOUT CAN 440ML,Inventory,true,-299\n"
-                "11,LEGEND EXTRA STOUT CAN 440ml*12,Inventory,true,10\n"
-                "12,LEGEND EXTRA STOUT CAN 440ml*24,Inventory,true,20\n",
+                "Id,Name,Type,TrackQtyOnHand,QtyOnHand,qbo_current_starting_qty,qbo_starting_qty_source,qbo_starting_qty_status\n"
+                "10,LEGEND EXTRA STOUT CAN 440ML,Inventory,true,-299,10,inventory_valuation_detail_start_row,found\n"
+                "11,LEGEND EXTRA STOUT CAN 440ml*12,Inventory,true,10,5,inventory_valuation_detail_start_row,found\n"
+                "12,LEGEND EXTRA STOUT CAN 440ml*24,Inventory,true,20,6,inventory_valuation_detail_start_row,found\n",
                 encoding="utf-8",
             )
             epos = inventory_sync.load_epos_stock_snapshot(
@@ -1551,6 +1582,12 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertIn("LEGEND EXTRA STOUT CAN 440ML", row["qbo_base_item_names_for_base"])
         self.assertIn("LEGEND EXTRA STOUT CAN 440ml*24", row["qbo_pack_variant_names_for_base"])
         self.assertNotEqual(row["catalog_issue_type"], "only_pack_variant_exists")
+        self.assertEqual(row["qbo_current_starting_qty"], "10")
+        self.assertEqual(row["qbo_base_qty_on_hand"], -299.0)
+        self.assertEqual(row["qbo_pack_variant_qty_on_hand"], 30.0)
+        self.assertEqual(row["qbo_new_initial_qty_to_enter"], "333")
+        self.assertIn("LEGEND EXTRA STOUT CAN 440ml*12: set New Initial Qty -5", row["qbo_pack_variant_starting_value_plan"])
+        self.assertIn("LEGEND EXTRA STOUT CAN 440ml*24: set New Initial Qty -14", row["qbo_pack_variant_starting_value_plan"])
 
     def test_ml_casing_variants_normalize_to_single_qbo_base_group(self):
         import tempfile
@@ -1911,6 +1948,9 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["catalog_issue_type"], "only_pack_variant_exists")
         self.assertIsInstance(row["catalog_issue_type"], str)
         self.assertIn("GOLDBERG CAN 50cl*24", row["catalog_issue_detail"])
+        self.assertEqual(row["qbo_current_starting_qty"], "")
+        self.assertEqual(row["qbo_new_initial_qty_to_enter"], "48")
+        self.assertEqual(row["qbo_starting_qty_status"], "create_base_item_initial_qty")
 
     def test_empty_product_filter_result_keeps_scalar_catalog_columns(self):
         import tempfile
@@ -1967,6 +2007,9 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["catalog_issue_type"], "missing_from_qbo")
         self.assertIn("product not found in QuickBooks", row["catalog_issue_detail"])
         self.assertIn("create inventory item", row["suggested_next_action"])
+        self.assertEqual(row["qbo_current_starting_qty"], "")
+        self.assertEqual(row["qbo_new_initial_qty_to_enter"], "8")
+        self.assertEqual(row["qbo_starting_qty_status"], "create_item_initial_qty")
 
 
 if __name__ == "__main__":
