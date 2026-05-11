@@ -950,6 +950,34 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertIn("end_date", params)
         self.assertEqual(params["minorversion"], [str(inventory_sync._QBO_MINOR_VERSION)])
 
+    def test_fetch_inventory_valuation_detail_can_filter_by_item_ids(self):
+        from urllib.parse import parse_qs, urlparse
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"Rows": {"Row": []}}
+
+        seen_urls = []
+
+        def fake_request(_method, url, _token_mgr):
+            seen_urls.append(url)
+            return FakeResponse()
+
+        with mock.patch.object(inventory_sync, "get_qbo_api_base_url", return_value="https://qbo.example"), \
+             mock.patch.object(inventory_sync, "_make_qbo_request", side_effect=fake_request):
+            inventory_sync.fetch_qbo_inventory_starting_quantities(
+                token_mgr=mock.Mock(),
+                realm_id="REALM123",
+                item_ids=["12965", "14640"],
+            )
+
+        params = parse_qs(urlparse(seen_urls[0]).query)
+        self.assertEqual(params["item"], ["12965,14640"])
+        self.assertEqual(params["minorversion"], [str(inventory_sync._QBO_MINOR_VERSION)])
+
     def test_fetch_qbo_snapshot_retries_safe_baseline_when_optional_field_rejected(self):
         import tempfile
         from pathlib import Path
@@ -1075,6 +1103,89 @@ class InventorySyncAutoFetchQboTest(unittest.TestCase):
         self.assertEqual(row["qbo_starting_qty_rate"], 6500)
         self.assertEqual(row["qbo_starting_qty_source"], "inventory_valuation_detail_start_row")
         self.assertEqual(row["qbo_starting_qty_status"], "found")
+
+    def test_fetch_qbo_snapshot_falls_back_to_targeted_start_row_lookup(self):
+        import tempfile
+        from pathlib import Path
+
+        calls: list[list[str]] = []
+
+        def fake_starting_lookup(*, token_mgr, realm_id, item_ids=None, start_date="1900-01-01"):
+            calls.append(list(item_ids or []))
+            if item_ids:
+                return {
+                    "12965": {
+                        "current_starting_qty": 10.0,
+                        "rate": 393.55,
+                        "inventory_cost": 3935.5,
+                        "asset_value": 3935.5,
+                        "source": "inventory_valuation_detail_start_row",
+                        "status": "found",
+                    },
+                    "14640": {
+                        "current_starting_qty": 5.0,
+                        "rate": None,
+                        "inventory_cost": 0.0,
+                        "asset_value": 0.0,
+                        "source": "inventory_valuation_detail_start_row",
+                        "status": "found",
+                    },
+                }
+            return {}
+
+        with tempfile.TemporaryDirectory() as td:
+            output_path = Path(td) / "exports" / "company_a_products.csv"
+            with mock.patch.object(inventory_sync, "verify_realm_match"), \
+                 mock.patch.object(inventory_sync, "TokenManager", return_value=mock.Mock()), \
+                 mock.patch.object(
+                     inventory_sync,
+                     "_qbo_query_items_page",
+                     side_effect=[
+                         [
+                             {
+                                 "Id": "12965",
+                                 "Name": "GALA SAUSAGE ROLL120g",
+                                 "Type": "Inventory",
+                                 "TrackQtyOnHand": True,
+                                 "QtyOnHand": -3240,
+                                 "Active": True,
+                                 "InvStartDate": "2025-01-01",
+                             },
+                             {
+                                 "Id": "14640",
+                                 "Name": "GALA SAUSAGE ROLL120g*26",
+                                 "Type": "Inventory",
+                                 "TrackQtyOnHand": True,
+                                 "QtyOnHand": 13,
+                                 "Active": True,
+                                 "InvStartDate": "2026-05-01",
+                             },
+                         ],
+                         [],
+                     ],
+                 ), \
+                 mock.patch.object(
+                     inventory_sync,
+                     "fetch_qbo_inventory_starting_quantities",
+                     side_effect=fake_starting_lookup,
+                 ):
+                    inventory_sync.fetch_qbo_inventory_items_snapshot(
+                        company_key="company_a",
+                        realm_id="REALM123",
+                        output_path=output_path,
+                        force_refresh=True,
+                    )
+
+            rows = pd.read_csv(output_path).set_index("Id")
+
+        self.assertEqual(calls[0], [])
+        self.assertEqual(calls[1], ["12965", "14640"])
+        self.assertEqual(rows.loc[12965, "qbo_current_starting_qty"], 10)
+        self.assertEqual(rows.loc[14640, "qbo_current_starting_qty"], 5)
+        self.assertEqual(
+            rows.loc[12965, "qbo_starting_qty_source"],
+            "inventory_valuation_detail_item_filter_start_row",
+        )
 
     def test_auto_fetch_qbo_writes_default_path_and_uses_it(self):
         import tempfile

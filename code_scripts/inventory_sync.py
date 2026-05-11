@@ -58,7 +58,8 @@ _DEFAULT_STOCK_NAME_COL = "Name"
 _DEFAULT_STOCK_QTY_COL = "MeasuredCurrentStock"
 _DEFAULT_STOCK_CATEGORY_COL = "CategoryName"
 EPOS_NEGATIVE_STOCK_POLICY = "clamp_to_zero"
-_QBO_MINOR_VERSION = "70"
+_QBO_MINOR_VERSION = "75"
+_QBO_STARTING_QTY_FALLBACK_BATCH_SIZE = 100
 _QBO_SNAPSHOT_COLUMNS = [
     "Id",
     "Name",
@@ -668,15 +669,19 @@ def fetch_qbo_inventory_starting_quantities(
     *,
     token_mgr: TokenManager,
     realm_id: str,
+    item_ids: Iterable[str] | None = None,
+    start_date: str = "1900-01-01",
 ) -> dict[str, dict[str, Any]]:
     base_url = get_qbo_api_base_url()
-    params = urlencode(
-        {
-            "minorversion": _QBO_MINOR_VERSION,
-            "start_date": "1900-01-01",
-            "end_date": date.today().isoformat(),
-        }
-    )
+    query_params = {
+        "minorversion": _QBO_MINOR_VERSION,
+        "start_date": start_date,
+        "end_date": date.today().isoformat(),
+    }
+    ids = [str(item_id).strip() for item_id in (item_ids or []) if str(item_id).strip()]
+    if ids:
+        query_params["item"] = ",".join(ids)
+    params = urlencode(query_params)
     url = f"{base_url}/v3/company/{realm_id}/reports/InventoryValuationDetail?{params}"
     resp = _make_qbo_request("GET", url, token_mgr)
     if resp.status_code != 200:
@@ -684,6 +689,46 @@ def fetch_qbo_inventory_starting_quantities(
             f"QBO InventoryValuationDetail failed: HTTP {resp.status_code}: {resp.text[:2000] if resp.text else ''}"
         )
     return parse_inventory_valuation_starting_quantities(resp.json())
+
+
+def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
+    for idx in range(0, len(values), size):
+        yield values[idx : idx + size]
+
+
+def _fetch_missing_qbo_inventory_starting_quantities(
+    *,
+    token_mgr: TokenManager,
+    realm_id: str,
+    item_ids: Iterable[str],
+    existing: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    missing = [
+        str(item_id).strip()
+        for item_id in item_ids
+        if str(item_id).strip()
+        and existing.get(str(item_id).strip(), {}).get("current_starting_qty") is None
+    ]
+    if not missing:
+        return {}
+
+    found: dict[str, dict[str, Any]] = {}
+    for batch in _chunked(missing, _QBO_STARTING_QTY_FALLBACK_BATCH_SIZE):
+        try:
+            batch_rows = fetch_qbo_inventory_starting_quantities(
+                token_mgr=token_mgr,
+                realm_id=realm_id,
+                item_ids=batch,
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed targeted QBO START-row lookup for {len(batch)} item(s): {exc}")
+            continue
+        for item_id, row in batch_rows.items():
+            if row.get("current_starting_qty") is not None:
+                row = dict(row)
+                row["source"] = "inventory_valuation_detail_item_filter_start_row"
+                found[item_id] = row
+    return found
 
 
 def _qbo_query_items_page(
@@ -815,6 +860,15 @@ def fetch_qbo_inventory_items_snapshot(
             starting_by_id = fetch_qbo_inventory_starting_quantities(token_mgr=token_mgr, realm_id=realm_id)
             found = sum(1 for value in starting_by_id.values() if value.get("current_starting_qty") is not None)
             print(f"[INFO] QBO InventoryValuationDetail START rows discovered: {found}")
+            targeted = _fetch_missing_qbo_inventory_starting_quantities(
+                token_mgr=token_mgr,
+                realm_id=realm_id,
+                item_ids=[str(it.get("Id") or "") for it in rows],
+                existing=starting_by_id,
+            )
+            if targeted:
+                starting_by_id.update(targeted)
+                print(f"[INFO] QBO targeted START-row lookup discovered: {len(targeted)}")
         except Exception as exc:
             print(f"[WARN] Failed to fetch QBO inventory starting quantities: {exc}")
 
