@@ -249,9 +249,13 @@ class CompanyConfigRecord(models.Model):
 class RunJob(models.Model):
     SCOPE_SINGLE = "single_company"
     SCOPE_ALL = "all_companies"
+    SCOPE_INVENTORY_PIPELINE = "inventory_pipeline"
+    SCOPE_INVENTORY_SYNC = "inventory_sync"
     SCOPE_CHOICES = [
         (SCOPE_SINGLE, "Single Company"),
         (SCOPE_ALL, "All Companies"),
+        (SCOPE_INVENTORY_PIPELINE, "Inventory"),
+        (SCOPE_INVENTORY_SYNC, "Inventory Sync"),
     ]
 
     STATUS_QUEUED = "queued"
@@ -277,6 +281,7 @@ class RunJob(models.Model):
     parallel = models.PositiveSmallIntegerField(default=1)
     stagger_seconds = models.PositiveSmallIntegerField(default=2)
     continue_on_failure = models.BooleanField(default=False)
+    inventory_options_json = models.JSONField(default=dict, blank=True)
     command_json = models.JSONField(default=list)
     command_display = models.TextField(blank=True)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
@@ -320,9 +325,98 @@ class RunJob(models.Model):
 
     @property
     def display_label(self) -> str:
-        """Human-readable run label: YYYY-MM-DD HH:MM from started_at or created_at."""
+        """Legacy human-readable run label: YYYY-MM-DD HH:MM from started_at or created_at.
+
+        Prefer `friendly_id` for operator-facing identification.
+        """
         dt = self.started_at or self.created_at
         return dt.strftime("%Y-%m-%d %H:%M") if dt else str(self.id)
+
+    @property
+    def workflow_label(self) -> str:
+        if self.scope in {self.SCOPE_SINGLE, self.SCOPE_ALL}:
+            return "Sales"
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            return "Inventory"
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            return "Inventory Audit/Debug"
+        return "Run"
+
+    @property
+    def scope_label(self) -> str:
+        if self.scope == self.SCOPE_ALL:
+            return "All companies"
+        if self.scope == self.SCOPE_SINGLE:
+            return "Single company"
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            return "Inventory"
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            return "Inventory audit"
+        return str(self.scope).replace("_", " ").strip() or "Run"
+
+    def get_target_label(self, *, company_display_name: str | None = None) -> str:
+        """Operator-facing target summary for Run Detail."""
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            opts = self.inventory_options_json if isinstance(self.inventory_options_json, dict) else {}
+            raw_categories = opts.get("categories") or []
+            categories: list[str] = []
+            if isinstance(raw_categories, str):
+                raw_categories = [raw_categories]
+            if isinstance(raw_categories, list):
+                categories = [str(c).strip() for c in raw_categories if str(c).strip()]
+            product = str(opts.get("product_filter") or "").strip()
+            parts: list[str] = []
+            if categories:
+                parts.append(f"Category: {', '.join(categories)}")
+            if product:
+                parts.append(f"Product: {product}")
+            return "; ".join(parts) if parts else "All products"
+
+        if self.scope == self.SCOPE_ALL:
+            return "All companies"
+
+        if self.scope == self.SCOPE_SINGLE:
+            label = (company_display_name or self.company_key or "").strip()
+            return f"Company: {label}" if label else "Company"
+
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            label = (company_display_name or self.company_key or "").strip()
+            if label:
+                return f"Inventory audit — {label}"
+            return "Inventory audit"
+
+        return self.scope_label
+
+    @property
+    def run_prefix(self) -> str:
+        if self.scope in {self.SCOPE_SINGLE, self.SCOPE_ALL}:
+            return "SAL"
+        if self.scope == self.SCOPE_INVENTORY_PIPELINE:
+            return "INV"
+        if self.scope == self.SCOPE_INVENTORY_SYNC:
+            return "AUD"
+        return "RUN"
+
+    @property
+    def friendly_id(self) -> str:
+        """Operator-facing run ID: INV/SAL-MMDD-HHMM-XXXX."""
+        dt = self.started_at or self.created_at
+        if dt is None:
+            return f"{self.run_prefix}-????-????-{self._uuid_suffix}"
+        local = timezone.localtime(dt)
+        mmdd = local.strftime("%m%d")
+        hhmm = local.strftime("%H%M")
+        return f"{self.run_prefix}-{mmdd}-{hhmm}-{self._uuid_suffix}"
+
+    @property
+    def friendly_title(self) -> str:
+        return f"{self.workflow_label} Run {self.friendly_id}"
+
+    @property
+    def _uuid_suffix(self) -> str:
+        # UUIDField string begins with the hex prefix (e.g. e8333646-...)
+        raw = str(self.id).split("-", 1)[0]
+        return (raw[:4] or "????").upper()
 
     def __str__(self) -> str:
         return f"RunJob {self.id} [{self.status}]"
@@ -336,6 +430,14 @@ class RunArtifact(models.Model):
         (RELIABILITY_WARNING, "Warning"),
     ]
 
+    KIND_SALES_UPLOAD = "sales_upload"
+    KIND_INVENTORY_AUDIT = "inventory_audit"
+    KIND_CHOICES = [
+        (KIND_SALES_UPLOAD, "Sales Upload"),
+        (KIND_INVENTORY_AUDIT, "Inventory"),
+    ]
+
+    kind = models.CharField(max_length=32, choices=KIND_CHOICES, default=KIND_SALES_UPLOAD)
     run_job = models.ForeignKey(RunJob, null=True, blank=True, on_delete=models.SET_NULL, related_name="artifacts")
     company_key = models.SlugField(max_length=64)
     target_date = models.DateField(null=True, blank=True)
@@ -378,6 +480,93 @@ class RunArtifact(models.Model):
             models.Index(fields=["company_key", "reconcile_status"]),
         ]
 
+    @property
+    def operator_label(self) -> str:
+        """Operator-facing artifact label for Run Detail."""
+        stats = self.upload_stats_json if isinstance(self.upload_stats_json, dict) else {}
+        report_type = str(stats.get("report_type") or "").strip()
+        run_type = str(stats.get("run_type") or "").strip()
+        path = str(self.source_path or "")
+        lowered = path.lower()
+
+        # Inventory pipeline summary artifact
+        if report_type == RunJob.SCOPE_INVENTORY_PIPELINE or run_type == RunJob.SCOPE_INVENTORY_PIPELINE:
+            return "Inventory report"
+        if "inventory_pipeline_" in lowered or "/inventory_pipeline/" in lowered:
+            return "Inventory report"
+
+        # Inventory audits / sidecars
+        if self.kind == self.KIND_INVENTORY_AUDIT:
+            if "inventory_catalog_cleanup" in lowered:
+                return "Catalog cleanup report"
+            if "inventory_audit_" in lowered or "/inventory_sync/" in lowered:
+                return "Inventory audit"
+            # Default inventory artifact classification (safe)
+            return "Inventory audit"
+
+        if "inventory_catalog_cleanup" in lowered:
+            return "Catalog cleanup report"
+        if "inventory_audit_" in lowered or "/inventory_sync/" in lowered:
+            return "Inventory audit"
+
+        # Sales artifacts
+        if self.kind == self.KIND_SALES_UPLOAD:
+            return "Sales metadata"
+
+        return "Artifact"
+
+    @property
+    def operator_label_color(self) -> str:
+        """Tailwind-ish color key for `operator_label` badge."""
+        label = self.operator_label
+        if label == "Inventory report":
+            return "emerald"
+        if label in {"Inventory audit", "Catalog cleanup report"}:
+            return "amber"
+        if label == "Sales metadata":
+            return "blue"
+        return "slate"
+
+
+class InventoryReviewAcknowledgement(models.Model):
+    """Operator acknowledgement for a specific inventory review artifact.
+
+    This is intentionally tied to the artifact, not the company alone, so a
+    newer inventory audit automatically reopens review if it still finds issues.
+    """
+
+    company_key = models.SlugField(max_length=64)
+    artifact = models.OneToOneField(
+        RunArtifact,
+        on_delete=models.CASCADE,
+        related_name="inventory_review_acknowledgement",
+    )
+    run_job = models.ForeignKey(
+        RunJob,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="inventory_review_acknowledgements",
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="inventory_review_acknowledgements",
+    )
+    reviewed_at = models.DateTimeField(default=timezone.now)
+    summary_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-reviewed_at"]
+        indexes = [
+            models.Index(fields=["company_key", "-reviewed_at"], name="epos_qbo_inv_ack_company_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Inventory review acknowledged for {self.company_key} artifact {self.artifact_id}"
+
 
 class RunLock(models.Model):
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
@@ -393,17 +582,30 @@ class RunLock(models.Model):
 
 
 class RunSchedule(models.Model):
+    SCHEDULE_TYPE_RECURRING = "recurring"
+    SCHEDULE_TYPE_ONE_TIME = "one_time"
+    SCHEDULE_TYPE_CHOICES = [
+        (SCHEDULE_TYPE_RECURRING, "Recurring"),
+        (SCHEDULE_TYPE_ONE_TIME, "One-time"),
+    ]
+
     TARGET_DATE_MODE_TRADING_DATE = "trading_date"
     TARGET_DATE_MODE_CHOICES = [
         (TARGET_DATE_MODE_TRADING_DATE, "Target Trading Date"),
     ]
 
     LAST_RESULT_QUEUED = "queued"
+    LAST_RESULT_SUCCEEDED = "succeeded"
+    LAST_RESULT_FAILED = "failed"
+    LAST_RESULT_CANCELLED = "cancelled"
     LAST_RESULT_SKIPPED_OVERLAP = "skipped_overlap"
     LAST_RESULT_SKIPPED_INVALID = "skipped_invalid"
     LAST_RESULT_ERROR = "error"
     LAST_RESULT_CHOICES = [
         (LAST_RESULT_QUEUED, "Queued"),
+        (LAST_RESULT_SUCCEEDED, "Succeeded"),
+        (LAST_RESULT_FAILED, "Failed"),
+        (LAST_RESULT_CANCELLED, "Cancelled"),
         (LAST_RESULT_SKIPPED_OVERLAP, "Skipped (Overlap)"),
         (LAST_RESULT_SKIPPED_INVALID, "Skipped (Invalid)"),
         (LAST_RESULT_ERROR, "Error"),
@@ -412,10 +614,18 @@ class RunSchedule(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=120)
     enabled = models.BooleanField(default=True)
+    schedule_type = models.CharField(
+        max_length=16,
+        choices=SCHEDULE_TYPE_CHOICES,
+        default=SCHEDULE_TYPE_RECURRING,
+    )
     scope = models.CharField(max_length=32, choices=RunJob.SCOPE_CHOICES, default=RunJob.SCOPE_ALL)
     company_key = models.SlugField(max_length=64, null=True, blank=True)
-    cron_expr = models.CharField(max_length=120)
+    cron_expr = models.CharField(max_length=120, blank=True)
     timezone_name = models.CharField(max_length=64, default="UTC")
+    run_once_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    inventory_options_json = models.JSONField(default=dict, blank=True)
     target_date_mode = models.CharField(
         max_length=32,
         choices=TARGET_DATE_MODE_CHOICES,
@@ -458,7 +668,13 @@ class RunSchedule(models.Model):
         ]
 
     def __str__(self) -> str:
+        if self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            return f"{self.name} (one-time)"
         return f"{self.name} ({self.cron_expr})"
+
+    @property
+    def is_one_time(self) -> bool:
+        return self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME
 
     @property
     def last_fired_relative(self) -> str:
@@ -466,27 +682,46 @@ class RunSchedule(models.Model):
 
     def clean(self) -> None:
         errors: dict[str, str] = {}
-        try:
-            validate_cron_expr(self.cron_expr)
-        except ValidationError:
-            errors["cron_expr"] = "Enter a valid cron expression."
+        if self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            if self.run_once_at is None:
+                errors["run_once_at"] = "Run once time is required for one-time schedules."
+            self.cron_expr = (self.cron_expr or "").strip()
+        else:
+            try:
+                validate_cron_expr(self.cron_expr)
+            except ValidationError:
+                errors["cron_expr"] = "Enter a valid cron expression."
+            self.run_once_at = None
+            self.completed_at = None
         try:
             validate_timezone_name(self.timezone_name)
         except ValidationError:
             errors["timezone_name"] = "Enter a valid timezone."
 
-        if self.scope == RunJob.SCOPE_SINGLE and not (self.company_key or "").strip():
-            errors["company_key"] = "Company key is required for single-company schedules."
+        if self.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE} and not (
+            self.company_key or ""
+        ).strip():
+            errors["company_key"] = "Company key is required for this schedule."
         if self.scope == RunJob.SCOPE_ALL:
             self.company_key = None
-        if self.scope == RunJob.SCOPE_SINGLE:
+        if self.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE}:
             self.parallel = 1
             self.continue_on_failure = False
+        if self.scope != RunJob.SCOPE_INVENTORY_PIPELINE:
+            self.inventory_options_json = {}
 
         if errors:
             raise ValidationError(errors)
 
     def compute_next_fire_at(self, *, from_dt: datetime | None = None) -> datetime:
+        if self.schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            if self.run_once_at is None:
+                raise ValidationError("Run once time is required for one-time schedules.")
+            run_once_at = self.run_once_at
+            if timezone.is_naive(run_once_at):
+                run_once_at = timezone.make_aware(run_once_at, dt_timezone.utc)
+            return run_once_at.astimezone(dt_timezone.utc)
+
         validate_cron_expr(self.cron_expr)
         validate_timezone_name(self.timezone_name)
 
@@ -512,6 +747,7 @@ class RunScheduleEvent(models.Model):
     TYPE_SKIPPED_OVERLAP = "skipped_overlap"
     TYPE_SKIPPED_INVALID = "skipped_invalid"
     TYPE_ERROR = "error"
+    TYPE_ONE_TIME_COMPLETED = "one_time_completed"
     TYPE_FALLBACK_ENABLED = "fallback_enabled"
     TYPE_FALLBACK_DISABLED = "fallback_disabled"
     TYPE_RUN_SUCCEEDED = "run_succeeded"
@@ -521,6 +757,7 @@ class RunScheduleEvent(models.Model):
         (TYPE_SKIPPED_OVERLAP, "Skipped Overlap"),
         (TYPE_SKIPPED_INVALID, "Skipped Invalid"),
         (TYPE_ERROR, "Error"),
+        (TYPE_ONE_TIME_COMPLETED, "One-time Completed"),
         (TYPE_FALLBACK_ENABLED, "Fallback Enabled"),
         (TYPE_FALLBACK_DISABLED, "Fallback Disabled"),
         (TYPE_RUN_SUCCEEDED, "Run Succeeded"),
@@ -556,11 +793,11 @@ class RunScheduleEvent(models.Model):
     @property
     def resolved_schedule_name(self) -> str:
         if self.schedule is not None:
-            return self.schedule.name
+            return _operator_schedule_name(self.schedule.name)
         if isinstance(self.payload_json, dict):
             payload_name = self.payload_json.get("schedule_name")
             if payload_name:
-                return str(payload_name)
+                return _operator_schedule_name(str(payload_name))
             payload_scope = self.payload_json.get("scope")
             if payload_scope == RunJob.SCOPE_ALL:
                 return "All companies (legacy)"
@@ -570,8 +807,42 @@ class RunScheduleEvent(models.Model):
                     return f"{payload_company} (legacy)"
                 return "Single company (legacy)"
         if self.run_job is not None and self.run_job.scheduled_by is not None:
-            return self.run_job.scheduled_by.name
+            return _operator_schedule_name(self.run_job.scheduled_by.name)
         return "-"
+
+    @property
+    def friendly_type_label(self) -> str:
+        labels = {
+            self.TYPE_QUEUED: "Run queued",
+            self.TYPE_RUN_SUCCEEDED: "Run succeeded",
+            self.TYPE_RUN_FAILED: "Run failed",
+            self.TYPE_SKIPPED_OVERLAP: "Run skipped",
+            self.TYPE_SKIPPED_INVALID: "Run skipped",
+            self.TYPE_ERROR: "Run failed",
+            self.TYPE_ONE_TIME_COMPLETED: "One-time completed",
+            self.TYPE_FALLBACK_ENABLED: "Schedule enabled",
+            self.TYPE_FALLBACK_DISABLED: "Schedule disabled",
+        }
+        return labels.get(self.event_type, self.get_event_type_display() or self.event_type)
+
+    @property
+    def friendly_message(self) -> str:
+        messages = {
+            self.TYPE_QUEUED: "Run queued",
+            self.TYPE_RUN_SUCCEEDED: "Run completed successfully",
+            self.TYPE_RUN_FAILED: "Run failed",
+            self.TYPE_SKIPPED_OVERLAP: "Skipped because another run is active",
+            self.TYPE_ERROR: "Run failed",
+            self.TYPE_ONE_TIME_COMPLETED: "Queued once and disabled",
+            self.TYPE_FALLBACK_ENABLED: "Schedule enabled",
+            self.TYPE_FALLBACK_DISABLED: "Schedule is disabled",
+        }
+        if self.event_type == self.TYPE_SKIPPED_INVALID:
+            raw = (self.message or "").lower()
+            if "disabled" in raw:
+                return "Schedule is disabled"
+            return "Schedule is invalid"
+        return messages.get(self.event_type, self.message or self.friendly_type_label)
 
     def __str__(self) -> str:
         return f"{self.event_type} @ {self.created_at.isoformat() if self.created_at else '-'}"
@@ -647,3 +918,12 @@ class DashboardUserPreference(models.Model):
     class Meta:
         verbose_name = "Dashboard user preference"
         verbose_name_plural = "Dashboard user preferences"
+
+
+def _operator_schedule_name(name: str) -> str:
+    raw = (name or "").strip()
+    if raw == "All Companies Daily Run":
+        return "Daily Sales Sync"
+    if raw == "Legacy Env Fallback":
+        return "System Fallback Schedule"
+    return raw or "-"

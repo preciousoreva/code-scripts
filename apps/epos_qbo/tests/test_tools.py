@@ -8,6 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from apps.epos_qbo.models import CompanyConfigRecord
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 from apps.epos_qbo.views import _tools_venv_python
 
 
@@ -38,7 +39,8 @@ class ToolsPageTests(TestCase):
 
     def test_tools_requires_permission(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.get(reverse("epos_qbo:tools"))
+        with suppress_expected_request_logs():
+            response = self.client.get(reverse("epos_qbo:tools"))
         self.assertEqual(response.status_code, 403)
 
     def test_tools_renders_for_authorized_user(self):
@@ -85,16 +87,18 @@ class QBOQueryAPITests(TestCase):
 
     def test_requires_post(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.get(reverse("epos_qbo:tools-qbo-query"))
+        with suppress_expected_request_logs():
+            response = self.client.get(reverse("epos_qbo:tools-qbo-query"))
         self.assertEqual(response.status_code, 405)
 
     def test_missing_company(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:tools-qbo-query"),
-            data=json.dumps({"query": "select Id from Item"}),
-            content_type="application/json",
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:tools-qbo-query"),
+                data=json.dumps({"query": "select Id from Item"}),
+                content_type="application/json",
+            )
         self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertFalse(data["success"])
@@ -102,11 +106,12 @@ class QBOQueryAPITests(TestCase):
 
     def test_empty_query(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:tools-qbo-query"),
-            data=json.dumps({"company_key": "company_a", "query": ""}),
-            content_type="application/json",
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:tools-qbo-query"),
+                data=json.dumps({"company_key": "company_a", "query": ""}),
+                content_type="application/json",
+            )
         self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertFalse(data["success"])
@@ -114,11 +119,14 @@ class QBOQueryAPITests(TestCase):
 
     def test_unknown_company(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:tools-qbo-query"),
-            data=json.dumps({"company_key": "nonexistent", "query": "select Id from Item"}),
-            content_type="application/json",
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:tools-qbo-query"),
+                data=json.dumps(
+                    {"company_key": "nonexistent", "query": "select Id from Item"}
+                ),
+                content_type="application/json",
+            )
         self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertIn("Unknown or inactive", data["error"])
@@ -145,11 +153,12 @@ class QBOQueryAPITests(TestCase):
     def test_script_failure(self, mock_run):
         mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="Error: token expired")
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:tools-qbo-query"),
-            data=json.dumps({"company_key": "company_a", "query": "select Id from Item"}),
-            content_type="application/json",
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:tools-qbo-query"),
+                data=json.dumps({"company_key": "company_a", "query": "select Id from Item"}),
+                content_type="application/json",
+            )
         self.assertEqual(response.status_code, 502)
         data = response.json()
         self.assertFalse(data["success"])
@@ -176,16 +185,18 @@ class VerifyMappingAPITests(TestCase):
 
     def test_requires_post(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.get(reverse("epos_qbo:tools-verify-mapping"))
+        with suppress_expected_request_logs():
+            response = self.client.get(reverse("epos_qbo:tools-verify-mapping"))
         self.assertEqual(response.status_code, 405)
 
     def test_missing_company(self):
         self.client.login(username="operator", password="pw12345")
-        response = self.client.post(
-            reverse("epos_qbo:tools-verify-mapping"),
-            data=json.dumps({}),
-            content_type="application/json",
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:tools-verify-mapping"),
+                data=json.dumps({}),
+                content_type="application/json",
+            )
         self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertFalse(data["success"])

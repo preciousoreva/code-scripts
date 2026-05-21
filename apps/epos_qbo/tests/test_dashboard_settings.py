@@ -20,6 +20,7 @@ from apps.epos_qbo.models import (
     RunArtifact,
     RunJob,
 )
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 def _reset_portal_settings_defaults():
@@ -111,7 +112,7 @@ class DashboardSettingsTests(TestCase):
         ):
             enriched = views._enrich_company_data(self.company, run)
         issue_messages = [item["message"] for item in enriched["issues"]]
-        self.assertIn("No sync in 3 hours", issue_messages)
+        self.assertIn("No sales sync in 3 hours", issue_messages)
 
     @override_settings(OIAT_DASHBOARD_RECON_DIFF_WARNING="2.5")
     def test_reconcile_mismatch_threshold_respects_setting(self):
@@ -166,7 +167,7 @@ class DashboardSettingsTests(TestCase):
         ):
             status, summary = views._status_for_company(self.company, latest_artifact=None, latest_job=None)
         self.assertEqual(status, "unknown")
-        self.assertEqual(summary, "No successful sync yet.")
+        self.assertEqual(summary, "No successful sales sync recorded.")
 
     @override_settings(
         OIAT_BUSINESS_TIMEZONE="Africa/Lagos",
@@ -297,15 +298,18 @@ class SettingsPageTests(TestCase):
         self.assertEqual(row.default_stagger_seconds, 5)
 
     def test_user_without_permission_gets_403_when_posting_portal_defaults(self):
-        response = self.client.post(
-            reverse("epos_qbo:settings"),
-            {
-                "csrfmiddlewaretoken": self.client.get(reverse("epos_qbo:settings")).cookies["csrftoken"].value,
-                "save_portal": "1",
-                "default_parallel": "3",
-            },
-            follow=False,
-        )
+        with suppress_expected_request_logs():
+            response = self.client.post(
+                reverse("epos_qbo:settings"),
+                {
+                    "csrfmiddlewaretoken": self.client.get(reverse("epos_qbo:settings")).cookies[
+                        "csrftoken"
+                    ].value,
+                    "save_portal": "1",
+                    "default_parallel": "3",
+                },
+                follow=False,
+            )
         self.assertEqual(response.status_code, 403)
 
     def test_user_can_save_preferences(self):

@@ -39,6 +39,7 @@ _db_lock = threading.Lock()
 
 # One-time init per process (avoids DDL + chmod on every load_tokens call)
 _db_initialized = False
+_db_init_lock = threading.Lock()
 
 
 def ensure_db_initialized() -> None:
@@ -46,8 +47,12 @@ def ensure_db_initialized() -> None:
     global _db_initialized
     if _db_initialized:
         return
-    _init_database()
-    _db_initialized = True
+    # Avoid racing init across threads in Django / CLI contexts.
+    with _db_init_lock:
+        if _db_initialized:
+            return
+        _init_database()
+        _db_initialized = True
 
 
 def _validate_credentials() -> None:
@@ -121,10 +126,11 @@ def _init_database() -> None:
         DB_FILE.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(DB_FILE)
         try:
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS qbo_tokens (
                     company_key TEXT NOT NULL,
-                    realm_id TEXT NOT NULL UNIQUE,
+                    realm_id TEXT NOT NULL,
                     access_token TEXT,
                     refresh_token TEXT NOT NULL,
                     access_expires_at INTEGER,
@@ -134,7 +140,8 @@ def _init_database() -> None:
                     client_fingerprint TEXT,
                     PRIMARY KEY (company_key, realm_id)
                 )
-            """)
+                """
+            )
             columns = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(qbo_tokens)").fetchall()
@@ -143,6 +150,41 @@ def _init_database() -> None:
                 conn.execute("ALTER TABLE qbo_tokens ADD COLUMN refresh_expires_at INTEGER")
             if "client_fingerprint" not in columns:
                 conn.execute("ALTER TABLE qbo_tokens ADD COLUMN client_fingerprint TEXT")
+
+            # If an older DB was created with `realm_id UNIQUE`, SQLite doesn't support dropping
+            # constraints in-place. Rebuild the table once to remove that uniqueness and rely on
+            # the composite PK (company_key, realm_id) instead.
+            create_sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='qbo_tokens'"
+            ).fetchone()
+            create_sql = (create_sql_row[0] or "") if create_sql_row else ""
+            if "realm_id" in create_sql and "UNIQUE" in create_sql and "realm_id TEXT NOT NULL UNIQUE" in create_sql:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS qbo_tokens_v2 (
+                        company_key TEXT NOT NULL,
+                        realm_id TEXT NOT NULL,
+                        access_token TEXT,
+                        refresh_token TEXT NOT NULL,
+                        access_expires_at INTEGER,
+                        refresh_expires_at INTEGER,
+                        updated_at INTEGER NOT NULL,
+                        environment TEXT DEFAULT 'production',
+                        client_fingerprint TEXT,
+                        PRIMARY KEY (company_key, realm_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO qbo_tokens_v2
+                    (company_key, realm_id, access_token, refresh_token, access_expires_at, refresh_expires_at, updated_at, environment, client_fingerprint)
+                    SELECT company_key, realm_id, access_token, refresh_token, access_expires_at, refresh_expires_at, updated_at, environment, client_fingerprint
+                    FROM qbo_tokens
+                    """
+                )
+                conn.execute("DROP TABLE qbo_tokens")
+                conn.execute("ALTER TABLE qbo_tokens_v2 RENAME TO qbo_tokens")
             conn.commit()
         finally:
             conn.close()

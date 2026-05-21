@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from apps.epos_qbo import views
 from apps.epos_qbo.models import CompanyConfigRecord, RunArtifact, RunJob
+from apps.epos_qbo.tests.utils import suppress_expected_request_logs
 
 
 class ReconciledRevenueOverviewContextTests(TestCase):
@@ -131,7 +132,8 @@ class ReconciledRevenueOverviewContextTests(TestCase):
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
-            context = views._overview_context("7d")
+            with suppress_expected_request_logs():
+                context = views._overview_context("7d")
 
         self.assertEqual(context["revenue_period"], "7d")
         self.assertTrue(context["has_reconciled_revenue_data"])
@@ -151,7 +153,8 @@ class ReconciledRevenueOverviewContextTests(TestCase):
             mock.patch("apps.epos_qbo.views.timezone.now", return_value=self.fixed_now),
             mock.patch("apps.epos_qbo.views.load_tokens", return_value=self._token_payload()),
         ):
-            context = views._overview_context("bad-value")
+            with suppress_expected_request_logs():
+                context = views._overview_context("bad-value")
 
         self.assertEqual(context["revenue_period"], "7d")
 

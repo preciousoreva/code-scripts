@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from apps.epos_qbo.business_date import get_target_trading_date
 
-from ..models import RunJob, RunSchedule, RunScheduleEvent, SchedulerWorkerHeartbeat
+from ..models import RunJob, RunLock, RunSchedule, RunScheduleEvent, SchedulerWorkerHeartbeat
 from .job_runner import dispatch_next_queued_job
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,7 @@ def _create_event(
         payload_json.setdefault("schedule_id", str(schedule.id))
         payload_json.setdefault("schedule_name", schedule.name)
         payload_json.setdefault("schedule_scope", schedule.scope)
+        payload_json.setdefault("schedule_type", schedule.schedule_type)
     return RunScheduleEvent.objects.create(
         schedule=schedule,
         run_job=run_job,
@@ -104,14 +105,33 @@ def _active_scheduled_run_exists(schedule: RunSchedule) -> bool:
     ).exists()
 
 
+def _active_global_run_exists() -> bool:
+    if RunLock.objects.filter(active=True).exists():
+        return True
+    return RunJob.objects.filter(status=RunJob.STATUS_RUNNING).exists()
+
+
+def _schedule_requires_company(schedule: RunSchedule) -> bool:
+    return schedule.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE}
+
+
 def _job_payload_from_schedule(schedule: RunSchedule, *, now: datetime) -> dict[str, Any]:
-    target_date = get_target_trading_date(now=now)
-    if schedule.scope == RunJob.SCOPE_SINGLE:
+    target_date = None
+    inventory_options: dict[str, Any] = {}
+    if schedule.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE}:
         parallel = 1
         continue_on_failure = False
     else:
         parallel = max(1, int(schedule.parallel))
         continue_on_failure = bool(schedule.continue_on_failure)
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        inventory_options = (
+            dict(schedule.inventory_options_json)
+            if isinstance(schedule.inventory_options_json, dict)
+            else {}
+        )
+    else:
+        target_date = get_target_trading_date(now=now)
     return {
         "scope": schedule.scope,
         "company_key": schedule.company_key or None,
@@ -119,6 +139,7 @@ def _job_payload_from_schedule(schedule: RunSchedule, *, now: datetime) -> dict[
         "parallel": parallel,
         "stagger_seconds": max(0, int(schedule.stagger_seconds)),
         "continue_on_failure": continue_on_failure,
+        "inventory_options_json": inventory_options,
         "status": RunJob.STATUS_QUEUED,
         "scheduled_by": schedule,
         "command_display": f"schedule:{schedule.name}",
@@ -154,24 +175,25 @@ def _upsert_env_fallback_schedule(*, now: datetime) -> dict[str, int]:
             _create_event(
                 schedule=schedule,
                 event_type=RunScheduleEvent.TYPE_FALLBACK_DISABLED,
-                message="Environment fallback disabled by OIAT_SCHEDULER_ENABLE_ENV_FALLBACK=0.",
+                message="Schedule is disabled.",
             )
             stats["fallback_disabled"] += 1
         return stats
 
-    has_enabled_user_schedule = RunSchedule.objects.filter(
+    has_enabled_user_sales_schedule = RunSchedule.objects.filter(
         enabled=True,
         is_system_managed=False,
+        scope__in=[RunJob.SCOPE_ALL, RunJob.SCOPE_SINGLE],
     ).exists()
 
-    if has_enabled_user_schedule:
+    if has_enabled_user_sales_schedule:
         for schedule in RunSchedule.objects.filter(is_system_managed=True, enabled=True):
             schedule.enabled = False
             schedule.save(update_fields=["enabled", "updated_at"])
             _create_event(
                 schedule=schedule,
                 event_type=RunScheduleEvent.TYPE_FALLBACK_DISABLED,
-                message="Disabled env fallback because at least one DB schedule is enabled.",
+                message="Schedule is disabled because a sales schedule is configured.",
             )
             stats["fallback_disabled"] += 1
         return stats
@@ -227,7 +249,7 @@ def _upsert_env_fallback_schedule(*, now: datetime) -> dict[str, int]:
         _create_event(
             schedule=schedule,
             event_type=RunScheduleEvent.TYPE_FALLBACK_ENABLED,
-            message="Env fallback schedule enabled from SCHEDULE_CRON/SCHEDULE_TZ.",
+            message="Schedule enabled from environment configuration.",
             payload={"cron_expr": schedule.cron_expr, "timezone_name": schedule.timezone_name},
         )
         stats["fallback_enabled"] += 1
@@ -242,24 +264,44 @@ def enqueue_run_for_schedule(
     source: str = "manual",
 ) -> tuple[RunJob | None, str]:
     current = now or timezone.now()
-    if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
+    if _schedule_requires_company(schedule) and not (schedule.company_key or "").strip():
         _create_event(
             schedule=schedule,
             event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
-            message=f"Skipped {source} enqueue: single-company schedule is missing company key.",
+            message="Schedule is invalid: company is required.",
         )
         return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
 
     with transaction.atomic():
         schedule = RunSchedule.objects.select_for_update().get(pk=schedule.pk)
-        if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
+        if _schedule_requires_company(schedule) and not (schedule.company_key or "").strip():
             schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
-            schedule.last_error = "Single-company schedule is missing company key."
+            schedule.last_error = "Company key is required for this schedule."
             schedule.save(update_fields=["last_result", "last_error", "updated_at"])
             _create_event(
                 schedule=schedule,
                 event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
-                message=f"Skipped {source} enqueue: single-company schedule is missing company key.",
+                message="Schedule is invalid: company is required.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+        if schedule.is_one_time and schedule.completed_at is not None:
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
+            schedule.last_error = "One-time schedule has already completed."
+            schedule.save(update_fields=["last_result", "last_error", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                message="One-time schedule has already completed.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+        if schedule.is_one_time and schedule.run_once_at is None:
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
+            schedule.last_error = "Run once time is required for this schedule."
+            schedule.save(update_fields=["last_result", "last_error", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                message="Schedule is invalid: run once time is required.",
             )
             return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
         if _active_scheduled_run_exists(schedule):
@@ -270,7 +312,18 @@ def enqueue_run_for_schedule(
             _create_event(
                 schedule=schedule,
                 event_type=RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
-                message=f"Skipped {source} enqueue because this schedule already has a queued/running run.",
+                message="Skipped because another run is active.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_OVERLAP
+        if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE and _active_global_run_exists():
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_OVERLAP
+            schedule.last_error = ""
+            schedule.last_fired_at = current
+            schedule.save(update_fields=["last_result", "last_error", "last_fired_at", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
+                message="Skipped because another run is active.",
             )
             return None, RunScheduleEvent.TYPE_SKIPPED_OVERLAP
 
@@ -279,33 +332,61 @@ def enqueue_run_for_schedule(
         schedule.last_result = RunSchedule.LAST_RESULT_QUEUED
         schedule.last_error = ""
         schedule.last_fired_at = current
-        schedule.save(update_fields=["last_result", "last_error", "last_fired_at", "updated_at"])
+        update_fields = ["last_result", "last_error", "last_fired_at", "updated_at"]
+        if schedule.is_one_time:
+            schedule.enabled = False
+            schedule.completed_at = current
+            schedule.next_fire_at = None
+            update_fields.extend(["enabled", "completed_at", "next_fire_at"])
+        schedule.save(update_fields=update_fields)
 
         _create_event(
             schedule=schedule,
             run_job=job,
             event_type=RunScheduleEvent.TYPE_QUEUED,
-            message=f"Run queued ({source}).",
+            message="Run queued.",
             payload={
                 "scope": job.scope,
                 "company_key": job.company_key,
                 "target_date": job.target_date.isoformat() if job.target_date else None,
+                "inventory_options": job.inventory_options_json,
             },
         )
+        if schedule.is_one_time:
+            _create_event(
+                schedule=schedule,
+                run_job=job,
+                event_type=RunScheduleEvent.TYPE_ONE_TIME_COMPLETED,
+                message="One-time schedule queued once and was disabled.",
+                payload={"completed_at": current.isoformat()},
+            )
         return job, RunScheduleEvent.TYPE_QUEUED
 
 
 def _process_due_schedule(schedule: RunSchedule, *, now: datetime) -> tuple[RunJob | None, str]:
-    if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
+    if _schedule_requires_company(schedule) and not (schedule.company_key or "").strip():
         schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
-        schedule.last_error = "Single-company schedule is missing company key."
+        schedule.last_error = "Company key is required for this schedule."
         schedule.save(update_fields=["last_result", "last_error", "updated_at"])
         _create_event(
             schedule=schedule,
             event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
-            message="Skipping invalid schedule: single-company scope requires company key.",
+            message="Schedule is invalid: company is required.",
         )
         return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+
+    if schedule.is_one_time:
+        if schedule.run_once_at is None:
+            schedule.last_result = RunSchedule.LAST_RESULT_SKIPPED_INVALID
+            schedule.last_error = "Run once time is required for this schedule."
+            schedule.save(update_fields=["last_result", "last_error", "updated_at"])
+            _create_event(
+                schedule=schedule,
+                event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                message="Schedule is invalid: run once time is required.",
+            )
+            return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
+        return enqueue_run_for_schedule(schedule, now=now, source="worker")
 
     try:
         next_fire_at = schedule.compute_next_fire_at(from_dt=now)
@@ -316,7 +397,7 @@ def _process_due_schedule(schedule: RunSchedule, *, now: datetime) -> tuple[RunJ
         _create_event(
             schedule=schedule,
             event_type=RunScheduleEvent.TYPE_SKIPPED_INVALID,
-            message=f"Skipping invalid schedule: {exc}",
+            message=f"Schedule is invalid: {exc}",
         )
         return None, RunScheduleEvent.TYPE_SKIPPED_INVALID
 

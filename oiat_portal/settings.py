@@ -172,6 +172,10 @@ OIAT_DASHBOARD_RECON_DIFF_WARNING = _env_float("OIAT_DASHBOARD_RECON_DIFF_WARNIN
 # Set to match your scheduler (e.g. America/New_York). If unset, uses TIME_ZONE (UTC).
 OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)
 
+# Public base URL for building operator-facing links (Slack, emails).
+# Keep empty by default; production should set via environment.
+OIAT_PORTAL_BASE_URL = os.getenv("OIAT_PORTAL_BASE_URL", "").strip().rstrip("/")
+
 # Canonical business-day clock for overview KPIs and quick-sync defaults.
 OIAT_BUSINESS_TIMEZONE = os.getenv("OIAT_BUSINESS_TIMEZONE", "Africa/Lagos")
 OIAT_BUSINESS_DAY_CUTOFF_HOUR = _env_int("OIAT_BUSINESS_DAY_CUTOFF_HOUR", 5, minimum=0)

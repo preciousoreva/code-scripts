@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -9,13 +10,16 @@ import time
 from pathlib import Path
 from shlex import join as shlex_join
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
 from oiat_portal.paths import BASE_DIR, OPS_RUN_LOGS_DIR
 
+from code_scripts.slack_notify import build_inventory_review_action_envelope
+
 from .. import portal_settings
-from ..models import RunJob, RunLock, RunScheduleEvent
+from ..models import RunJob, RunLock, RunSchedule, RunScheduleEvent
 from .artifact_ingestion import attach_recent_artifacts_to_job
 from .locking import release_run_lock
 
@@ -51,6 +55,12 @@ def build_command(cleaned: dict) -> list[str]:
     date_mode = cleaned["date_mode"]
     python_exe = resolve_python_executable()
 
+    if scope == RunJob.SCOPE_INVENTORY_SYNC:
+        return _build_inventory_command(python_exe, cleaned)
+
+    if scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return _build_inventory_pipeline_command(python_exe, cleaned)
+
     if scope == RunJob.SCOPE_SINGLE:
         cmd = [python_exe, str(BASE_DIR / "code_scripts" / "run_pipeline.py"), "--company", cleaned["company_key"]]
     else:
@@ -66,6 +76,217 @@ def build_command(cleaned: dict) -> list[str]:
         cmd.extend(["--from-date", cleaned["from_date"].strftime("%Y-%m-%d"), "--to-date", cleaned["to_date"].strftime("%Y-%m-%d")])
         if cleaned.get("skip_download"):
             cmd.append("--skip-download")
+
+    return [str(part) for part in cmd]
+
+
+def _build_inventory_pipeline_command(python_exe: str, cleaned: dict) -> list[str]:
+    """Build the operator-facing unified inventory pipeline command."""
+    opts = cleaned.get("inventory_options") or {}
+    _validate_inventory_review_options(opts)
+    company = cleaned["company_key"]
+    if not company:
+        raise ValueError("inventory_pipeline requires company_key")
+    product_filter = str(opts.get("product_filter") or "").strip()
+
+    cmd: list[str] = [
+        python_exe,
+        "-m",
+        "code_scripts.inventory_pipeline",
+        "--company",
+        str(company),
+    ]
+    mode = _inventory_pipeline_mode(opts)
+    cmd.extend(["--mode", mode])
+    stock_csv = (opts.get("stock_csv") or "").strip()
+    if stock_csv:
+        cmd.extend(["--stock-csv", stock_csv])
+    else:
+        cmd.append("--auto-download")
+
+    if opts.get("qbo_csv"):
+        cmd.extend(["--qbo-csv", str(opts["qbo_csv"])])
+    else:
+        cmd.extend(["--auto-fetch-qbo", "--qbo-force-refresh"])
+
+    if product_filter:
+        cmd.extend(["--product", product_filter])
+    base_names = opts.get("base_names") or []
+    if isinstance(base_names, str):
+        base_names = [base_names]
+    if isinstance(base_names, list):
+        for base_name in base_names:
+            value = str(base_name or "").strip()
+            if value:
+                cmd.extend(["--base-name", value])
+    categories = opts.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    if isinstance(categories, list):
+        for category in categories:
+            value = str(category or "").strip()
+            if value:
+                cmd.extend(["--category", value])
+
+    max_catalog_fixes = _positive_inventory_limit(
+        opts.get("max_catalog_fixes"),
+        "max_catalog_fixes",
+    )
+    max_quantity_adjustments = _positive_inventory_limit(
+        opts.get("max_quantity_adjustments"),
+        "max_quantity_adjustments",
+    )
+    if max_catalog_fixes is not None:
+        cmd.extend(["--max-catalog-fixes", str(max_catalog_fixes)])
+    if max_quantity_adjustments is not None:
+        cmd.extend(["--max-quantity-adjustments", str(max_quantity_adjustments)])
+
+    if isinstance(opts.get("review_create_missing_items"), dict) and opts.get("review_create_missing_items"):
+        cmd.append("--review-create-missing-items")
+
+    if opts.get("max_qty_delta") is not None:
+        cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
+    if opts.get("max_apply_qty_delta") is not None:
+        cmd.extend(["--max-apply-qty-delta", str(opts["max_apply_qty_delta"])])
+    if opts.get("max_apply_value_impact") is not None:
+        cmd.extend(["--max-apply-value-impact", str(opts["max_apply_value_impact"])])
+    if opts.get("allow_zero_cost_apply"):
+        cmd.append("--allow-zero-cost-apply")
+    if opts.get("allow_negative_qbo_qty_apply"):
+        cmd.append("--allow-negative-qbo-qty-apply")
+    if opts.get("adjust_account_id"):
+        cmd.extend(["--adjust-account-id", str(opts["adjust_account_id"])])
+    if opts.get("txn_date"):
+        cmd.extend(["--txn-date", str(opts["txn_date"])])
+    if opts.get("dry_run"):
+        cmd.append("--dry-run")
+
+    return [str(part) for part in cmd]
+
+
+def _validate_inventory_review_options(opts: dict) -> None:
+    """Fail closed when a review-triggered inventory write job loses its scope."""
+
+    review_retry = opts.get("review_retry")
+    review_create_missing = opts.get("review_create_missing_items")
+    if not isinstance(review_retry, dict) and not isinstance(review_create_missing, dict):
+        return
+
+    base_names = opts.get("base_names") or []
+    if isinstance(base_names, str):
+        base_names = [base_names]
+    scoped_base_names = [str(value or "").strip() for value in base_names if str(value or "").strip()]
+    if not scoped_base_names:
+        raise ValueError("inventory review jobs require scoped base_names")
+
+    max_catalog = _positive_inventory_limit(opts.get("max_catalog_fixes"), "max_catalog_fixes")
+    max_quantity = _positive_inventory_limit(
+        opts.get("max_quantity_adjustments"),
+        "max_quantity_adjustments",
+    )
+
+    if isinstance(review_create_missing, dict):
+        if max_catalog != 0 or max_quantity != 0:
+            raise ValueError("inventory missing-item review jobs must disable catalog and quantity phases")
+        return
+
+    intent = str(review_retry.get("intent") or "").strip()
+    row_count = int(review_retry.get("row_count") or len(scoped_base_names))
+    if intent == "review_retry_catalog_cleanup":
+        if max_catalog is None or max_catalog > row_count or max_quantity != 0:
+            raise ValueError("catalog review jobs must be scoped by row count and disable quantity")
+    elif intent == "review_retry_quantity_adjustments":
+        if max_catalog != 0 or max_quantity is None or max_quantity > row_count:
+            raise ValueError("quantity review jobs must disable catalog and be scoped by row count")
+    else:
+        raise ValueError("unknown inventory review retry intent")
+
+
+def _inventory_pipeline_mode(opts: dict) -> str:
+    raw = str(opts.get("mode") or "").strip()
+    if raw:
+        return raw
+    review_retry = opts.get("review_retry")
+    if isinstance(review_retry, dict):
+        intent = str(review_retry.get("intent") or "").strip()
+        if intent == "review_retry_catalog_cleanup":
+            return "catalog_plan_only"
+        if intent == "review_retry_quantity_adjustments":
+            return "opening_balance_correction_preview"
+    if isinstance(opts.get("review_create_missing_items"), dict):
+        return "audit_only"
+    return "audit_only"
+
+
+def _positive_inventory_limit(value: object, option_name: str) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"inventory_pipeline requires non-negative {option_name}") from exc
+    if parsed < 0:
+        raise ValueError(f"inventory_pipeline requires non-negative {option_name}")
+    return parsed
+
+
+def _build_inventory_command(python_exe: str, cleaned: dict) -> list[str]:
+    """Build a `python -m code_scripts.inventory_sync ...` command.
+
+    Portal-triggered inventory audits always auto-download a fresh EPOS Stock
+    Report — operators don't supply a CSV path through the form. Advanced
+    operators who want to point at an existing CSV can pre-populate
+    inventory_options['stock_csv'] (e.g. via API) and we'll honor it instead;
+    otherwise we emit `--auto-download`.
+
+    Required keys in cleaned: company_key.
+    Optional keys pulled from inventory_options (dict): stock_csv, qbo_csv,
+    product_filter, categories, tolerance, apply, dry_run, allow_ambiguous,
+    max_adjustments, max_qty_delta, adjust_account_id, txn_date.
+    """
+    opts = cleaned.get("inventory_options") or {}
+    company = cleaned["company_key"]
+    if not company:
+        raise ValueError("inventory_sync requires company_key")
+
+    cmd: list[str] = [
+        python_exe, "-m", "code_scripts.inventory_sync",
+        "--company", str(company),
+    ]
+    stock_csv = (opts.get("stock_csv") or "").strip()
+    if stock_csv:
+        cmd.extend(["--stock-csv", stock_csv])
+    else:
+        cmd.append("--auto-download")
+
+    if opts.get("qbo_csv"):
+        cmd.extend(["--qbo-csv", str(opts["qbo_csv"])])
+    if opts.get("product_filter"):
+        cmd.extend(["--product", str(opts["product_filter"])])
+    categories = opts.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    if isinstance(categories, list):
+        for category in categories:
+            value = str(category or "").strip()
+            if value:
+                cmd.extend(["--category", value])
+    if opts.get("tolerance") is not None:
+        cmd.extend(["--tolerance", str(opts["tolerance"])])
+    if opts.get("apply"):
+        raise ValueError("inventory_sync apply mode has been removed; use preview/manual correction workflow")
+    if opts.get("dry_run"):
+        cmd.append("--dry-run")
+    if opts.get("allow_ambiguous"):
+        cmd.append("--allow-ambiguous")
+    if opts.get("max_adjustments") is not None:
+        cmd.extend(["--max-adjustments", str(int(opts["max_adjustments"]))])
+    if opts.get("max_qty_delta") is not None:
+        cmd.extend(["--max-qty-delta", str(opts["max_qty_delta"])])
+    if opts.get("adjust_account_id"):
+        cmd.extend(["--adjust-account-id", str(opts["adjust_account_id"])])
+    if opts.get("txn_date"):
+        cmd.extend(["--txn-date", str(opts["txn_date"])])
 
     return [str(part) for part in cmd]
 
@@ -88,6 +309,7 @@ def build_command_for_job(job: RunJob) -> list[str]:
         "parallel": job.parallel,
         "stagger_seconds": job.stagger_seconds,
         "continue_on_failure": job.continue_on_failure,
+        "inventory_options": job.inventory_options_json or {},
     }
     return build_command(cleaned)
 
@@ -131,16 +353,19 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
                     if job.status == RunJob.STATUS_SUCCEEDED
                     else RunScheduleEvent.TYPE_RUN_FAILED
                 )
-                message = (
-                    f"Run completed with status={job.status} exit_code={exit_code}"
-                    if exit_code is not None
-                    else f"Run completed with status={job.status}"
-                )
+                message = "Run completed successfully" if job.status == RunJob.STATUS_SUCCEEDED else "Run failed"
                 payload_json = {
                     "status": job.status,
                     "exit_code": exit_code,
                 }
                 if schedule is not None:
+                    if job.status == RunJob.STATUS_SUCCEEDED:
+                        schedule.last_result = RunSchedule.LAST_RESULT_SUCCEEDED
+                        schedule.last_error = ""
+                    else:
+                        schedule.last_result = RunSchedule.LAST_RESULT_FAILED
+                        schedule.last_error = job.failure_reason or "Run failed."
+                    schedule.save(update_fields=["last_result", "last_error", "updated_at"])
                     payload_json["schedule_id"] = str(schedule.id)
                     payload_json["schedule_name"] = schedule.name
                 RunScheduleEvent.objects.create(
@@ -158,6 +383,13 @@ def _monitor_process(job_id, popen: subprocess.Popen, log_handle):
                 attached_artifacts,
                 attach_elapsed_ms,
             )
+            if exit_code != 0 and job.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+                try:
+                    from .inventory_review_slack import send_inventory_review_action_failed_notification
+
+                    send_inventory_review_action_failed_notification(job)
+                except Exception as slack_exc:
+                    logger.warning("Inventory review action failure Slack skipped: %s", slack_exc)
         except Exception as exc:
             # Log error but don't crash - try to mark job as failed if status update failed
             logger.error(f"Failed to update RunJob {job_id} status after process exit: {exc}", exc_info=True)
@@ -186,6 +418,21 @@ def start_run_job(job: RunJob, command: list[str]) -> RunJob:
 
     env = dict(os.environ)
     env["OIAT_RUN_SOURCE"] = "dashboard"
+    env["OIAT_RUN_JOB_ID"] = str(job.id)
+    env["OIAT_RUN_SCOPE"] = str(job.scope)
+    env["OIAT_RUN_STARTED_AT"] = timezone.now().isoformat()
+    job_opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    rcm = job_opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        env["OIAT_REVIEW_CREATE_MISSING_JSON"] = json.dumps(rcm, separators=(",", ":"))
+    action_env = build_inventory_review_action_envelope(job_opts)
+    if action_env:
+        env["OIAT_INVENTORY_REVIEW_ACTION_JSON"] = json.dumps(action_env, separators=(",", ":"))
+    # Prefer explicit env override; otherwise fall back to Django settings.
+    if not env.get("OIAT_PORTAL_BASE_URL"):
+        base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or "").strip().rstrip("/")
+        if base:
+            env["OIAT_PORTAL_BASE_URL"] = base
     # Ensure code_scripts package is importable when running run_pipeline.py
     pythonpath = str(BASE_DIR)
     env["PYTHONPATH"] = pythonpath + os.pathsep + env.get("PYTHONPATH", "")

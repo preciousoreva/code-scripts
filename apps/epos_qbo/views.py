@@ -1,29 +1,48 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
+
+import requests
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from math import ceil
+from pathlib import Path
+from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, permission_required
+from django.db import DatabaseError
 from django.db.models import Q
-from django.http import Http404, HttpResponseForbidden, JsonResponse
+from django.http import FileResponse, Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from code_scripts.token_manager import ensure_db_initialized, load_tokens, load_tokens_batch
+from oiat_portal.paths import OPS_REPORTS_DIR
+from code_scripts.token_manager import (
+    ensure_db_initialized,
+    get_access_token,
+    load_tokens,
+    load_tokens_batch,
+    refresh_access_token,
+)
+from code_scripts.company_config import (
+    get_qbo_api_base_url,
+    normalize_qbo_environment,
+)
 
 from .forms import (
     CompanyAdvancedForm,
     CompanyBasicForm,
+    InventoryTriggerForm,
     PortalSettingsForm,
     RunScheduleForm,
     RunTriggerForm,
@@ -32,6 +51,7 @@ from .forms import (
 from .models import (
     CompanyConfigRecord,
     DashboardUserPreference,
+    InventoryReviewAcknowledgement,
     PortalSettings,
     RunArtifact,
     RunJob,
@@ -47,10 +67,34 @@ from .services.config_sync import (
     validate_company_config,
 )
 from .services.job_runner import dispatch_next_queued_job, read_log_chunk, resolve_python_executable
+from .services.inventory_categories import load_inventory_categories_by_company
+from .services.inventory_review_slack import send_inventory_review_action_queued
+from .services.inventory_review import REASON_GROUPS, parse_inventory_review_csv
+from .services.inventory_review_actions import (
+    REASON_GROUP_MISSING,
+    RETRY_INTENT_CATALOG,
+    RETRY_INTENT_QUANTITY,
+    REVIEW_CREATE_MISSING_INTENT,
+    SNAPSHOT_PACK_GUARD_MESSAGE,
+    build_missing_item_creation_preview,
+    coalesce_picker_date_from_get,
+    collect_category_options,
+    filter_missing_preview_by_category,
+    get_catalog_cleanup_rows,
+    get_quantity_adjustment_rows,
+    get_review_rows_by_reason,
+    inv_start_date_floor_iso,
+    load_review_context,
+    queue_missing_item_creation_job,
+    resolve_category_scope_labels,
+    resolve_txn_date_for_review_missing_item_creation,
+    validate_inventory_start_date_for_missing_queue,
+)
 from .services.schedule_worker import enqueue_run_for_schedule, get_scheduler_status
 from .dashboard_timezone import get_dashboard_date_bounds, get_dashboard_timezone_display
 from .business_date import (
     get_business_day_cutoff,
+    get_business_timezone,
     get_business_timezone_display,
     get_target_trading_date,
 )
@@ -87,7 +131,10 @@ HEALTH_REASON_LABELS = {
     "LATEST_RUN_FAILED": "Latest run failed",
     "UPLOAD_FAILURE": "Upload failures in latest run",
     "RECON_MISMATCH": "Reconciliation mismatch above threshold",
-    "NO_ARTIFACT_METADATA": "No successful sync yet",
+    "INVENTORY_FAILURE": "Latest inventory run failed",
+    "INVENTORY_NEEDS_REVIEW": "Inventory needs review",
+    "INVENTORY_NOT_CHECKED": "Inventory not checked",
+    "NO_ARTIFACT_METADATA": "No successful sales sync recorded",
 }
 # Run detail: message when run succeeded but 0 Sales Receipts uploaded (all skipped). {skipped} placeholder.
 RUN_DETAIL_ALL_SKIPPED_MESSAGE = (
@@ -102,6 +149,82 @@ EXIT_CODE_REFERENCE = [
     {"code": "126", "message": "Subprocess command invoked but not executable."},
     {"code": "127", "message": "Subprocess command/dependency not found."},
 ]
+RUN_ARTIFACT_REPORT_LABELS = {
+    "source": "Inventory Report",
+    "summary_csv": "Summary CSV",
+    "summary_json": "Summary JSON",
+    "final_audit": "Final Audit",
+    "initial_audit": "Initial Audit",
+    "catalog_cleanup": "Catalog Cleanup",
+    "quantity_preview_csv": "Quantity Preview",
+    "quantity_preview_json": "Quantity Preview JSON",
+    "opening_balance_correction_csv": "Opening Balance Correction",
+    "opening_balance_correction_json": "Opening Balance Correction JSON",
+    "post_catalog_audit": "Post Catalog Audit",
+    "review_missing_create_report": "Missing item creation report",
+}
+RUN_ARTIFACT_REPORT_ORDER = [
+    "summary_csv",
+    "summary_json",
+    "review_missing_create_report",
+    "final_audit",
+    "opening_balance_correction_csv",
+    "opening_balance_correction_json",
+    "initial_audit",
+    "catalog_cleanup",
+    "post_catalog_audit",
+    "source",
+]
+RUN_ARTIFACT_REPORT_SUFFIXES = {".csv", ".json"}
+INVENTORY_MODE_LABELS = {
+    "audit_only": "Inventory review",
+    "quantity_preview": "Preview only",
+    "opening_balance_correction_preview": "Opening balance correction preview",
+    "catalog_plan_only": "Catalog plan only",
+    "review_create_missing_items": "Missing item creation",
+}
+INVENTORY_MODE_WRITE_INTENT_LABELS = {
+    "audit_only": "No QBO inventory writes",
+    "quantity_preview": "Preview quantity adjustments",
+    "opening_balance_correction_preview": "Preview opening balance correction",
+    "catalog_plan_only": "Plan catalog cleanup",
+    "review_create_missing_items": "Create missing inventory items",
+}
+INVENTORY_SAFE_APPLY_COPY = "Inventory review is read-only. Quantity apply is removed; use the review results for manual QBO corrections."
+
+
+def _unique_existing_resolved_dirs(paths: list[Path]) -> list[Path]:
+    roots: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.exists() or not resolved.is_dir():
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _trusted_report_roots() -> list[Path]:
+    roots = [
+        Path(settings.BASE_DIR),
+        OPS_REPORTS_DIR,
+    ]
+    state_root = os.getenv("STATE_ROOT") or os.getenv("OIAT_STATE_ROOT")
+    if state_root:
+        roots.append(Path(state_root) / "code_scripts" / "reports")
+    roots.append(Path("/data/code_scripts/reports"))
+    return _unique_existing_resolved_dirs(roots)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _health_reason_labels(reason_codes: list[str] | None) -> list[str]:
@@ -184,6 +307,8 @@ def _get_user_overview_defaults(request):
         pref = DashboardUserPreference.objects.get(user=request.user)
     except DashboardUserPreference.DoesNotExist:
         return (None, "7d")
+    except DatabaseError:
+        return (None, "7d")
     period = (pref.default_revenue_period or "").strip() or "7d"
     if period not in REVENUE_PERIOD_DAYS:
         period = "7d"
@@ -251,11 +376,11 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
             "severity": "critical",
             "status_color": "red",
             "token_unknown": True,
-            "connection_state": "missing_tokens",
+            "connection_state": "missing_realm_id",
             "access_state": "unknown",
-            "display_label": "QBO re-authentication required",
-            "display_subtext": guidance,
-            "status_message": "QBO re-authentication required",
+            "display_label": "Realm ID not configured",
+            "display_subtext": "Add the Realm ID in company settings to connect QuickBooks.",
+            "status_message": "Realm ID not configured",
             "days_remaining": None,
             "expiring_soon": False,
             "expires_at": None,
@@ -265,8 +390,8 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
                 {
                     "severity": "red",
                     "icon": "solar:shield-warning-linear",
-                    "message": "QBO re-authentication required",
-                    "action": "refresh_token",
+                    "message": "Realm ID not configured",
+                    "action": "configure_realm_id",
                 }
             ],
         }
@@ -423,7 +548,7 @@ def _company_token_health(company: CompanyConfigRecord, tokens: dict | None = No
 
 
 def _overview_live_log_message(job: RunJob, company_display: str) -> str:
-    run_label = job.display_label
+    run_label = job.friendly_id
     if job.status == RunJob.STATUS_SUCCEEDED:
         return f"{company_display}: Run {run_label} succeeded"
     if job.status == RunJob.STATUS_FAILED:
@@ -460,16 +585,375 @@ def _run_activity_status(latest_job: RunJob | None) -> str:
     return "idle"
 
 
+def _run_status_time(job: RunJob | None):
+    if not job:
+        return None
+    return job.finished_at or job.started_at or job.created_at
+
+
+def _artifact_status_time(artifact: RunArtifact | None):
+    if not artifact:
+        return None
+    return artifact.processed_at or artifact.imported_at
+
+
+def _coerce_config_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _company_inventory_enabled(company: CompanyConfigRecord) -> bool:
+    cfg = company.config_json if isinstance(company.config_json, dict) else {}
+    inventory = cfg.get("inventory") if isinstance(cfg.get("inventory"), dict) else {}
+    return _coerce_config_bool(inventory.get("enable_inventory_items"))
+
+
+def _company_capabilities(company: CompanyConfigRecord) -> dict:
+    return {
+        "sales_sync": True,
+        "inventory": _company_inventory_enabled(company),
+    }
+
+
+def _safe_int_stat(stats: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(stats.get(key, default) or 0)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _is_inventory_pipeline_artifact(artifact: RunArtifact) -> bool:
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    if stats.get("report_type") == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return True
+    if artifact.run_job and artifact.run_job.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return True
+    source_name = os.path.basename(str(artifact.source_path or ""))
+    return source_name.startswith("inventory_pipeline_") and source_name.endswith(".json")
+
+
+def _is_inventory_artifact(artifact: RunArtifact) -> bool:
+    if artifact.kind == RunArtifact.KIND_INVENTORY_AUDIT:
+        return True
+    if artifact.run_job and artifact.run_job.scope in {
+        RunJob.SCOPE_INVENTORY_PIPELINE,
+        RunJob.SCOPE_INVENTORY_SYNC,
+    }:
+        return True
+    return _is_inventory_pipeline_artifact(artifact)
+
+
+def _is_sales_artifact(artifact: RunArtifact) -> bool:
+    if _is_inventory_artifact(artifact):
+        return False
+    return artifact.kind in {"", RunArtifact.KIND_SALES_UPLOAD, None}
+
+
+def _inventory_summary_from_artifact(artifact: RunArtifact | None) -> dict:
+    if artifact is None:
+        return {}
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    summary = dict(stats)
+    path = str(summary.get("summary_json") or artifact.source_path or "").strip()
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("run_type") == RunJob.SCOPE_INVENTORY_PIPELINE:
+            for key, value in payload.items():
+                summary.setdefault(key, value)
+    return summary
+
+
+def _coerce_bool_stat(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _inventory_mode_label(mode: object, summary: dict | None = None) -> str:
+    raw_mode = str(mode or "").strip()
+    summary = summary if isinstance(summary, dict) else {}
+    return INVENTORY_MODE_LABELS.get(raw_mode, raw_mode.replace("_", " ").title() if raw_mode else "")
+
+
+def _inventory_mode_context(job: RunJob, artifacts_list: list[RunArtifact]) -> dict[str, object] | None:
+    if job.scope not in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+        return None
+    opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    summary: dict = {}
+    for artifact in artifacts_list:
+        if _is_inventory_artifact(artifact):
+            summary = _inventory_summary_from_artifact(artifact)
+            if summary:
+                break
+    mode = str(summary.get("inventory_mode") or opts.get("mode") or "").strip()
+    if not mode:
+        return None
+    return {
+        "inventory_mode": mode,
+        "mode_label": _inventory_mode_label(mode, summary),
+        "write_intent": summary.get("write_intent") or INVENTORY_MODE_WRITE_INTENT_LABELS.get(mode, ""),
+        "qbo_write_attempted": _coerce_bool_stat(summary.get("qbo_write_attempted")),
+        "qbo_write_blocked": _coerce_bool_stat(summary.get("qbo_write_blocked")),
+        "catalog_apply_enabled": _coerce_bool_stat(summary.get("catalog_apply_enabled")),
+        "quantity_apply_enabled": _coerce_bool_stat(summary.get("quantity_apply_enabled")),
+        "missing_item_create_enabled": _coerce_bool_stat(summary.get("missing_item_create_enabled")),
+    }
+
+
+def _has_non_in_sync_inventory_rows(summary: dict) -> bool:
+    counts = summary.get("final_status_counts") if isinstance(summary.get("final_status_counts"), dict) else {}
+    for status, raw_count in counts.items():
+        if str(status) == "in_sync":
+            continue
+        if _safe_int_stat({str(status): raw_count}, str(status)) > 0:
+            return True
+    return False
+
+
+def _inventory_review_acknowledgement_for_artifact(
+    artifact: RunArtifact | None,
+) -> InventoryReviewAcknowledgement | None:
+    if artifact is None:
+        return None
+    try:
+        return artifact.inventory_review_acknowledgement
+    except InventoryReviewAcknowledgement.DoesNotExist:
+        return None
+
+
+def _sales_status_for_company(
+    *,
+    latest_job: RunJob | None,
+    latest_artifact: RunArtifact | None,
+    reconcile_statuses_by_job: dict,
+) -> dict:
+    last_run = _run_status_time(latest_job) or _artifact_status_time(latest_artifact)
+    if latest_job is None and latest_artifact is None:
+        return {
+            "label": "No successful sales sync recorded",
+            "severity": "unknown",
+            "last_run": None,
+            "subtext": "",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_FAILED:
+        return {
+            "label": "Failed",
+            "severity": "critical",
+            "last_run": last_run,
+            "subtext": latest_job.failure_reason or "Latest sales run failed.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_RUNNING and latest_artifact is None:
+        return {
+            "label": "Running",
+            "severity": "unknown",
+            "last_run": last_run,
+            "subtext": "Sales sync is running.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_QUEUED and latest_artifact is None:
+        return {
+            "label": "Queued",
+            "severity": "unknown",
+            "last_run": last_run,
+            "subtext": "Sales sync is queued.",
+        }
+
+    statuses = []
+    if latest_job:
+        statuses = reconcile_statuses_by_job.get(str(latest_job.id), [])
+    elif latest_artifact:
+        statuses = [latest_artifact.reconcile_status or ""]
+    reconcile_label = _reconciliation_label_for_job("sales", {"sales": statuses})
+    if reconcile_label == "Match":
+        return {
+            "label": "Reconciled",
+            "severity": "healthy",
+            "last_run": last_run,
+            "subtext": "",
+        }
+    subtext = "Reconciliation mismatch." if reconcile_label == "Mismatch" else "No reconciliation artifact found."
+    return {
+        "label": "Not reconciled",
+        "severity": "warning",
+        "last_run": last_run,
+        "subtext": subtext,
+    }
+
+
+def _inventory_status_for_company(
+    *,
+    latest_job: RunJob | None,
+    latest_artifact: RunArtifact | None,
+) -> dict:
+    last_sync = _run_status_time(latest_job) or _artifact_status_time(latest_artifact)
+    if latest_job is None and latest_artifact is None:
+        return {
+            "label": "Not checked",
+            "severity": "unknown",
+            "last_sync": None,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": "",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_FAILED:
+        return {
+            "label": "Failed",
+            "severity": "critical",
+            "last_sync": last_sync,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": latest_job.failure_reason or "Latest inventory sync failed.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_RUNNING:
+        return {
+            "label": "Running",
+            "severity": "warning",
+            "last_sync": last_sync,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": "Inventory sync is running.",
+        }
+    if latest_job and latest_job.status == RunJob.STATUS_QUEUED:
+        return {
+            "label": "Queued",
+            "severity": "warning",
+            "last_sync": last_sync,
+            "products_checked": 0,
+            "blocked_items": 0,
+            "updates_applied": 0,
+            "subtext": "Inventory sync is queued.",
+        }
+
+    summary = _inventory_summary_from_artifact(latest_artifact)
+    inventory_mode = str(summary.get("inventory_mode") or "").strip()
+    mode_label = _inventory_mode_label(inventory_mode, summary)
+    products_checked = _safe_int_stat(summary, "products_checked")
+    in_sync = _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct"))
+    blocked = _safe_int_stat(summary, "blocked_items")
+    still_needs_review = _safe_int_stat(summary, "still_needs_review")
+    updates = (
+        _safe_int_stat(summary, "catalog_fixes_applied")
+        + _safe_int_stat(summary, "base_items_created")
+        + _safe_int_stat(summary, "duplicate_base_items_resolved")
+        + _safe_int_stat(summary, "quantity_updates_applied")
+    )
+    needs_review = (
+        blocked > 0
+        or still_needs_review > 0
+        or _has_non_in_sync_inventory_rows(summary)
+        or (products_checked > 0 and in_sync < products_checked)
+    )
+    clean = products_checked > 0 and in_sync == products_checked and blocked == 0 and still_needs_review == 0
+    if needs_review:
+        acknowledgement = _inventory_review_acknowledgement_for_artifact(latest_artifact)
+        if acknowledgement is not None:
+            return {
+                "label": "Reviewed",
+                "severity": "healthy",
+                "last_sync": last_sync,
+                "products_checked": products_checked,
+                "blocked_items": blocked,
+                "updates_applied": updates,
+                "subtext": "Manual inventory review acknowledged.",
+                "reviewed_at": acknowledgement.reviewed_at,
+                "reviewed_by": acknowledgement.reviewed_by,
+                "inventory_review_acknowledged": True,
+            }
+        return {
+            "label": "Needs review",
+            "severity": "warning",
+            "last_sync": last_sync,
+            "products_checked": products_checked,
+            "blocked_items": blocked,
+            "updates_applied": updates,
+            "subtext": "",
+        }
+    if clean:
+        return {
+            "label": mode_label or "In sync",
+            "severity": "healthy",
+            "last_sync": last_sync,
+            "products_checked": products_checked,
+            "blocked_items": blocked,
+            "updates_applied": updates,
+            "subtext": f"{updates} updates applied" if updates > 0 else "",
+            "inventory_mode": inventory_mode,
+        }
+    return {
+        "label": "Not checked",
+        "severity": "unknown",
+        "last_sync": last_sync,
+        "products_checked": products_checked,
+        "blocked_items": blocked,
+        "updates_applied": updates,
+        "subtext": "No inventory summary found.",
+    }
+
+
+def _inventory_review_required(inventory_enabled: bool, inventory_status: dict) -> bool:
+    return bool(inventory_enabled and str(inventory_status.get("label") or "") == "Needs review")
+
+
+def _inventory_review_action_label(inventory_status: dict) -> str:
+    blocked = _safe_int_stat(inventory_status, "blocked_items")
+    if blocked > 0:
+        return f"Review {blocked} item{'s' if blocked != 1 else ''}"
+    return "Review inventory"
+
+
+def _company_card_status(
+    sales_status: dict,
+    inventory_status: dict,
+    token_info: dict,
+    *,
+    inventory_enabled: bool = True,
+) -> str:
+    sales_level = str(sales_status.get("severity") or "unknown")
+    inventory_level = str(inventory_status.get("severity") or "unknown")
+    token_level = str(token_info.get("severity") or "unknown")
+    severities = [
+        sales_level,
+        token_level,
+    ]
+    if inventory_enabled:
+        severities.append(inventory_level)
+    if "critical" in severities:
+        return "critical"
+    if "warning" in severities:
+        return "warning"
+    if sales_level == "unknown" or (inventory_enabled and inventory_level == "unknown"):
+        return "unknown"
+    return "healthy"
+
+
 def _company_health_snapshot(
     company: CompanyConfigRecord,
     latest_artifact: RunArtifact | None,
     latest_job: RunJob | None,
     token_info: dict | None = None,
+    *,
+    inventory_enabled: bool | None = None,
+    inventory_status: dict | None = None,
 ) -> dict:
     """Canonical company health classification used by overview/list/detail views."""
     cfg = company.config_json or {}
     epos = cfg.get("epos") or {}
     token_info = token_info or _company_token_health(company)
+    if inventory_enabled is None:
+        inventory_enabled = _company_inventory_enabled(company)
     run_activity = _run_activity_status(latest_job)
 
     if not epos.get("username_env_key") or not epos.get("password_env_key"):
@@ -490,10 +974,20 @@ def _company_health_snapshot(
     if latest_job and latest_job.status == RunJob.STATUS_FAILED:
         return {
             "level": "critical",
-            "summary": latest_job.failure_reason or "Latest run failed.",
+            "summary": latest_job.failure_reason or "Latest sales sync failed.",
             "reason_codes": ["LATEST_RUN_FAILED"],
             "run_activity": run_activity,
         }
+
+    if inventory_enabled and inventory_status:
+        inventory_level = str(inventory_status.get("severity") or "")
+        if inventory_level == "critical":
+            return {
+                "level": "critical",
+                "summary": inventory_status.get("subtext") or "Latest inventory run failed.",
+                "reason_codes": ["INVENTORY_FAILURE"],
+                "run_activity": run_activity,
+            }
 
     if token_info["severity"] == "warning":
         return {
@@ -520,10 +1014,28 @@ def _company_health_snapshot(
                 "reason_codes": ["RECON_MISMATCH"],
                 "run_activity": run_activity,
             }
-    else:
+
+    if inventory_enabled and inventory_status:
+        inventory_level = str(inventory_status.get("severity") or "")
+        if inventory_level == "warning":
+            return {
+                "level": "warning",
+                "summary": inventory_status.get("subtext") or "Inventory needs review.",
+                "reason_codes": ["INVENTORY_NEEDS_REVIEW"],
+                "run_activity": run_activity,
+            }
+        if inventory_level == "unknown":
+            return {
+                "level": "unknown",
+                "summary": inventory_status.get("subtext") or "Inventory not checked.",
+                "reason_codes": ["INVENTORY_NOT_CHECKED"],
+                "run_activity": run_activity,
+            }
+
+    if not latest_artifact:
         return {
             "level": "unknown",
-            "summary": "No successful sync yet.",
+            "summary": "No successful sales sync recorded.",
             "reason_codes": ["NO_ARTIFACT_METADATA"],
             "run_activity": run_activity,
         }
@@ -697,71 +1209,108 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
     if prev_target_date is not None:
         prev_target_date_display = prev_target_date.strftime("%b %d")
 
-    latest_artifacts: dict[str, RunArtifact] = {}
-    latest_jobs: dict[str, RunJob] = {}
+    latest_sales_artifacts: dict[str, RunArtifact] = {}
+    latest_inventory_artifacts: dict[str, RunArtifact] = {}
+    sales_job_id_to_company_keys: dict = defaultdict(set)
+    inventory_job_id_to_company_keys: dict = defaultdict(set)
+    sales_reconcile_statuses_by_company_job: dict = defaultdict(list)
 
-    for artifact in RunArtifact.objects.filter(company_key__in=company_keys).order_by(
-        "company_key", "-processed_at", "-imported_at"
-    ):
-        if artifact.company_key not in latest_artifacts:
-            latest_artifacts[artifact.company_key] = artifact
+    overview_artifacts = list(
+        RunArtifact.objects.filter(company_key__in=company_keys)
+        .select_related("run_job")
+        .order_by("company_key", "-processed_at", "-imported_at")
+    )
+    for artifact in overview_artifacts:
+        if _is_sales_artifact(artifact):
+            if artifact.company_key not in latest_sales_artifacts:
+                latest_sales_artifacts[artifact.company_key] = artifact
+            if artifact.run_job_id and artifact.company_key:
+                sales_job_id_to_company_keys[artifact.run_job_id].add(artifact.company_key)
+                sales_reconcile_statuses_by_company_job[
+                    (artifact.company_key, str(artifact.run_job_id))
+                ].append(artifact.reconcile_status or "")
+        elif _is_inventory_artifact(artifact):
+            if artifact.company_key not in latest_inventory_artifacts:
+                latest_inventory_artifacts[artifact.company_key] = artifact
+            if (
+                artifact.run_job_id
+                and artifact.company_key
+                and artifact.run_job
+                and artifact.run_job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}
+            ):
+                inventory_job_id_to_company_keys[artifact.run_job_id].add(artifact.company_key)
 
-    # Build "latest run" per company including All Companies runs (same logic as _company_runs_queryset).
-    # Jobs with company_key=company apply to that company; jobs with artifacts for a company also apply.
-    job_id_to_company_keys: dict = defaultdict(set)
-    for run_job_id, ck in RunArtifact.objects.filter(
-        company_key__in=company_keys
-    ).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
-        if run_job_id and ck:
-            job_id_to_company_keys[run_job_id].add(ck)
-    job_ids_with_artifacts = list(job_id_to_company_keys.keys())
-    # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
-    # PRIORITIZE RUNNING/QUEUED JOBS: Query all relevant jobs, then process running/queued first
-    all_relevant_jobs = list(RunJob.objects.filter(
-        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
-    ).order_by("-finished_at", "-started_at", "-created_at"))
-    # First pass: prioritize running/queued jobs
-    for job in all_relevant_jobs:
-        if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
-            continue
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_jobs:
-                latest_jobs[ck] = job
-    # Second pass: fill in completed jobs for companies without active runs
-    for job in all_relevant_jobs:
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_jobs:
-                latest_jobs[ck] = job
+    latest_sales_jobs: dict[str, RunJob] = {}
+    sales_job_ids_with_artifacts = list(sales_job_id_to_company_keys.keys())
+    all_relevant_sales_jobs = list(
+        RunJob.objects.filter(
+            Q(company_key__in=company_keys, scope__in=[RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL])
+            | Q(id__in=sales_job_ids_with_artifacts)
+            | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        ).order_by("-finished_at", "-started_at", "-created_at")
+    )
+    for active_only in (True, False):
+        for job in all_relevant_sales_jobs:
+            if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                continue
+            candidates = []
+            if job.company_key and job.company_key in company_keys:
+                candidates.append(job.company_key)
+            elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+                candidates.extend(company_keys)
+            candidates.extend(sales_job_id_to_company_keys.get(job.id, []))
+            for ck in set(candidates):
+                if ck not in latest_sales_jobs:
+                    latest_sales_jobs[ck] = job
 
-    # Reconciliation warnings for succeeded latest runs (overview company list)
-    succeeded_job_ids = list({j.id for j in latest_jobs.values() if j.status == RunJob.STATUS_SUCCEEDED})
-    artifacts_by_job_overview: dict = defaultdict(list)
-    for run_job_id, status in RunArtifact.objects.filter(
-        run_job_id__in=succeeded_job_ids
-    ).values_list("run_job_id", "reconcile_status"):
-        if run_job_id is not None:
-            artifacts_by_job_overview[str(run_job_id)].append(status or "")
-    reconciliation_warning_by_job_id: dict = {}
-    for jid in succeeded_job_ids:
-        label = _reconciliation_label_for_job(str(jid), artifacts_by_job_overview)
-        if label == "Mismatch":
-            reconciliation_warning_by_job_id[jid] = "Reconciliation mismatch"
-        elif label == "Not reconciled":
-            reconciliation_warning_by_job_id[jid] = "Not reconciled"
+    latest_inventory_jobs: dict[str, RunJob] = {}
+    inventory_job_ids_with_artifacts = list(inventory_job_id_to_company_keys.keys())
+    all_relevant_inventory_jobs = list(
+        RunJob.objects.filter(
+            Q(
+                company_key__in=company_keys,
+                scope__in=[RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC],
+            )
+            | Q(id__in=inventory_job_ids_with_artifacts)
+        ).order_by("-finished_at", "-started_at", "-created_at")
+    )
+    for active_only in (True, False):
+        for job in all_relevant_inventory_jobs:
+            if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                continue
+            candidates = []
+            if job.company_key and job.company_key in company_keys:
+                candidates.append(job.company_key)
+            candidates.extend(inventory_job_id_to_company_keys.get(job.id, []))
+            for ck in set(candidates):
+                if ck not in latest_inventory_jobs:
+                    latest_inventory_jobs[ck] = job
+
+    latest_activity_jobs: dict[str, RunJob] = {}
+    activity_job_ids_with_artifacts = list(
+        set(sales_job_ids_with_artifacts + inventory_job_ids_with_artifacts)
+    )
+    all_relevant_activity_jobs = list(
+        RunJob.objects.filter(
+            Q(company_key__in=company_keys)
+            | Q(id__in=activity_job_ids_with_artifacts)
+            | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        ).order_by("-finished_at", "-started_at", "-created_at")
+    )
+    for active_only in (True, False):
+        for job in all_relevant_activity_jobs:
+            if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                continue
+            candidates = []
+            if job.company_key and job.company_key in company_keys:
+                candidates.append(job.company_key)
+            elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+                candidates.extend(company_keys)
+            candidates.extend(sales_job_id_to_company_keys.get(job.id, []))
+            candidates.extend(inventory_job_id_to_company_keys.get(job.id, []))
+            for ck in set(candidates):
+                if ck not in latest_activity_jobs:
+                    latest_activity_jobs[ck] = job
 
     ensure_db_initialized()
     token_pairs = [
@@ -775,33 +1324,61 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
     healthy_count = warning_count = critical_count = unknown_count = 0
 
     for company in companies:
-        latest_artifact = latest_artifacts.get(company.company_key)
-        latest_job = latest_jobs.get(company.company_key)
+        latest_sales_artifact = latest_sales_artifacts.get(company.company_key)
+        latest_sales_job = latest_sales_jobs.get(company.company_key)
+        latest_inventory_artifact = latest_inventory_artifacts.get(company.company_key)
+        latest_inventory_job = latest_inventory_jobs.get(company.company_key)
+        latest_activity_job = latest_activity_jobs.get(company.company_key)
+        capabilities = _company_capabilities(company)
+        inventory_enabled = capabilities["inventory"]
         realm_id = ((company.config_json or {}).get("qbo") or {}).get("realm_id")
         preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
         token_info = _company_token_health(company, tokens=preloaded_tokens)
+        sales_status = _sales_status_for_company(
+            latest_job=latest_sales_job,
+            latest_artifact=latest_sales_artifact,
+            reconcile_statuses_by_job={
+                str(latest_sales_job.id): sales_reconcile_statuses_by_company_job.get(
+                    (company.company_key, str(latest_sales_job.id))
+                    if latest_sales_job
+                    else (company.company_key, "")
+                )
+                or []
+            } if latest_sales_job else {},
+        )
+        inventory_status = _inventory_status_for_company(
+            latest_job=latest_inventory_job,
+            latest_artifact=latest_inventory_artifact,
+        )
+        inventory_review_required = _inventory_review_required(inventory_enabled, inventory_status)
         health = _company_health_snapshot(
             company,
-            latest_artifact=latest_artifact,
-            latest_job=latest_job,
+            latest_artifact=latest_sales_artifact,
+            latest_job=latest_sales_job,
             token_info=token_info,
+            inventory_enabled=inventory_enabled,
+            inventory_status=inventory_status,
         )
-        status = health["level"]
+        status = _company_card_status(
+            sales_status,
+            inventory_status,
+            token_info,
+            inventory_enabled=inventory_enabled,
+        )
         summary = health["summary"]
-        run_activity = _run_activity_display(health["run_activity"])
+        run_activity = _run_activity_display(_run_activity_status(latest_activity_job))
         health_reason_labels = _health_reason_labels(health.get("reason_codes"))
-        show_summary = _should_show_company_summary(status, summary, health_reason_labels)
-        latest_job_time = None
-        if latest_job:
-            latest_job_time = latest_job.finished_at or latest_job.started_at or latest_job.created_at
-        latest_artifact_time = None
-        if latest_artifact:
-            latest_artifact_time = latest_artifact.processed_at or latest_artifact.imported_at
-        last_run_time = latest_job_time or latest_artifact_time
-
-        last_run_reconciliation_warning = None
-        if latest_job and latest_job.status == RunJob.STATUS_SUCCEEDED:
-            last_run_reconciliation_warning = reconciliation_warning_by_job_id.get(latest_job.id)
+        show_summary = health["level"] == status and _should_show_company_summary(
+            status,
+            summary,
+            health_reason_labels,
+        )
+        latest_activity = _latest_activity_snapshot(
+            latest_activity_job=latest_activity_job,
+            latest_sales_artifact=latest_sales_artifact,
+            latest_inventory_artifact=latest_inventory_artifact,
+        )
+        last_run_time = latest_activity["at"]
 
         if status == "healthy":
             healthy_count += 1
@@ -817,15 +1394,34 @@ def _overview_context(revenue_period: str = "7d", company_key: str | None = None
                 "name": company.display_name,
                 "company_key": company.company_key,
                 "last_run": last_run_time,
+                "latest_activity_job": latest_activity_job,
+                "latest_activity_label": latest_activity["label"],
+                "latest_activity_display": latest_activity["display"],
                 "status": status,
                 "health": health,
                 "run_activity": run_activity,
                 "health_reason_labels": health_reason_labels,
                 "token_info": token_info,
-                "records_synced": latest_artifact.rows_kept if latest_artifact else 0,
+                "token_status": token_info,
+                "sales_status": sales_status,
+                "latest_sales_job": latest_sales_job,
+                "latest_sales_artifact": latest_sales_artifact,
+                "latest_sales_sync_display": _sales_sync_display(latest_sales_artifact),
+                "inventory_enabled": inventory_enabled,
+                "capabilities": capabilities,
+                "inventory_status": inventory_status,
+                "inventory_review_required": inventory_review_required,
+                "inventory_review_label": _inventory_review_action_label(inventory_status),
+                "inventory_review_url": reverse(
+                    "epos_qbo:company_inventory_review",
+                    kwargs={"company_key": company.company_key},
+                ) if inventory_enabled else "",
+                "latest_inventory_job": latest_inventory_job,
+                "latest_inventory_artifact": latest_inventory_artifact,
+                "records_synced": latest_sales_artifact.rows_kept if latest_sales_artifact else 0,
                 "summary": summary,
                 "show_summary": show_summary,
-                "last_run_reconciliation_warning": last_run_reconciliation_warning,
+                "last_run_reconciliation_warning": None,
             }
         )
 
@@ -1245,9 +1841,152 @@ def _schedule_default_timezone_name() -> str:
     )
 
 
+def _safe_zoneinfo(name: str | None) -> ZoneInfo:
+    raw = (name or "").strip()
+    if not raw:
+        return ZoneInfo("UTC")
+    try:
+        return ZoneInfo(raw)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def _format_dt_fallback_utc(value: datetime) -> str:
+    dt = value
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.utc)
+    dt_utc = dt.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _human_day_label(*, local_dt: datetime, now_local: datetime) -> str:
+    d = local_dt.date()
+    today = now_local.date()
+    if d == today:
+        return "Today"
+    if d == today + timedelta(days=1):
+        return "Tomorrow"
+    if d == today - timedelta(days=1):
+        return "Yesterday"
+    if abs((d - today).days) <= 6:
+        return local_dt.strftime("%A")
+    return local_dt.strftime("%b %d, %Y")
+
+
+def _format_local_datetime_label(
+    value: datetime | None,
+    *,
+    tz_name: str,
+    now_utc: datetime,
+    include_tz_suffix: bool = True,
+    prefer_tz_abbrev: bool = True,
+) -> str:
+    """Format a datetime in the schedule's timezone for operator display."""
+    if value is None:
+        return "—"
+    try:
+        dt = value
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        tz = _safe_zoneinfo(tz_name)
+        local_dt = dt.astimezone(tz)
+        now_local = now_utc.astimezone(tz)
+        day = _human_day_label(local_dt=local_dt, now_local=now_local)
+        time_part = local_dt.strftime("%H:%M")
+        tz_abbrev = local_dt.strftime("%Z").strip()
+        tz_suffix = ""
+        if include_tz_suffix:
+            if prefer_tz_abbrev and tz_abbrev:
+                tz_suffix = f" {tz_abbrev}"
+            else:
+                tz_suffix = f" {tz_name}".strip() if tz_name else " UTC"
+        return f"{day} at {time_part}{tz_suffix}".strip()
+    except Exception:
+        return _format_dt_fallback_utc(value)
+
+
+def _format_schedule_next_run(schedule: RunSchedule, *, now_utc: datetime) -> str:
+    if not schedule.enabled:
+        return "—"
+    if schedule.is_one_time and schedule.completed_at is not None:
+        return "—"
+    if schedule.next_fire_at is None:
+        return "—"
+    return _format_local_datetime_label(
+        schedule.next_fire_at,
+        tz_name=schedule.timezone_name,
+        now_utc=now_utc,
+        include_tz_suffix=True,
+        prefer_tz_abbrev=True,
+    )
+
+
+def _format_one_time_timing(schedule: RunSchedule, *, now_utc: datetime) -> tuple[str, str, str]:
+    """Return (primary, secondary, detail) for one-time schedule timing column."""
+    tz_name = schedule.timezone_name or "UTC"
+    if schedule.completed_at is not None:
+        completed = _format_local_datetime_label(
+            schedule.completed_at,
+            tz_name=tz_name,
+            now_utc=now_utc,
+            include_tz_suffix=False,
+        )
+        primary = f"Completed {completed.lower()}"
+        return primary, f"{tz_name} · Ran once", ""
+    if not schedule.enabled:
+        when = _format_local_datetime_label(
+            schedule.run_once_at,
+            tz_name=tz_name,
+            now_utc=now_utc,
+            include_tz_suffix=False,
+        )
+        return "Disabled one-time run", f"{tz_name} · Scheduled for {when}", ""
+    when = _format_local_datetime_label(
+        schedule.run_once_at or schedule.next_fire_at,
+        tz_name=tz_name,
+        now_utc=now_utc,
+        include_tz_suffix=False,
+    )
+    return when, f"{tz_name} · Run once", ""
+
+
+def _format_recurring_timing(schedule: RunSchedule) -> tuple[str, str, str]:
+    primary = _friendly_cron_label(schedule)
+    secondary = schedule.timezone_name or "UTC"
+    detail = f"Cron: {schedule.cron_expr}" if schedule.cron_expr else "Cron: —"
+    return primary, secondary, detail
+
+
+def _local_input_date_time(
+    value: datetime | None,
+    *,
+    tz_name: str,
+) -> tuple[str, str]:
+    """Return (YYYY-MM-DD, HH:MM) in schedule timezone for form input values."""
+    if value is None:
+        return "", ""
+    try:
+        dt = value
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        tz = _safe_zoneinfo(tz_name)
+        local_dt = dt.astimezone(tz)
+        return local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M")
+    except Exception:
+        # Fallback to UTC representation (still safe for form inputs)
+        dt = value
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.utc)
+        utc_dt = dt.astimezone(timezone.utc)
+        return utc_dt.strftime("%Y-%m-%d"), utc_dt.strftime("%H:%M")
+
+
 def _schedule_create_initial() -> dict:
     return {
         "enabled": True,
+        "schedule_type": RunSchedule.SCHEDULE_TYPE_RECURRING,
+        "workflow": RunScheduleForm.WORKFLOW_SALES,
+        "company_target": RunScheduleForm.COMPANY_TARGET_ALL,
         "scope": RunJob.SCOPE_ALL,
         "cron_expr": "0 18 * * *",
         "timezone_name": _schedule_default_timezone_name(),
@@ -1256,6 +1995,252 @@ def _schedule_create_initial() -> dict:
         "stagger_seconds": portal_settings.get_default_stagger_seconds(),
         "continue_on_failure": False,
     }
+
+
+def _operator_schedule_name(schedule: RunSchedule) -> str:
+    if schedule.name == "All Companies Daily Run":
+        return "Daily Sales Sync"
+    if schedule.name == "Legacy Env Fallback":
+        return "System Fallback Schedule"
+    return schedule.name
+
+
+def _inventory_options(schedule: RunSchedule) -> dict:
+    return schedule.inventory_options_json if isinstance(schedule.inventory_options_json, dict) else {}
+
+
+def _first_inventory_category(schedule: RunSchedule) -> str:
+    categories = _inventory_options(schedule).get("categories") or []
+    if isinstance(categories, str):
+        return categories.strip()
+    if isinstance(categories, list) and categories:
+        return str(categories[0] or "").strip()
+    return ""
+
+
+def _inventory_product_filter(schedule: RunSchedule) -> str:
+    return str(_inventory_options(schedule).get("product_filter") or "").strip()
+
+
+def _company_display(company_map: dict[str, str], company_key: str | None) -> str:
+    key = (company_key or "").strip()
+    if not key:
+        return ""
+    return company_map.get(key) or key
+
+
+def _schedule_subtitle(schedule: RunSchedule, company_map: dict[str, str]) -> str:
+    if schedule.name == "Legacy Env Fallback" and schedule.is_system_managed:
+        return "Legacy environment configuration"
+    if schedule.scope == RunJob.SCOPE_ALL:
+        return "Sales Sync · All eligible companies"
+    if schedule.scope == RunJob.SCOPE_SINGLE:
+        company = _company_display(company_map, schedule.company_key)
+        return f"Sales Sync · {company}" if company else "Sales Sync · One company"
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        parts = ["Inventory Sync"]
+        company = _company_display(company_map, schedule.company_key)
+        if company:
+            parts.append(company)
+        category = _first_inventory_category(schedule)
+        product = _inventory_product_filter(schedule)
+        if category:
+            parts.append(f"Category: {category}")
+        if product:
+            parts.append(f"Product: {product}")
+        if not category and not product:
+            parts.append("All products")
+        return " · ".join(parts) if parts else "Inventory"
+    return schedule.get_scope_display()
+
+
+def _schedule_workflow(schedule: RunSchedule) -> str:
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return RunScheduleForm.WORKFLOW_INVENTORY
+    return RunScheduleForm.WORKFLOW_SALES
+
+
+def _schedule_company_target(schedule: RunSchedule) -> str:
+    if schedule.scope == RunJob.SCOPE_ALL:
+        return RunScheduleForm.COMPANY_TARGET_ALL
+    return RunScheduleForm.COMPANY_TARGET_ONE
+
+
+def _schedule_workflow_label(schedule: RunSchedule) -> str:
+    if schedule.scope == RunJob.SCOPE_INVENTORY_PIPELINE:
+        return "Inventory Sync"
+    return "Sales Sync"
+
+
+def _friendly_cron_label(schedule: RunSchedule) -> str:
+    if schedule.is_one_time:
+        if schedule.completed_at:
+            return "Completed"
+        return "One-time run"
+    parts = (schedule.cron_expr or "").split()
+    if len(parts) != 5:
+        return "Custom schedule"
+    minute, hour, day, month, weekday = parts
+    if not minute.isdigit() or not hour.isdigit():
+        return "Custom schedule"
+    minute_int = int(minute)
+    hour_int = int(hour)
+    if not (0 <= minute_int <= 59 and 0 <= hour_int <= 23):
+        return "Custom schedule"
+    time_label = f"{hour_int:02d}:{minute_int:02d}"
+    weekday_labels = {
+        "0": "Sunday",
+        "7": "Sunday",
+        "1": "Monday",
+        "2": "Tuesday",
+        "3": "Wednesday",
+        "4": "Thursday",
+        "5": "Friday",
+        "6": "Saturday",
+    }
+    if day == "*" and month == "*" and weekday == "*":
+        return f"Daily at {time_label}"
+    if day == "*" and month == "*" and weekday in weekday_labels:
+        return f"Weekly on {weekday_labels[weekday]} at {time_label}"
+    return "Custom schedule"
+
+
+def _last_result_label_from_event(event: RunScheduleEvent) -> str:
+    if event.event_type == RunScheduleEvent.TYPE_RUN_SUCCEEDED:
+        return "Succeeded"
+    if event.event_type in {RunScheduleEvent.TYPE_RUN_FAILED, RunScheduleEvent.TYPE_ERROR}:
+        return "Failed"
+    if event.event_type in {
+        RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
+        RunScheduleEvent.TYPE_SKIPPED_INVALID,
+    }:
+        return "Skipped"
+    return "Queued"
+
+
+def _last_result_label_from_value(value: str) -> str:
+    labels = {
+        RunSchedule.LAST_RESULT_QUEUED: "Queued",
+        RunSchedule.LAST_RESULT_SUCCEEDED: "Succeeded",
+        RunSchedule.LAST_RESULT_FAILED: "Failed",
+        RunSchedule.LAST_RESULT_CANCELLED: "Skipped",
+        RunSchedule.LAST_RESULT_SKIPPED_OVERLAP: "Skipped",
+        RunSchedule.LAST_RESULT_SKIPPED_INVALID: "Skipped",
+        RunSchedule.LAST_RESULT_ERROR: "Failed",
+    }
+    return labels.get(value or "", "Never run")
+
+
+def _schedule_last_result(schedule: RunSchedule) -> dict:
+    terminal_event = (
+        schedule.events.select_related("run_job")
+        .filter(
+            event_type__in=[
+                RunScheduleEvent.TYPE_RUN_SUCCEEDED,
+                RunScheduleEvent.TYPE_RUN_FAILED,
+                RunScheduleEvent.TYPE_SKIPPED_OVERLAP,
+                RunScheduleEvent.TYPE_SKIPPED_INVALID,
+                RunScheduleEvent.TYPE_ERROR,
+            ]
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    active_job = (
+        schedule.scheduled_jobs.filter(status__in=[RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING])
+        .order_by("-created_at")
+        .first()
+    )
+    if terminal_event is not None:
+        run_job = terminal_event.run_job
+        last_run_at = (
+            run_job.finished_at
+            if run_job is not None and run_job.finished_at is not None
+            else terminal_event.created_at
+        )
+        return {
+            "label": _last_result_label_from_event(terminal_event),
+            "last_run_at": last_run_at,
+            "current": active_job.status.capitalize() if active_job is not None else "",
+        }
+    if active_job is not None:
+        return {
+            "label": active_job.status.capitalize(),
+            "last_run_at": None,
+            "current": active_job.status.capitalize(),
+        }
+    return {
+        "label": _last_result_label_from_value(schedule.last_result),
+        "last_run_at": schedule.last_fired_at if schedule.last_result else None,
+        "current": "",
+    }
+
+
+def _schedule_rows(schedules: list[RunSchedule], company_map: dict[str, str]) -> list[dict]:
+    rows: list[dict] = []
+    now_utc = timezone.now()
+    for schedule in schedules:
+        result = _schedule_last_result(schedule)
+        one_time_completed = schedule.is_one_time and schedule.completed_at is not None
+        status_subtext = ""
+        if one_time_completed:
+            status_subtext = "Ran once · Disabled automatically"
+        elif not schedule.enabled and schedule.is_one_time:
+            status_subtext = "One-time run not completed"
+        if schedule.is_one_time:
+            timing_primary, timing_secondary, timing_detail = _format_one_time_timing(
+                schedule,
+                now_utc=now_utc,
+            )
+        else:
+            timing_primary, timing_secondary, timing_detail = _format_recurring_timing(schedule)
+        run_once_date_value = ""
+        run_once_time_value = ""
+        if schedule.is_one_time:
+            run_once_date_value, run_once_time_value = _local_input_date_time(
+                schedule.run_once_at,
+                tz_name=schedule.timezone_name,
+            )
+        rows.append(
+            {
+                "schedule": schedule,
+                "display_name": _operator_schedule_name(schedule),
+                "subtitle": _schedule_subtitle(schedule, company_map),
+                "workflow": _schedule_workflow(schedule),
+                "company_target": _schedule_company_target(schedule),
+                "timing_primary": timing_primary,
+                "timing_secondary": timing_secondary,
+                "timing_detail": timing_detail,
+                "next_run_label": _format_schedule_next_run(schedule, now_utc=now_utc),
+                "last_result_label": result["label"],
+                "last_run_at": result["last_run_at"],
+                "current_status_label": result["current"],
+                "one_time_completed": one_time_completed,
+                "status_subtext": status_subtext,
+                "category": _first_inventory_category(schedule),
+                "product_filter": _inventory_product_filter(schedule),
+                "run_once_date_value": run_once_date_value,
+                "run_once_time_value": run_once_time_value,
+            }
+        )
+    return rows
+
+
+def _group_schedule_rows(rows: list[dict]) -> list[dict]:
+    active: list[dict] = []
+    disabled: list[dict] = []
+
+    for row in rows:
+        schedule: RunSchedule = row["schedule"]
+        if schedule.enabled:
+            active.append(row)
+        else:
+            disabled.append(row)
+
+    return [
+        {"title": "Enabled", "rows": active, "empty_message": "No enabled schedules.", "show_when_empty": True},
+        {"title": "Disabled", "rows": disabled, "empty_message": "No disabled schedules.", "show_when_empty": False},
+    ]
 
 
 def _form_error_text(form: RunScheduleForm) -> str:
@@ -1267,11 +2252,29 @@ def _form_error_text(form: RunScheduleForm) -> str:
     return "; ".join(parts)
 
 
+def _operator_schedule_form_error_message(form: RunScheduleForm) -> str:
+    """Operator-friendly schedule form error banner message.
+
+    Avoid raw field names like `company_target` / `workflow` in the top alert.
+    """
+    flat_errors = " ".join([" ".join([str(e) for e in errs]) for errs in form.errors.values()]).strip()
+    if "Inventory all-companies schedules are not supported yet." in flat_errors:
+        return (
+            "Inventory Sync currently supports one inventory-enabled company. "
+            'Select "One company" and choose a company.'
+        )
+    # Default: show only error text, without field names
+    if not flat_errors:
+        return "Invalid schedule. Please review the fields and try again."
+    return f"Invalid schedule. {flat_errors}"
+
+
 @login_required
 @permission_required("epos_qbo.can_manage_schedules", raise_exception=True)
 @require_GET
 def schedules_page(request):
     _ensure_company_records()
+    now_utc = timezone.now()
     schedules = list(RunSchedule.objects.order_by("-is_system_managed", "name", "created_at"))
     recent_events = list(
         RunScheduleEvent.objects.select_related("schedule", "run_job", "run_job__scheduled_by")
@@ -1285,16 +2288,50 @@ def schedules_page(request):
         .order_by("-created_at")
         .values_list("id", flat=True)[:20]
     )
-    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    company_map = {company.company_key: company.display_name for company in companies}
+    company_options = [
+        {
+            "company_key": company.company_key,
+            "display_name": company.display_name,
+            "inventory_enabled": _company_inventory_enabled(company),
+        }
+        for company in companies
+    ]
+    inventory_company_options = [c for c in company_options if c.get("inventory_enabled")]
+    inventory_company_default_key = (
+        str(inventory_company_options[0]["company_key"])
+        if len(inventory_company_options) == 1
+        else ""
+    )
+    default_tz_name = _schedule_default_timezone_name()
+    default_tz = _safe_zoneinfo(default_tz_name)
+    now_default_local = now_utc.astimezone(default_tz)
+    now_default_time = now_default_local.strftime("%H:%M")
+    now_default_abbrev = now_default_local.strftime("%Z").strip()
+    schedule_rows = _schedule_rows(schedules, company_map)
     context = {
         "schedule_form": RunScheduleForm(initial=_schedule_create_initial()),
-        "schedules": schedules,
+        "schedule_rows": schedule_rows,
+        "schedule_sections": _group_schedule_rows(schedule_rows),
         "recent_events": recent_events,
         "companies": companies,
+        "company_options": company_options,
+        "inventory_company_options": inventory_company_options,
+        "inventory_company_default_key": inventory_company_default_key,
+        "default_schedule_timezone_name": default_tz_name,
+        "default_schedule_timezone_now_label": f"{now_default_time} {now_default_abbrev}".strip(),
         "active_run_ids_json": json.dumps([str(run_id) for run_id in active_run_ids]),
         "schedule_target_date_mode": RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
         "single_scope": RunJob.SCOPE_SINGLE,
         "all_scope": RunJob.SCOPE_ALL,
+        "inventory_scope": RunJob.SCOPE_INVENTORY_PIPELINE,
+        "schedule_type_recurring": RunSchedule.SCHEDULE_TYPE_RECURRING,
+        "schedule_type_one_time": RunSchedule.SCHEDULE_TYPE_ONE_TIME,
+        "workflow_sales": RunScheduleForm.WORKFLOW_SALES,
+        "workflow_inventory": RunScheduleForm.WORKFLOW_INVENTORY,
+        "company_target_all": RunScheduleForm.COMPANY_TARGET_ALL,
+        "company_target_one": RunScheduleForm.COMPANY_TARGET_ONE,
         "scheduler_status": get_scheduler_status(),
     }
     context.update(_nav_context())
@@ -1328,12 +2365,14 @@ def schedule_status_api(request):
 def schedule_create(request):
     form = RunScheduleForm(request.POST)
     if not form.is_valid():
-        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        messages.error(request, _operator_schedule_form_error_message(form))
         return redirect("epos_qbo:schedules")
 
     schedule: RunSchedule = form.save(commit=False)
     schedule.created_by = request.user
     schedule.updated_by = request.user
+    if not schedule.is_one_time:
+        schedule.completed_at = None
     if schedule.enabled:
         try:
             schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
@@ -1356,13 +2395,31 @@ def schedule_update(request, schedule_id):
         messages.error(request, "System-managed schedules cannot be edited.")
         return redirect("epos_qbo:schedules")
 
+    was_one_time_completed = schedule.is_one_time and schedule.completed_at is not None
+    previous_run_once_at = schedule.run_once_at
+
     form = RunScheduleForm(request.POST, instance=schedule)
     if not form.is_valid():
-        messages.error(request, f"Invalid schedule payload: {_form_error_text(form)}")
+        messages.error(request, _operator_schedule_form_error_message(form))
         return redirect("epos_qbo:schedules")
 
     schedule = form.save(commit=False)
     schedule.updated_by = request.user
+    if was_one_time_completed and schedule.is_one_time and schedule.enabled:
+        # Prevent accidental re-queue of a completed one-time schedule unless the operator
+        # explicitly moves the run time forward.
+        if schedule.run_once_at is None:
+            messages.error(request, "Completed one-time schedules cannot be re-enabled without a new run time.")
+            return redirect("epos_qbo:schedules")
+        if previous_run_once_at == schedule.run_once_at:
+            messages.error(request, "Completed one-time schedules cannot be re-enabled. Edit the run time first.")
+            return redirect("epos_qbo:schedules")
+        if schedule.run_once_at <= timezone.now():
+            messages.error(request, "One-time schedules must be scheduled in the future when re-enabled.")
+            return redirect("epos_qbo:schedules")
+        schedule.completed_at = None
+    if not schedule.is_one_time:
+        schedule.completed_at = None
     if schedule.enabled:
         try:
             schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
@@ -1388,6 +2445,9 @@ def schedule_toggle(request, schedule_id):
     schedule.enabled = not schedule.enabled
     schedule.updated_by = request.user
     if schedule.enabled:
+        if schedule.is_one_time and schedule.completed_at is not None:
+            messages.error(request, "Completed one-time schedules cannot be re-enabled. Edit the run time first.")
+            return redirect("epos_qbo:schedules")
         try:
             schedule.next_fire_at = schedule.compute_next_fire_at(from_dt=timezone.now())
         except Exception as exc:
@@ -1407,13 +2467,18 @@ def schedule_toggle(request, schedule_id):
 @require_POST
 def schedule_run_now(request, schedule_id):
     schedule = get_object_or_404(RunSchedule, id=schedule_id)
-    if schedule.scope == RunJob.SCOPE_SINGLE and not (schedule.company_key or "").strip():
-        messages.error(request, "Single-company schedule is missing company key.")
+    if schedule.is_system_managed:
+        messages.error(request, "System-managed schedules cannot be run manually.")
+        return redirect("epos_qbo:schedules")
+    if schedule.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_INVENTORY_PIPELINE} and not (
+        schedule.company_key or ""
+    ).strip():
+        messages.error(request, "Schedule is missing company key.")
         return redirect("epos_qbo:schedules")
 
     job, result = enqueue_run_for_schedule(schedule, now=timezone.now(), source="manual")
     if job is None and result == RunScheduleEvent.TYPE_SKIPPED_OVERLAP:
-        messages.warning(request, "Schedule already has a queued/running run. Manual enqueue skipped.")
+        messages.warning(request, "Skipped because another run is active.")
         return redirect("epos_qbo:schedules")
     if job is None:
         messages.error(request, "Could not queue run for schedule.")
@@ -1422,10 +2487,10 @@ def schedule_run_now(request, schedule_id):
     dispatch_next_queued_job()
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Scheduled run started: {job.display_label}")
+        messages.success(request, f"Scheduled run started: {job.friendly_id}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.success(request, f"Scheduled run queued: {job.display_label}")
+    messages.success(request, f"Scheduled run queued: {job.friendly_id}")
     return redirect("epos_qbo:schedules")
 
 
@@ -1461,10 +2526,17 @@ def _run_attention_message(job: RunJob, artifacts: list) -> str | None:
     if job.status != RunJob.STATUS_SUCCEEDED:
         return None
     if not artifacts:
+        if job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+            return (
+                "Run succeeded but no inventory reports were linked. "
+                "Check pipeline logs and reports/inventory_pipeline/."
+            )
         return (
             "Run succeeded but no artifacts were linked. "
             "Check pipeline logs and that metadata files exist under Uploaded/."
         )
+    if job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+        return None
     statuses = [a.reconcile_status for a in artifacts if getattr(a, "reconcile_status", None)]
     label = _reconciliation_label_for_job(str(job.id), {str(job.id): statuses})
     if label == "Mismatch":
@@ -1493,7 +2565,8 @@ def runs_list(request):
         for job in jobs
     ]
     form = RunTriggerForm(initial={"scope": RunJob.SCOPE_ALL, "date_mode": "yesterday"})
-    companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name")
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    inventory_companies = [company for company in companies if _company_inventory_enabled(company)]
     
     # Get active run IDs for polling
     active_runs = RunJob.objects.filter(
@@ -1501,13 +2574,17 @@ def runs_list(request):
     ).values_list('id', flat=True)[:10]  # Limit to 10 most recent
     
     active_run_ids_list = [str(id) for id in active_runs]
+
+    categories_by_company = load_inventory_categories_by_company(inventory_companies)
     context = {
         "run_rows": run_rows,
-        "form": form, 
+        "form": form,
         "companies": companies,
+        "inventory_companies": inventory_companies,
         "default_parallel": default_parallel,
         "default_stagger_seconds": default_stagger_seconds,
         "active_run_ids": active_run_ids_list,
+        "categories_by_company": categories_by_company,
         "active_run_ids_json": json.dumps(active_run_ids_list),
     }
     context.update(_nav_context())
@@ -1677,19 +2754,28 @@ def logs_list(request):
 @login_required
 def run_detail(request, job_id):
     job = get_object_or_404(RunJob, id=job_id)
+    company_display_name = ""
+    if (job.company_key or "").strip():
+        record = CompanyConfigRecord.objects.filter(company_key=job.company_key).only("display_name").first()
+        company_display_name = record.display_name if record else ""
     artifacts = job.artifacts.order_by("-processed_at", "-imported_at")
     artifacts_list = list(artifacts)
+    for artifact in artifacts_list:
+        artifact.report_links = _artifact_report_links(job, artifact)
     active_run_ids_list = [str(job.id)] if job.status in [RunJob.STATUS_QUEUED, RunJob.STATUS_RUNNING] else []
     run_upload_summary_message = _run_detail_upload_summary_message(artifacts_list)
     context = {
         "job": job,
-        "artifacts": artifacts,
+        "target_label": job.get_target_label(company_display_name=company_display_name),
+        "artifacts": artifacts_list,
         "active_run_ids": active_run_ids_list,
         "active_run_ids_json": json.dumps(active_run_ids_list),
         "exit_code_info": _exit_code_info(job.exit_code),
         "exit_code_reference": EXIT_CODE_REFERENCE,
         "run_attention_message": _run_attention_message(job, artifacts_list),
         "run_upload_summary_message": run_upload_summary_message,
+        "inventory_review_action": _run_detail_inventory_review_action_context(job),
+        "inventory_mode_context": _inventory_mode_context(job, artifacts_list),
     }
     context.update(_nav_context())
     context.update(
@@ -1697,13 +2783,27 @@ def run_detail(request, job_id):
             [
                 {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
                 {"label": "Runs", "url": reverse("epos_qbo:runs")},
-                {"label": f"Run {job.display_label}", "url": None},
+                {"label": f"Run {job.friendly_id}", "url": None},
             ],
             back_url=reverse("epos_qbo:runs"),
             back_label="Runs",
         )
     )
     return render(request, "epos_qbo/run_detail.html", context)
+
+
+@login_required
+@require_GET
+def run_artifact_report(request, job_id, artifact_id: int, report_key: str):
+    job = get_object_or_404(RunJob, id=job_id)
+    artifact = get_object_or_404(RunArtifact, id=artifact_id, run_job=job)
+    report_path = _resolve_artifact_report_path(artifact, report_key)
+    filename = report_path.name or RUN_ARTIFACT_REPORT_LABELS.get(report_key, "report")
+    try:
+        handle = report_path.open("rb")
+    except OSError as exc:
+        raise Http404("Report not found.") from exc
+    return FileResponse(handle, as_attachment=True, filename=filename)
 
 
 @login_required
@@ -1793,10 +2893,54 @@ def trigger_run(request):
 
     job.refresh_from_db()
     if job.status == RunJob.STATUS_RUNNING:
-        messages.success(request, f"Run started: {job.display_label}")
+        messages.success(request, f"Run started: {job.friendly_id}")
         return redirect("epos_qbo:run-detail", job_id=job.id)
 
-    messages.info(request, f"Run queued: {job.display_label}. It will start automatically.")
+    messages.info(request, f"Run queued: {job.friendly_id}. It will start automatically.")
+    return redirect("epos_qbo:runs")
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def trigger_inventory_run(request):
+    """Queue the unified inventory pipeline in an explicit safe mode."""
+    form = InventoryTriggerForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, f"Invalid inventory trigger payload: {form.errors.get_json_data()}")
+        return redirect("epos_qbo:runs")
+
+    cleaned = form.cleaned_data
+    company_key = (cleaned.get("company_key") or "").strip()
+    if not CompanyConfigRecord.objects.filter(company_key=company_key).exists():
+        messages.error(request, "Unknown company key for inventory.")
+        return redirect("epos_qbo:runs")
+
+    mode = (cleaned.get("mode") or "audit_only").strip() or "audit_only"
+    inventory_options: dict = {"mode": mode}
+    category = (cleaned.get("category") or "").strip()
+    if category:
+        inventory_options["categories"] = [category]
+    product_filter = (cleaned.get("product_filter") or "").strip()
+    if product_filter:
+        inventory_options["product_filter"] = product_filter
+
+    job = RunJob.objects.create(
+        scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+        company_key=company_key,
+        inventory_options_json=inventory_options,
+        requested_by=request.user,
+        status=RunJob.STATUS_QUEUED,
+    )
+    dispatch_next_queued_job()
+
+    job.refresh_from_db()
+    mode_label = _inventory_mode_label(mode) or "Inventory run"
+    if job.status == RunJob.STATUS_RUNNING:
+        messages.success(request, f"{mode_label} started: {job.friendly_id}")
+        return redirect("epos_qbo:run-detail", job_id=job.id)
+
+    messages.info(request, f"{mode_label} queued: {job.friendly_id}. It will start automatically.")
     return redirect("epos_qbo:runs")
 
 
@@ -1866,7 +3010,7 @@ def company_advanced(request, company_key):
                 "trading_day_enabled": (cfg.get("trading_day") or {}).get("enabled", False),
                 "trading_day_start_hour": (cfg.get("trading_day") or {}).get("start_hour", 5),
                 "trading_day_start_minute": (cfg.get("trading_day") or {}).get("start_minute", 0),
-                "inventory_enabled": (cfg.get("inventory") or {}).get("enable_inventory_items", False),
+                "inventory_enabled": _company_inventory_enabled(record),
                 "allow_negative_inventory": (cfg.get("inventory") or {}).get("allow_negative_inventory", False),
                 "inventory_start_date": (cfg.get("inventory") or {}).get("inventory_start_date", "today"),
                 "default_qty_on_hand": (cfg.get("inventory") or {}).get("default_qty_on_hand", 0),
@@ -1921,7 +3065,7 @@ def _parse_config_for_display(config_json: dict | None) -> dict:
     transform = config.get("transform") or {}
     inventory = config.get("inventory") or {}
     return {
-        "inventory_enabled": inventory.get("enable_inventory_items", False),
+        "inventory_enabled": _coerce_config_bool(inventory.get("enable_inventory_items")),
         "tax_rate": qbo.get("tax_rate"),
         "deposit_account": qbo.get("deposit_account", "Undeposited Funds"),
         "group_by": ", ".join(transform.get("group_by", ["date", "tender"])),
@@ -1996,6 +3140,290 @@ def _run_detail_upload_summary_message(artifacts_list: list[RunArtifact]) -> str
     return None
 
 
+REVIEW_RETRY_INTENT_LABELS = {
+    RETRY_INTENT_CATALOG: "Catalog cleanup retry",
+    RETRY_INTENT_QUANTITY: "Quantity adjustment retry",
+}
+
+
+def _run_detail_inventory_review_action_context(job: RunJob) -> dict[str, object] | None:
+    """Template context for Inventory Review–triggered runs (retry or missing-item creation)."""
+    opts = job.inventory_options_json if isinstance(job.inventory_options_json, dict) else {}
+    rcm = opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        raw_audit = str(rcm.get("source_final_audit") or "").strip()
+        source_final_audit_name = Path(raw_audit).name if raw_audit else ""
+        affected_raw = rcm.get("affected_base_names")
+        if not isinstance(affected_raw, list):
+            affected_raw = opts.get("base_names") if isinstance(opts.get("base_names"), list) else []
+        affected_base_names = [str(x).strip() for x in affected_raw if str(x).strip()]
+        preview_limit = 10
+        preview_base_names = affected_base_names[:preview_limit]
+        has_more_base_names = len(affected_base_names) > preview_limit
+        more_base_names_count = max(0, len(affected_base_names) - preview_limit)
+        try:
+            safe_count = int(rcm.get("safe_count"))
+        except (TypeError, ValueError):
+            safe_count = len(affected_base_names)
+        try:
+            blocked_count = int(rcm.get("blocked_count"))
+        except (TypeError, ValueError):
+            blocked_count = 0
+        qty_policy = str(rcm.get("create_qty_policy") or "").strip() or "initial_qty_from_epos"
+        mapping_source = str(rcm.get("mapping_source") or "").strip() or "Product.Mapping.csv"
+        try:
+            max_catalog_fixes = int(opts.get("max_catalog_fixes", 0))
+        except (TypeError, ValueError):
+            max_catalog_fixes = 0
+        try:
+            max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
+        except (TypeError, ValueError):
+            max_quantity_adjustments = 0
+        txn_date = str(opts.get("txn_date") or rcm.get("item_inv_start_date") or "").strip()
+        txn_date_source = str(rcm.get("txn_date_source") or "").strip()
+        category_scope_label = str(rcm.get("category_label") or "").strip() or "All categories"
+        try:
+            total_in_scope = int(rcm.get("total_candidates_in_scope"))
+        except (TypeError, ValueError):
+            total_in_scope = safe_count + blocked_count
+        missing_create_report_url = ""
+        missing_create_report_label = ""
+        for art in job.artifacts.order_by("-processed_at", "-imported_at"):
+            for link in _artifact_report_links(job, art):
+                if link.get("key") == "review_missing_create_report":
+                    missing_create_report_url = str(link.get("url") or "")
+                    missing_create_report_label = str(link.get("label") or "")
+                    break
+            if missing_create_report_url:
+                break
+        return {
+            "action_type": "create_missing",
+            "intent": str(rcm.get("intent") or REVIEW_CREATE_MISSING_INTENT),
+            "intent_label": "Missing item creation",
+            "source_artifact_id": rcm.get("source_artifact_id"),
+            "source_final_audit": raw_audit,
+            "source_final_audit_name": source_final_audit_name or "—",
+            "safe_count": safe_count,
+            "blocked_count": blocked_count,
+            "affected_base_names": affected_base_names,
+            "preview_base_names": preview_base_names,
+            "has_more_base_names": has_more_base_names,
+            "more_base_names_count": more_base_names_count,
+            "scope_label": "Safe missing QBO candidates only",
+            "category_scope_label": category_scope_label,
+            "total_candidates_in_scope": total_in_scope,
+            "mapping_source": mapping_source,
+            "create_qty_policy": qty_policy,
+            "create_qty_policy_label": "Initial QtyOnHand from EPOS expected (no separate adjustment in this run).",
+            "max_catalog_fixes": max_catalog_fixes,
+            "max_quantity_adjustments": max_quantity_adjustments,
+            "item_inv_start_date": txn_date or "—",
+            "txn_date_source": txn_date_source,
+            "missing_create_report_url": missing_create_report_url,
+            "missing_create_report_label": missing_create_report_label,
+        }
+
+    review_retry = opts.get("review_retry")
+    if not isinstance(review_retry, dict) or not review_retry:
+        return None
+    intent = str(review_retry.get("intent") or "").strip()
+    intent_label = REVIEW_RETRY_INTENT_LABELS.get(intent, intent.replace("_", " ").strip() or "Inventory review retry")
+    raw_audit = str(review_retry.get("source_final_audit") or "").strip()
+    source_final_audit_name = Path(raw_audit).name if raw_audit else ""
+    affected_raw = review_retry.get("affected_base_names")
+    if not isinstance(affected_raw, list):
+        affected_raw = opts.get("base_names") if isinstance(opts.get("base_names"), list) else []
+    affected_base_names = [str(x).strip() for x in affected_raw if str(x).strip()]
+    preview_limit = 10
+    preview_base_names = affected_base_names[:preview_limit]
+    has_more_base_names = len(affected_base_names) > preview_limit
+    more_base_names_count = max(0, len(affected_base_names) - preview_limit)
+    try:
+        affected_count = int(review_retry.get("row_count"))
+    except (TypeError, ValueError):
+        affected_count = len(affected_base_names)
+    try:
+        max_catalog_fixes = int(opts.get("max_catalog_fixes", 0))
+    except (TypeError, ValueError):
+        max_catalog_fixes = 0
+    try:
+        max_quantity_adjustments = int(opts.get("max_quantity_adjustments", 0))
+    except (TypeError, ValueError):
+        max_quantity_adjustments = 0
+    return {
+        "action_type": "retry",
+        "intent": intent,
+        "intent_label": intent_label,
+        "source_artifact_id": review_retry.get("source_artifact_id"),
+        "source_final_audit": raw_audit,
+        "source_final_audit_name": source_final_audit_name or "—",
+        "affected_count": affected_count,
+        "affected_base_names": affected_base_names,
+        "preview_base_names": preview_base_names,
+        "has_more_base_names": has_more_base_names,
+        "more_base_names_count": more_base_names_count,
+        "max_catalog_fixes": max_catalog_fixes,
+        "max_quantity_adjustments": max_quantity_adjustments,
+        "scope_label": "Selected base names only",
+    }
+
+
+def _artifact_report_path_value(artifact: RunArtifact, report_key: str) -> str:
+    stats = artifact.upload_stats_json if isinstance(artifact.upload_stats_json, dict) else {}
+    if report_key == "source":
+        return str(artifact.source_path or "").strip()
+    if report_key in {"summary_json", "summary_csv"}:
+        return str(stats.get(report_key) or "").strip()
+    if report_key in {
+        "final_audit",
+        "initial_audit",
+        "catalog_cleanup",
+        "post_catalog_audit",
+        "review_missing_create_report",
+    }:
+        child_reports = stats.get("child_reports") if isinstance(stats.get("child_reports"), dict) else {}
+        value = str(child_reports.get(report_key) or "").strip()
+        if value:
+            return value
+        summary = _inventory_summary_from_artifact(artifact)
+        child_reports = summary.get("child_reports") if isinstance(summary.get("child_reports"), dict) else {}
+        return str(child_reports.get(report_key) or "").strip()
+    return ""
+
+
+def _artifact_report_links(job: RunJob, artifact: RunArtifact) -> list[dict[str, str]]:
+    if not _is_inventory_artifact(artifact):
+        return []
+
+    links: list[dict[str, str]] = []
+    for key in RUN_ARTIFACT_REPORT_ORDER:
+        raw_path = _artifact_report_path_value(artifact, key)
+        if not raw_path:
+            continue
+        try:
+            resolved = _resolve_artifact_report_path(artifact, key)
+        except Http404:
+            # Don't render broken download buttons for missing/invalid paths.
+            continue
+        if resolved.suffix.lower() != ".csv":
+            continue
+        links.append(
+            {
+                "key": key,
+                "label": RUN_ARTIFACT_REPORT_LABELS[key],
+                "path": raw_path,
+                "filename": resolved.name or RUN_ARTIFACT_REPORT_LABELS[key],
+                "url": reverse(
+                    "epos_qbo:run-artifact-report",
+                    kwargs={"job_id": job.id, "artifact_id": artifact.id, "report_key": key},
+                ),
+            }
+        )
+    return links
+
+
+def _resolve_artifact_report_path(artifact: RunArtifact, report_key: str) -> Path:
+    if report_key not in RUN_ARTIFACT_REPORT_LABELS:
+        raise Http404("Unknown report.")
+
+    raw_path = _artifact_report_path_value(artifact, report_key)
+    if not raw_path or "\x00" in raw_path:
+        raise Http404("Report not found.")
+
+    base_dir = Path(settings.BASE_DIR).resolve(strict=False)
+    candidate = Path(os.path.expandvars(raw_path)).expanduser()
+    resolved = (
+        candidate.resolve(strict=False)
+        if candidate.is_absolute()
+        else (base_dir / candidate).resolve(strict=False)
+    )
+
+    if resolved.suffix.lower() not in RUN_ARTIFACT_REPORT_SUFFIXES:
+        raise Http404("Report not found.")
+    if not any(_path_is_relative_to(resolved, root) for root in _trusted_report_roots()):
+        raise Http404("Report not found.")
+    if not resolved.exists() or not resolved.is_file():
+        raise Http404("Report not found.")
+    return resolved
+
+
+def _latest_inventory_review_artifact(company_key: str) -> RunArtifact | None:
+    artifacts = (
+        RunArtifact.objects.filter(company_key=company_key)
+        .select_related("run_job")
+        .order_by("-processed_at", "-imported_at", "-id")
+    )
+    for artifact in artifacts:
+        if not _is_inventory_artifact(artifact):
+            continue
+        summary = _inventory_summary_from_artifact(artifact)
+        if (
+            str(summary.get("report_type") or "") == RunJob.SCOPE_INVENTORY_PIPELINE
+            or _artifact_report_path_value(artifact, "final_audit")
+            or isinstance(summary.get("final_status_counts"), dict)
+            or "products_checked" in summary
+        ):
+            return artifact
+    return None
+
+
+def _format_inventory_review_number(value) -> str:
+    try:
+        number = Decimal(str(value if value not in (None, "") else 0))
+    except Exception:
+        return str(value or "0")
+    if number == number.to_integral_value():
+        return f"{int(number):,}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def _inventory_review_reason_counts(rows: list[dict]) -> list[dict]:
+    counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        slug = str(row.get("reason_group_slug") or "other")
+        counts[slug] += 1
+    return [
+        {"slug": slug, "label": label, "count": counts.get(slug, 0)}
+        for slug, label in REASON_GROUPS.items()
+        if counts.get(slug, 0) > 0
+    ]
+
+
+def _inventory_review_summary_cards(summary: dict, rows: list[dict], parsed_total_rows: int, parsed_healthy_rows: int) -> dict:
+    products_checked = _safe_int_stat(summary, "products_checked")
+    if products_checked == 0 and parsed_total_rows:
+        products_checked = parsed_total_rows
+    in_sync = _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct"))
+    if in_sync == 0 and parsed_healthy_rows:
+        in_sync = parsed_healthy_rows
+    blocked = _safe_int_stat(summary, "blocked_items")
+    if blocked == 0 and rows:
+        blocked = len(rows)
+    negative_rows = _safe_int_stat(summary, "epos_negative_rows_clamped")
+    negative_units = summary.get("epos_negative_units_clamped", 0)
+    return {
+        "products_checked": products_checked,
+        "products_checked_display": _format_inventory_review_number(products_checked),
+        "in_sync": in_sync,
+        "in_sync_display": _format_inventory_review_number(in_sync),
+        "blocked_items": blocked,
+        "blocked_items_display": _format_inventory_review_number(blocked),
+        "epos_negative_rows_clamped": negative_rows,
+        "epos_negative_rows_clamped_display": _format_inventory_review_number(negative_rows),
+        "epos_negative_units_clamped": negative_units,
+        "epos_negative_units_clamped_display": _format_inventory_review_number(negative_units),
+    }
+
+
+def _inventory_review_report_links(artifact: RunArtifact | None) -> dict[str, str]:
+    if artifact is None or artifact.run_job_id is None or artifact.run_job is None:
+        return {}
+    return {
+        link["key"]: link["url"]
+        for link in _artifact_report_links(artifact.run_job, artifact)
+    }
+
+
 def _select_day_artifact_for_uploaded_count(artifacts: list[RunArtifact]) -> RunArtifact | None:
     by_hash: dict[str, RunArtifact] = {}
     no_hash: list[RunArtifact] = []
@@ -2041,6 +3469,114 @@ def _format_last_run_time(last_activity_at) -> str:
         days = diff.days
         return f"{days} day{'s' if days != 1 else ''} ago"
     return last_activity_at.strftime("%b %d, %Y")
+
+
+def _receipt_word(count: int) -> str:
+    return "receipt" if count == 1 else "receipts"
+
+
+def _sales_sync_display(artifact: RunArtifact | None) -> str:
+    if artifact is None:
+        return "No successful sales sync recorded"
+    uploaded = _artifact_uploaded_count(artifact)
+    skipped = _artifact_upload_stat(artifact, "skipped") or 0
+    if uploaded == 0 and skipped > 0:
+        return f"0 uploaded — {skipped} skipped (already in QBO)"
+    date_part = (
+        f" — {artifact.target_date.strftime('%b')} {artifact.target_date.day}, {artifact.target_date.year}"
+        if artifact.target_date
+        else ""
+    )
+    return f"{uploaded} {_receipt_word(uploaded)}{date_part}"
+
+
+def _inventory_activity_label(job: RunJob | None, artifact: RunArtifact | None) -> str:
+    summary = _inventory_summary_from_artifact(artifact)
+    opts = job.inventory_options_json if job and isinstance(job.inventory_options_json, dict) else {}
+    mode = str(summary.get("inventory_mode") or opts.get("mode") or "").strip()
+    if mode:
+        return _inventory_mode_label(mode, summary) or "Inventory run"
+    apply_stats = summary.get("apply") if isinstance(summary.get("apply"), dict) else {}
+    apply_mode = str(apply_stats.get("mode") or "").strip().lower()
+    posted = _safe_int_stat(apply_stats, "posted") if apply_stats else 0
+    updates = (
+        _safe_int_stat(summary, "catalog_fixes_applied")
+        + _safe_int_stat(summary, "base_items_created")
+        + _safe_int_stat(summary, "duplicate_base_items_resolved")
+        + _safe_int_stat(summary, "quantity_updates_applied")
+    )
+    if apply_mode == "apply" or posted > 0 or updates > 0:
+        return "Inventory sync"
+    return "Inventory audit"
+
+
+def _activity_label_for(job: RunJob | None, artifact: RunArtifact | None = None) -> str:
+    if job and job.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL}:
+        return "Sales sync"
+    if job and job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+        return _inventory_activity_label(job, artifact)
+    if artifact:
+        if _is_inventory_artifact(artifact):
+            return _inventory_activity_label(job, artifact)
+        return "Sales sync"
+    return "Activity"
+
+
+def _latest_activity_snapshot(
+    *,
+    latest_activity_job: RunJob | None,
+    latest_sales_artifact: RunArtifact | None,
+    latest_inventory_artifact: RunArtifact | None,
+) -> dict:
+    candidates: list[tuple[datetime, str, RunJob | None, RunArtifact | None]] = []
+    if latest_activity_job:
+        activity_artifact = None
+        if latest_activity_job.scope in {RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC}:
+            activity_artifact = latest_inventory_artifact
+        elif latest_activity_job.scope in {RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL}:
+            activity_artifact = latest_sales_artifact
+        activity_time = _run_activity_time(latest_activity_job)
+        if activity_time:
+            candidates.append(
+                (
+                    activity_time,
+                    _activity_label_for(latest_activity_job, activity_artifact),
+                    latest_activity_job,
+                    activity_artifact,
+                )
+            )
+    for artifact in (latest_sales_artifact, latest_inventory_artifact):
+        artifact_time = _artifact_activity_time(artifact)
+        if artifact and artifact_time:
+            candidates.append(
+                (
+                    artifact_time,
+                    _activity_label_for(None, artifact),
+                    artifact.run_job,
+                    artifact,
+                )
+            )
+
+    if not candidates:
+        return {
+            "at": None,
+            "label": "",
+            "display": "Last activity: None recorded",
+            "relative": "None recorded",
+            "job": None,
+            "artifact": None,
+        }
+
+    at, label, job, artifact = max(candidates, key=lambda item: item[0])
+    relative = _format_last_run_time(at)
+    return {
+        "at": at,
+        "label": label,
+        "display": f"Last activity: {label} {relative}",
+        "relative": relative,
+        "job": job,
+        "artifact": artifact,
+    }
 
 
 def _company_runs_queryset(company_key: str):
@@ -2137,7 +3673,7 @@ def _get_company_issues_for_list(
         issues.append({
             "severity": "amber",
             "icon": "solar:question-circle-linear",
-            "message": "Company has never been synced",
+            "message": "No successful sales sync recorded",
             "action": "trigger_sync",
         })
     if latest_run and latest_run.started_at:
@@ -2146,7 +3682,7 @@ def _get_company_issues_for_list(
             issues.append({
                 "severity": "amber",
                 "icon": "solar:clock-circle-linear",
-                "message": f"No sync in {int(hours_since)} hours",
+                "message": f"No sales sync in {int(hours_since)} hours",
                 "action": "trigger_sync",
             })
     return issues
@@ -2177,60 +3713,81 @@ def _enrich_company_data(
 ) -> dict:
     """Build enriched company dict for list/detail templates. Uses same status logic as Overview.
     When preloaded is provided (e.g. from companies_list batch), use it to avoid N+1 queries."""
-    if preloaded is not None:
-        latest_artifact = preloaded.get("latest_artifact")
-        artifacts_today = preloaded.get("artifacts_today") or []
-        token_info = preloaded.get("token_info") or _get_token_info_for_display(company)
-        latest_successful_artifact = preloaded.get("latest_successful_artifact")
-    else:
-        latest_artifact = (
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .order_by("-processed_at", "-imported_at")
-            .first()
-        )
-        bounds = get_dashboard_date_bounds()
-        today_start_utc = bounds["today_start_utc"]
-        now_utc = bounds["now_utc"]
-        artifacts_today = list(
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .filter(
-                Q(processed_at__gte=today_start_utc, processed_at__lt=now_utc)
-                | Q(
-                    processed_at__isnull=True,
-                    imported_at__gte=today_start_utc,
-                    imported_at__lt=now_utc,
-                )
+    if preloaded is None:
+        preloaded_maps = _batch_preload_companies_data([company])
+        ck = company.company_key
+        preloaded = {
+            "latest_activity_job": preloaded_maps["latest_activity_jobs"].get(ck) or latest_run,
+            "latest_sales_job": preloaded_maps["latest_sales_jobs"].get(ck),
+            "latest_inventory_job": preloaded_maps["latest_inventory_jobs"].get(ck),
+            "latest_sales_artifact": preloaded_maps["latest_sales_artifacts"].get(ck),
+            "latest_inventory_artifact": preloaded_maps["latest_inventory_artifacts"].get(ck),
+            "artifacts_today": preloaded_maps["artifacts_today_by_key"].get(ck, []),
+            "latest_successful_sales_artifact": preloaded_maps[
+                "latest_successful_sales_artifacts"
+            ].get(ck),
+            "token_info": preloaded_maps["token_info_by_key"].get(ck),
+            "sales_reconcile_statuses_by_company_job": preloaded_maps[
+                "sales_reconcile_statuses_by_company_job"
+            ],
+        }
+
+    latest_activity_job = preloaded.get("latest_activity_job") or latest_run
+    latest_sales_job = preloaded.get("latest_sales_job")
+    latest_inventory_job = preloaded.get("latest_inventory_job")
+    latest_sales_artifact = preloaded.get("latest_sales_artifact")
+    latest_inventory_artifact = preloaded.get("latest_inventory_artifact")
+    latest_artifact = latest_sales_artifact
+    artifacts_today = preloaded.get("artifacts_today") or []
+    token_info = preloaded.get("token_info") or _get_token_info_for_display(company)
+    latest_successful_artifact = preloaded.get("latest_successful_sales_artifact")
+    sales_reconcile_statuses_by_company_job = preloaded.get("sales_reconcile_statuses_by_company_job") or {}
+
+    capabilities = _company_capabilities(company)
+    inventory_enabled = capabilities["inventory"]
+    sales_status = _sales_status_for_company(
+        latest_job=latest_sales_job,
+        latest_artifact=latest_sales_artifact,
+        reconcile_statuses_by_job={
+            str(latest_sales_job.id): sales_reconcile_statuses_by_company_job.get(
+                (company.company_key, str(latest_sales_job.id))
             )
-            .select_related("run_job")
-            .order_by("-processed_at", "-imported_at")
-        )
-        token_info = _get_token_info_for_display(company)
-        latest_successful_artifact = (
-            RunArtifact.objects.filter(company_key=company.company_key)
-            .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
-            .select_related("run_job")
-            .order_by("-processed_at", "-imported_at", "-id")
-            .first()
-        )
+            or []
+        } if latest_sales_job else {},
+    )
+    inventory_status = _inventory_status_for_company(
+        latest_job=latest_inventory_job,
+        latest_artifact=latest_inventory_artifact,
+    )
+    inventory_review_required = _inventory_review_required(inventory_enabled, inventory_status)
 
     health = _company_health_snapshot(
         company,
-        latest_artifact=latest_artifact,
-        latest_job=latest_run,
+        latest_artifact=latest_sales_artifact,
+        latest_job=latest_sales_job,
         token_info=token_info,
+        inventory_enabled=inventory_enabled,
+        inventory_status=inventory_status,
     )
-    status_str = health["level"]
+    status_str = _company_card_status(
+        sales_status,
+        inventory_status,
+        token_info,
+        inventory_enabled=inventory_enabled,
+    )
     status = _status_display_from_canonical(
         status_str,
-        latest_run,
-        latest_artifact,
+        latest_sales_job,
+        latest_sales_artifact,
     )
-    run_activity = _run_activity_display(health["run_activity"])
+    run_activity = _run_activity_display(_run_activity_status(latest_activity_job))
     health_reason_labels = _health_reason_labels(health.get("reason_codes"))
-    issues = _get_company_issues_for_list(company, latest_run, latest_artifact, token_info)
+    issues = _get_company_issues_for_list(company, latest_sales_job, latest_sales_artifact, token_info)
     config_display = _parse_config_for_display(company.config_json)
     artifacts_by_day: dict[object, list[RunArtifact]] = {}
     for artifact in artifacts_today:
+        if not _is_sales_artifact(artifact):
+            continue
         bucket = _artifact_day_bucket(artifact)
         if bucket is None:
             continue
@@ -2241,12 +3798,12 @@ def _enrich_company_data(
         if selected is None:
             continue
         records_24h += _artifact_uploaded_count(selected)
-    latest_run_time = _run_activity_time(latest_run)
-    latest_artifact_time = _artifact_activity_time(latest_artifact)
-    if latest_run_time and latest_artifact_time:
-        last_activity_at = max(latest_run_time, latest_artifact_time)
-    else:
-        last_activity_at = latest_run_time or latest_artifact_time
+    latest_activity = _latest_activity_snapshot(
+        latest_activity_job=latest_activity_job,
+        latest_sales_artifact=latest_sales_artifact,
+        latest_inventory_artifact=latest_inventory_artifact,
+    )
+    last_activity_at = latest_activity["at"]
 
     if latest_successful_artifact:
         records_latest_sync = _artifact_uploaded_count(latest_successful_artifact)
@@ -2274,18 +3831,37 @@ def _enrich_company_data(
         "health": health,
         "health_reason_labels": health_reason_labels,
         "run_activity": run_activity,
-        "latest_run": latest_run,
+        "latest_run": latest_activity_job,
+        "latest_activity_job": latest_activity_job,
+        "latest_activity_label": latest_activity["label"],
+        "latest_activity_display": latest_activity["display"],
         "latest_artifact": latest_artifact,
+        "latest_sales_job": latest_sales_job,
+        "latest_sales_artifact": latest_sales_artifact,
+        "latest_inventory_job": latest_inventory_job,
+        "latest_inventory_artifact": latest_inventory_artifact,
         "token_info": token_info,
         "issues": issues,
         "issues_highest_severity": issues_highest_severity,
         "config_display": config_display,
+        "capabilities": capabilities,
+        "inventory_enabled": inventory_enabled,
+        "sales_status": sales_status,
+        "inventory_status": inventory_status,
+        "inventory_review_required": inventory_review_required,
+        "inventory_review_label": _inventory_review_action_label(inventory_status),
+        "inventory_review_url": reverse(
+            "epos_qbo:company_inventory_review",
+            kwargs={"company_key": company.company_key},
+        ) if inventory_enabled else "",
         "records_24h": records_24h,
         "last_activity_at": last_activity_at,
         "last_run_display": _format_last_run_time(last_activity_at),
+        "latest_sales_sync_display": _sales_sync_display(latest_successful_artifact),
         "records_latest_sync": records_latest_sync,
         "latest_sync_target_date": latest_sync_target_date,
         "upload_skipped_latest_sync": upload_skipped_latest_sync,
+        "latest_inventory_audit": latest_inventory_artifact if inventory_enabled else None,
     }
 
 
@@ -2329,58 +3905,101 @@ def _calculate_companies_summary(companies_data: list) -> dict:
     return {"total": total, "healthy": healthy, "warning": warning, "critical": critical, "unknown": unknown}
 
 
-def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | None], dict[str, RunArtifact | None], dict[str, list], dict[str, RunArtifact | None], dict[str, dict]]:
-    """Batch-fetch latest run, latest artifact, artifacts_today, latest_successful_artifact, and token_info per company_key.
-    Latest run per company includes All Companies runs that have an artifact for that company (same logic as overview)."""
+def _batch_preload_companies_data(companies: list) -> dict:
+    """Batch-fetch explicit activity, sales, inventory, and token state per company."""
     company_keys = [c.company_key for c in companies]
     if not company_keys:
-        return {}, {}, {}, {}, {}
+        return {
+            "latest_activity_jobs": {},
+            "latest_sales_jobs": {},
+            "latest_inventory_jobs": {},
+            "latest_sales_artifacts": {},
+            "latest_inventory_artifacts": {},
+            "artifacts_today_by_key": {},
+            "latest_successful_sales_artifacts": {},
+            "token_info_by_key": {},
+            "sales_reconcile_statuses_by_company_job": {},
+        }
 
-    # Latest run per company (include All Companies runs that produced an artifact for this company)
-    # Same logic as Overview page: include All Companies runs and prioritize running/queued jobs
-    job_id_to_company_keys: dict = defaultdict(set)
-    for run_job_id, ck in RunArtifact.objects.filter(company_key__in=company_keys).exclude(run_job_id__isnull=True).values_list("run_job_id", "company_key"):
-        if run_job_id and ck:
-            job_id_to_company_keys[run_job_id].add(ck)
-    job_ids_with_artifacts = list(job_id_to_company_keys.keys())
-    # Same ordering as _company_runs_queryset_ordered_by_latest so "latest run" is consistent app-wide
-    # Include All Companies runs (same as Overview)
-    all_relevant_jobs = list(RunJob.objects.filter(
-        Q(company_key__in=company_keys) | Q(id__in=job_ids_with_artifacts) | Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
-    ).order_by("-finished_at", "-started_at", "-created_at"))
-    latest_runs_map: dict[str, RunJob | None] = {}
-    # First pass: prioritize running/queued jobs (same as Overview)
-    for job in all_relevant_jobs:
-        if job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
-            continue
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_runs_map:
-                latest_runs_map[ck] = job
-    # Second pass: fill in completed jobs for companies without active runs
-    for job in all_relevant_jobs:
-        candidates = []
-        if job.company_key and job.company_key in company_keys:
-            candidates.append(job.company_key)
-        elif job.company_key is None and job.scope == RunJob.SCOPE_ALL:
-            # All Companies run applies to all companies
-            candidates.extend(company_keys)
-        candidates.extend(job_id_to_company_keys.get(job.id, []))
-        for ck in candidates:
-            if ck not in latest_runs_map:
-                latest_runs_map[ck] = job
+    sales_job_id_to_company_keys: dict = defaultdict(set)
+    inventory_job_id_to_company_keys: dict = defaultdict(set)
+    sales_reconcile_statuses_by_company_job: dict = defaultdict(list)
+    latest_sales_artifacts: dict[str, RunArtifact | None] = {}
+    latest_inventory_artifacts: dict[str, RunArtifact | None] = {}
 
-    # Latest artifact per company
-    latest_artifacts_map: dict[str, RunArtifact | None] = {}
-    for art in RunArtifact.objects.filter(company_key__in=company_keys).order_by("company_key", "-processed_at", "-imported_at"):
-        if art.company_key not in latest_artifacts_map:
-            latest_artifacts_map[art.company_key] = art
+    artifacts_all = list(
+        RunArtifact.objects.filter(company_key__in=company_keys)
+        .select_related("run_job")
+        .order_by("company_key", "-processed_at", "-imported_at")
+    )
+    for art in artifacts_all:
+        if _is_sales_artifact(art):
+            if art.company_key not in latest_sales_artifacts:
+                latest_sales_artifacts[art.company_key] = art
+            if art.run_job_id and art.company_key:
+                sales_job_id_to_company_keys[art.run_job_id].add(art.company_key)
+                sales_reconcile_statuses_by_company_job[
+                    (art.company_key, str(art.run_job_id))
+                ].append(art.reconcile_status or "")
+        elif _is_inventory_artifact(art):
+            if art.company_key not in latest_inventory_artifacts:
+                latest_inventory_artifacts[art.company_key] = art
+            if art.run_job_id and art.company_key:
+                inventory_job_id_to_company_keys[art.run_job_id].add(art.company_key)
+
+    def latest_jobs_for_scope(
+        *,
+        scopes: list[str] | None,
+        job_id_to_company_keys: dict,
+        include_all_companies: bool,
+    ) -> dict[str, RunJob | None]:
+        job_ids_with_artifacts = list(job_id_to_company_keys.keys())
+        query = Q(id__in=job_ids_with_artifacts)
+        if scopes:
+            query |= Q(company_key__in=company_keys, scope__in=scopes)
+            if include_all_companies and RunJob.SCOPE_ALL in scopes:
+                query |= Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        else:
+            query |= Q(company_key__in=company_keys)
+            if include_all_companies:
+                query |= Q(company_key__isnull=True, scope=RunJob.SCOPE_ALL)
+        jobs = list(RunJob.objects.filter(query).order_by("-finished_at", "-started_at", "-created_at"))
+        latest_map: dict[str, RunJob | None] = {}
+        for active_only in (True, False):
+            for job in jobs:
+                if active_only and job.status not in (RunJob.STATUS_RUNNING, RunJob.STATUS_QUEUED):
+                    continue
+                candidates = []
+                if job.company_key and job.company_key in company_keys:
+                    candidates.append(job.company_key)
+                elif include_all_companies and job.company_key is None and job.scope == RunJob.SCOPE_ALL:
+                    candidates.extend(company_keys)
+                candidates.extend(job_id_to_company_keys.get(job.id, []))
+                for ck in set(candidates):
+                    if ck not in latest_map:
+                        latest_map[ck] = job
+        return latest_map
+
+    latest_sales_jobs = latest_jobs_for_scope(
+        scopes=[RunJob.SCOPE_SINGLE, RunJob.SCOPE_ALL],
+        job_id_to_company_keys=sales_job_id_to_company_keys,
+        include_all_companies=True,
+    )
+    latest_inventory_jobs = latest_jobs_for_scope(
+        scopes=[RunJob.SCOPE_INVENTORY_PIPELINE, RunJob.SCOPE_INVENTORY_SYNC],
+        job_id_to_company_keys=inventory_job_id_to_company_keys,
+        include_all_companies=False,
+    )
+    activity_job_to_company_keys: dict = defaultdict(set)
+    for job_id, keys in sales_job_id_to_company_keys.items():
+        activity_job_to_company_keys[job_id].update(keys)
+    for job_id, keys in inventory_job_id_to_company_keys.items():
+        activity_job_to_company_keys[job_id].update(keys)
+    latest_activity_jobs = latest_jobs_for_scope(
+        scopes=None,
+        job_id_to_company_keys=activity_job_to_company_keys,
+        include_all_companies=True,
+    )
 
     bounds = get_dashboard_date_bounds()
     today_start_utc = bounds["today_start_utc"]
@@ -2402,16 +4021,15 @@ def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | N
     for art in artifacts_today_all:
         artifacts_today_by_key.setdefault(art.company_key, []).append(art)
 
-    # Latest successful artifact per company
-    latest_successful_map: dict[str, RunArtifact | None] = {}
+    latest_successful_sales_artifacts: dict[str, RunArtifact | None] = {}
     for art in (
         RunArtifact.objects.filter(company_key__in=company_keys)
-        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .filter(Q(run_job__status=RunJob.STATUS_SUCCEEDED) | Q(run_job__isnull=True))
         .select_related("run_job")
         .order_by("company_key", "-processed_at", "-imported_at", "-id")
     ):
-        if art.company_key not in latest_successful_map:
-            latest_successful_map[art.company_key] = art
+        if _is_sales_artifact(art) and art.company_key not in latest_successful_sales_artifacts:
+            latest_successful_sales_artifacts[art.company_key] = art
 
     ensure_db_initialized()
     token_pairs = [
@@ -2427,7 +4045,17 @@ def _batch_preload_companies_data(companies: list) -> tuple[dict[str, RunJob | N
         preloaded_tokens = token_batch.get((company.company_key, realm_id)) if realm_id else None
         token_info_by_key[company.company_key] = _company_token_health(company, tokens=preloaded_tokens)
 
-    return latest_runs_map, latest_artifacts_map, artifacts_today_by_key, latest_successful_map, token_info_by_key
+    return {
+        "latest_activity_jobs": latest_activity_jobs,
+        "latest_sales_jobs": latest_sales_jobs,
+        "latest_inventory_jobs": latest_inventory_jobs,
+        "latest_sales_artifacts": latest_sales_artifacts,
+        "latest_inventory_artifacts": latest_inventory_artifacts,
+        "artifacts_today_by_key": artifacts_today_by_key,
+        "latest_successful_sales_artifacts": latest_successful_sales_artifacts,
+        "token_info_by_key": token_info_by_key,
+        "sales_reconcile_statuses_by_company_job": sales_reconcile_statuses_by_company_job,
+    }
 
 
 @login_required
@@ -2449,18 +4077,28 @@ def companies_list(request):
     if not companies:
         companies_data = []
     else:
-        latest_runs_map, latest_artifacts_map, artifacts_today_by_key, latest_successful_map, token_info_by_key = _batch_preload_companies_data(companies)
+        preloaded_maps = _batch_preload_companies_data(companies)
         companies_data = []
         for company in companies:
+            ck = company.company_key
             preloaded = {
-                "latest_artifact": latest_artifacts_map.get(company.company_key),
-                "artifacts_today": artifacts_today_by_key.get(company.company_key, []),
-                "latest_successful_artifact": latest_successful_map.get(company.company_key),
-                "token_info": token_info_by_key.get(company.company_key),
+                "latest_activity_job": preloaded_maps["latest_activity_jobs"].get(ck),
+                "latest_sales_job": preloaded_maps["latest_sales_jobs"].get(ck),
+                "latest_inventory_job": preloaded_maps["latest_inventory_jobs"].get(ck),
+                "latest_sales_artifact": preloaded_maps["latest_sales_artifacts"].get(ck),
+                "latest_inventory_artifact": preloaded_maps["latest_inventory_artifacts"].get(ck),
+                "artifacts_today": preloaded_maps["artifacts_today_by_key"].get(ck, []),
+                "latest_successful_sales_artifact": preloaded_maps[
+                    "latest_successful_sales_artifacts"
+                ].get(ck),
+                "token_info": preloaded_maps["token_info_by_key"].get(ck),
+                "sales_reconcile_statuses_by_company_job": preloaded_maps[
+                    "sales_reconcile_statuses_by_company_job"
+                ],
             }
             company_data = _enrich_company_data(
                 company,
-                latest_runs_map.get(company.company_key),
+                preloaded_maps["latest_activity_jobs"].get(ck),
                 preloaded=preloaded,
             )
             companies_data.append(company_data)
@@ -2500,6 +4138,558 @@ def companies_list(request):
 
 
 @login_required
+def company_inventory_review(request, company_key):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    inventory_enabled = _company_inventory_enabled(company)
+
+    artifact = None
+    summary: dict = {}
+    rows: list[dict] = []
+    parsed_total_rows = 0
+    parsed_healthy_rows = 0
+    parse_error = ""
+    empty_message = ""
+    final_audit_raw = ""
+    final_audit_filename = ""
+
+    if not inventory_enabled:
+        status_label = "No inventory review found"
+        status_color = "slate"
+        empty_message = "Inventory review is not enabled for this company."
+    else:
+        artifact = _latest_inventory_review_artifact(company.company_key)
+        if artifact is None:
+            status_label = "No inventory review found"
+            status_color = "slate"
+            empty_message = "No inventory review is currently required for this company."
+        else:
+            summary = _inventory_summary_from_artifact(artifact)
+            acknowledgement = _inventory_review_acknowledgement_for_artifact(artifact)
+            final_audit_raw = _artifact_report_path_value(artifact, "final_audit")
+            if not final_audit_raw:
+                empty_message = "No final inventory audit was found for the latest inventory run."
+            else:
+                try:
+                    final_audit_path = _resolve_artifact_report_path(artifact, "final_audit")
+                except Http404:
+                    empty_message = (
+                        "The final audit artifact exists in the database but the source file could not be found."
+                    )
+                else:
+                    final_audit_filename = final_audit_path.name
+                    parsed = parse_inventory_review_csv(final_audit_path)
+                    rows = parsed.rows
+                    parsed_total_rows = parsed.total_rows
+                    parsed_healthy_rows = parsed.healthy_rows
+                    parse_error = parsed.error
+                    if not rows and not parse_error:
+                        empty_message = "No inventory review is currently required for this company."
+                    elif not rows and parse_error:
+                        empty_message = "The final audit CSV could not be parsed."
+
+            summary_cards = _inventory_review_summary_cards(
+                summary,
+                rows,
+                parsed_total_rows,
+                parsed_healthy_rows,
+            )
+            if rows or summary_cards["blocked_items"] > 0 or _has_non_in_sync_inventory_rows(summary):
+                if acknowledgement is not None:
+                    status_label = "Reviewed"
+                    status_color = "emerald"
+                else:
+                    status_label = "Needs review"
+                    status_color = "amber"
+            else:
+                status_label = "Healthy"
+                status_color = "emerald"
+
+    if not inventory_enabled or artifact is None:
+        summary_cards = _inventory_review_summary_cards(summary, rows, parsed_total_rows, parsed_healthy_rows)
+        acknowledgement = None
+
+    report_links = _inventory_review_report_links(artifact)
+    run = artifact.run_job if artifact and artifact.run_job_id else None
+    latest_run_time = _run_status_time(run) or _artifact_status_time(artifact)
+    run_label = run.friendly_id if run else (Path(str(artifact.source_path)).name if artifact else "")
+    run_title = run.friendly_title if run else "Inventory report"
+    has_negative_summary = bool(
+        summary_cards["epos_negative_rows_clamped"] > 0
+        or str(summary_cards["epos_negative_units_clamped_display"]) not in {"", "0"}
+    )
+
+    actions = {
+        "available": False,
+        "catalog_cleanup_count": 0,
+        "quantity_adjustment_count": 0,
+        "missing_count": 0,
+        "retry_catalog_cleanup_url": "",
+        "retry_catalog_cleanup_confirm_url": "",
+        "retry_quantity_adjustments_url": "",
+        "retry_quantity_adjustments_confirm_url": "",
+        "missing_preview_url": "",
+    }
+    if inventory_enabled and rows:
+        actions = {
+            "available": True,
+            "catalog_cleanup_count": len(get_catalog_cleanup_rows(rows)),
+            "quantity_adjustment_count": len(get_quantity_adjustment_rows(rows)),
+            "missing_count": len(get_review_rows_by_reason(rows, REASON_GROUP_MISSING)),
+            "retry_catalog_cleanup_url": "",
+            "retry_catalog_cleanup_confirm_url": "",
+            "retry_quantity_adjustments_url": "",
+            "retry_quantity_adjustments_confirm_url": "",
+            "missing_preview_url": reverse(
+                "epos_qbo:company_inventory_missing_preview",
+                kwargs={"company_key": company.company_key},
+            ),
+        }
+
+    context = {
+        "company": company,
+        "inventory_enabled": inventory_enabled,
+        "review": {
+            "artifact": artifact,
+            "run": run,
+            "run_label": run_label,
+            "run_title": run_title,
+            "run_detail_url": reverse("epos_qbo:run-detail", kwargs={"job_id": run.id}) if run else "",
+            "final_audit_download_url": report_links.get("final_audit", ""),
+            "final_audit_raw": final_audit_raw,
+            "final_audit_filename": final_audit_filename,
+            "latest_run_time": latest_run_time,
+            "status_label": status_label,
+            "status_color": status_color,
+            "summary": summary_cards,
+            "rows": rows,
+            "row_count": len(rows),
+            "reason_counts": _inventory_review_reason_counts(rows),
+            "empty_message": empty_message,
+            "parse_error": parse_error,
+            "has_negative_summary": has_negative_summary,
+            "actions": actions,
+            "acknowledgement": acknowledgement,
+            "is_acknowledged": acknowledgement is not None,
+            "acknowledge_url": reverse(
+                "epos_qbo:company_inventory_review_mark_reviewed",
+                kwargs={"company_key": company.company_key},
+            ) if artifact else "",
+        },
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse("epos_qbo:company-detail", kwargs={"company_key": company.company_key}),
+                },
+                {"label": "Inventory Review", "url": None},
+            ],
+            back_url=reverse("epos_qbo:company-detail", kwargs={"company_key": company.company_key}),
+            back_label=company.display_name,
+        )
+    )
+    return render(request, "epos_qbo/company_inventory_review.html", context)
+
+
+def _inventory_review_acknowledgement_snapshot(summary: dict) -> dict:
+    counts = summary.get("final_status_counts") if isinstance(summary.get("final_status_counts"), dict) else {}
+    return {
+        "products_checked": _safe_int_stat(summary, "products_checked"),
+        "in_sync": _safe_int_stat(summary, "in_sync", _safe_int_stat(summary, "already_correct")),
+        "blocked_items": _safe_int_stat(summary, "blocked_items"),
+        "still_needs_review": _safe_int_stat(summary, "still_needs_review"),
+        "inventory_mode": str(summary.get("inventory_mode") or "").strip(),
+        "final_status_counts": counts,
+    }
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_review_mark_reviewed(request, company_key):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    if not _company_inventory_enabled(company):
+        messages.error(request, "Inventory is not enabled for this company.")
+        return redirect("epos_qbo:company-detail", company_key=company.company_key)
+
+    artifact = _latest_inventory_review_artifact(company.company_key)
+    if artifact is None:
+        messages.error(request, "No inventory final audit is available for this company yet.")
+        return redirect(review_url)
+
+    posted_artifact_id = str(request.POST.get("artifact_id") or "").strip()
+    if posted_artifact_id and posted_artifact_id != str(artifact.id):
+        messages.error(request, "The inventory review changed. Refresh the page and review the latest audit before marking it reviewed.")
+        return redirect(review_url)
+
+    summary = _inventory_summary_from_artifact(artifact)
+    InventoryReviewAcknowledgement.objects.update_or_create(
+        artifact=artifact,
+        defaults={
+            "company_key": company.company_key,
+            "run_job": artifact.run_job if artifact.run_job_id else None,
+            "reviewed_by": request.user,
+            "reviewed_at": timezone.now(),
+            "summary_json": _inventory_review_acknowledgement_snapshot(summary),
+        },
+    )
+    messages.success(
+        request,
+        "Items have been marked reviewed.",
+    )
+    return redirect(review_url)
+
+
+def _inventory_review_action_context(request, company_key: str):
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    if not _company_inventory_enabled(company):
+        messages.error(request, "Inventory is not enabled for this company.")
+        return company, None, redirect("epos_qbo:company-detail", company_key=company.company_key)
+
+    artifact = _latest_inventory_review_artifact(company.company_key)
+    if artifact is None:
+        messages.error(request, "No inventory final audit is available for this company yet.")
+        return company, None, redirect(review_url)
+
+    context = load_review_context(
+        company=company,
+        artifact=artifact,
+        final_audit_path_resolver=_resolve_artifact_report_path,
+    )
+    if context is None:
+        messages.error(
+            request,
+            "The final audit artifact exists in the database but the source file could not be found.",
+        )
+        return company, None, redirect(review_url)
+    if context.parse_result.error and not context.rows:
+        messages.error(request, "The final audit CSV could not be parsed.")
+        return company, None, redirect(review_url)
+    return company, context, None
+
+
+def _inventory_retry_confirm_context(
+    *,
+    company,
+    context,
+    action_title: str,
+    action_label: str,
+    inventory_mode: str,
+    warning_text: str,
+    rows: list[dict],
+    preview_limit: int = 25,
+) -> dict:
+    run = context.artifact.run_job if context.artifact and context.artifact.run_job_id else None
+    run_label = run.friendly_id if run else ""
+    return {
+        "company": company,
+        "action_title": action_title,
+        "action_label": action_label,
+        "inventory_mode": inventory_mode,
+        "inventory_mode_label": _inventory_mode_label(inventory_mode),
+        "inventory_write_intent": INVENTORY_MODE_WRITE_INTENT_LABELS.get(inventory_mode, ""),
+        "inventory_safe_apply_copy": INVENTORY_SAFE_APPLY_COPY,
+        "warning_text": warning_text,
+        "row_count": len(rows),
+        "rows": rows,
+        "preview_rows": rows[:preview_limit],
+        "preview_limit": int(preview_limit),
+        "final_audit_filename": context.final_audit_path.name,
+        "source_run_label": run_label,
+    }
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_retry_catalog_cleanup_confirm(request, company_key):
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    messages.info(
+        request,
+        "Catalog apply has been removed. Use the review counts and manual QBO starting-value correction workflow.",
+    )
+    return redirect(review_url)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_retry_quantity_adjustments_confirm(request, company_key):
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    messages.info(
+        request,
+        "Quantity apply has been removed. Use QBO Adjust starting value for reviewed quantity mismatches.",
+    )
+    return redirect(review_url)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_retry_catalog_cleanup(request, company_key):
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    messages.info(
+        request,
+        "Catalog apply has been removed. Use the review counts and manual QBO starting-value correction workflow.",
+    )
+    return redirect(review_url)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_retry_quantity_adjustments(request, company_key):
+    company, _context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    messages.info(
+        request,
+        "Quantity apply has been removed. Use QBO Adjust starting value for reviewed quantity mismatches.",
+    )
+    return redirect(review_url)
+
+
+def _inventory_missing_preview_url(
+    company_key: str, *, category: str | None = None, txn_date: str | None = None
+) -> str:
+    base = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company_key},
+    )
+    params: dict[str, str] = {}
+    if category:
+        params["category"] = category
+    if txn_date:
+        params["txn_date"] = txn_date
+    if params:
+        return f"{base}?{urlencode(params)}"
+    return base
+
+
+def _missing_preview_date_input_bounds(*, company_key: str) -> tuple[str, str | None]:
+    """Return (max_date_iso_today_in_business_tz, min_date_iso_from_company_floor_or_None)."""
+
+    tz = get_business_timezone()
+    now = timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    today_iso = now.astimezone(tz).date().isoformat()
+    return today_iso, inv_start_date_floor_iso(company_key)
+
+
+@login_required
+@require_GET
+def company_inventory_missing_preview(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+
+    preview_full = build_missing_item_creation_preview(context=context)
+    category_param = str(request.GET.get("category") or "").strip()
+    preview = filter_missing_preview_by_category(preview_full, category_param)
+
+    resolved_iso, txn_date_source = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    picker_date = coalesce_picker_date_from_get(
+        company_key=company.company_key,
+        get_value=request.GET.get("txn_date"),
+        resolved_iso=resolved_iso,
+    )
+    category_options = collect_category_options(preview_full.rows)
+    _, queue_category_label = resolve_category_scope_labels(
+        preview_full=preview_full,
+        category_scope=category_param,
+    )
+    missing_item_queue_allowed = not str(preview.qbo_base_names_error or "").strip()
+    date_max_iso, date_min_iso = _missing_preview_date_input_bounds(company_key=company.company_key)
+
+    review_url = reverse(
+        "epos_qbo:company_inventory_review",
+        kwargs={"company_key": company.company_key},
+    )
+    confirm_post_url = reverse(
+        "epos_qbo:company_inventory_missing_create",
+        kwargs={"company_key": company.company_key},
+    )
+    category_filter_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+
+    template_context = {
+        "company": company,
+        "preview": preview,
+        "preview_full": preview_full,
+        "review_url": review_url,
+        "final_audit_filename": context.final_audit_path.name,
+        "resolved_item_inv_start_date": resolved_iso,
+        "item_inv_start_date": picker_date,
+        "picker_date": picker_date,
+        "txn_date_source": txn_date_source,
+        "missing_item_queue_allowed": missing_item_queue_allowed,
+        "snapshot_pack_guard_message": SNAPSHOT_PACK_GUARD_MESSAGE,
+        "confirm_post_url": confirm_post_url,
+        "category_options": category_options,
+        "selected_category": category_param,
+        "queue_category_label": queue_category_label,
+        "date_input_max": date_max_iso,
+        "date_input_min": date_min_iso,
+        "category_filter_url": category_filter_url,
+    }
+    template_context.update(_nav_context())
+    template_context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "Companies", "url": reverse("epos_qbo:companies-list")},
+                {
+                    "label": company.display_name,
+                    "url": reverse(
+                        "epos_qbo:company-detail",
+                        kwargs={"company_key": company.company_key},
+                    ),
+                },
+                {"label": "Inventory Review", "url": review_url},
+                {"label": "Missing QuickBooks Items", "url": None},
+            ],
+            back_url=review_url,
+            back_label="Inventory Review",
+        )
+    )
+    return render(
+        request,
+        "epos_qbo/company_inventory_missing_preview.html",
+        template_context,
+    )
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_GET
+def company_inventory_missing_create_confirm(request, company_key):
+    """Compatibility URL: confirmation now happens on the Missing Preview page."""
+
+    target = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company_key},
+    )
+    if request.GET:
+        return redirect(f"{target}?{request.GET.urlencode()}")
+    return redirect(target)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def company_inventory_missing_create(request, company_key):
+    company, context, error_redirect = _inventory_review_action_context(request, company_key)
+    if error_redirect is not None:
+        return error_redirect
+    missing_preview_url = reverse(
+        "epos_qbo:company_inventory_missing_preview",
+        kwargs={"company_key": company.company_key},
+    )
+
+    preview_full = build_missing_item_creation_preview(context=context)
+    category_param = str(request.POST.get("category_scope") or "").strip()
+    preview_scoped = filter_missing_preview_by_category(preview_full, category_param)
+
+    resolved_iso, resolved_src = resolve_txn_date_for_review_missing_item_creation(
+        company_key=company.company_key, artifact=context.artifact
+    )
+    txn_date, date_err, txn_src = validate_inventory_start_date_for_missing_queue(
+        company_key=company.company_key,
+        posted=request.POST.get("inventory_start_date"),
+        resolved_iso=resolved_iso,
+        resolved_source=resolved_src,
+    )
+
+    posted_date_raw = str(request.POST.get("inventory_start_date") or "").strip()
+    redirect_back = _inventory_missing_preview_url(
+        company.company_key,
+        category=category_param or None,
+        txn_date=posted_date_raw or None,
+    )
+
+    if date_err:
+        messages.error(request, date_err)
+        return redirect(redirect_back)
+
+    if str(preview_full.qbo_base_names_error or "").strip():
+        messages.error(request, SNAPSHOT_PACK_GUARD_MESSAGE)
+        return redirect(redirect_back)
+
+    cat_key, cat_label = resolve_category_scope_labels(
+        preview_full=preview_full,
+        category_scope=category_param,
+    )
+
+    job = queue_missing_item_creation_job(
+        company=company,
+        artifact=context.artifact,
+        final_audit_path=context.final_audit_path,
+        preview=preview_scoped,
+        requested_by=request.user,
+        txn_date=txn_date,
+        txn_date_source=txn_src,
+        category_filter_key=cat_key,
+        category_label=cat_label,
+    )
+    if job is None:
+        messages.warning(
+            request,
+            "No safe missing-item candidates to queue in the selected scope. Refresh the preview and try again if the audit changed.",
+        )
+        return redirect(redirect_back)
+
+    dispatch_next_queued_job()
+    send_inventory_review_action_queued(company=company, job=job, request=request)
+    scope_note = ""
+    if cat_label != "All categories":
+        scope_note = f" ({cat_label})"
+    messages.success(
+        request,
+        f"Missing item creation queued for {preview_scoped.safe_count} safe candidate(s){scope_note} using InvStartDate {txn_date}.",
+    )
+    return redirect("epos_qbo:run-detail", job_id=job.id)
+
+
+@login_required
 def company_detail(request, company_key):
     """Detail view for a single company."""
     company = get_object_or_404(CompanyConfigRecord, company_key=company_key)
@@ -2507,13 +4697,16 @@ def company_detail(request, company_key):
     latest_run = recent_runs[0] if recent_runs else None
     company_data = _enrich_company_data(company, latest_run)
     # Sales from last successful run (not 7D aggregate)
-    latest_successful_artifact = (
+    latest_successful_artifact = None
+    for artifact in (
         RunArtifact.objects.filter(company_key=company_key)
-        .filter(run_job__status=RunJob.STATUS_SUCCEEDED)
+        .filter(Q(run_job__status=RunJob.STATUS_SUCCEEDED) | Q(run_job__isnull=True))
         .select_related("run_job")
         .order_by("-processed_at", "-imported_at", "-id")
-        .first()
-    )
+    ):
+        if _is_sales_artifact(artifact):
+            latest_successful_artifact = artifact
+            break
     if latest_successful_artifact:
         amount = extract_amount_hybrid(latest_successful_artifact, prefer_reconcile=True)
         company_data["sales_last_run_display"] = _metrics_format_currency(amount)
@@ -2708,3 +4901,365 @@ def tools_verify_mapping_api(request):
         return JsonResponse({"success": False, "error": combined or "Verification failed."}, status=502)
 
     return JsonResponse({"success": True, "output": output})
+
+
+# ---------------------------------------------------------------------------
+# API Tokens / QuickBooks Connections page
+# ---------------------------------------------------------------------------
+
+_TOKEN_PAGE_LOGGER = logging.getLogger("epos_qbo.api_tokens")
+QBO_TEST_QUERY_TIMEOUT = 15
+
+CONNECTION_STATE_LABELS = {
+    "connected": "Connected",
+    "refresh_expiring": "Refresh token expiring soon",
+    "refresh_expired": "Refresh token expired",
+    "missing_realm_id": "Realm ID not configured",
+    "missing_refresh_token": "Missing refresh token",
+    "missing_tokens": "Missing tokens",
+}
+
+CONNECTION_STATE_EXPLAIN = {
+    "connected": "Safe to run sync. QuickBooks credentials are healthy.",
+    "refresh_expiring": (
+        "Sync still works, but the long-lived refresh token will expire soon. "
+        "Re-authorize QuickBooks before it expires to avoid disruption."
+    ),
+    "refresh_expired": (
+        "Refresh token has expired. Sync will fail until you re-authorize QuickBooks "
+        "for this company."
+    ),
+    "missing_realm_id": "No Realm ID is configured for this company. Add the Realm ID in the company settings.",
+    "missing_refresh_token": (
+        "No refresh token is stored for this company. Re-authorize QuickBooks to "
+        "establish a connection."
+    ),
+    "missing_tokens": (
+        "No QuickBooks tokens are stored for this company yet. "
+        "Run the OAuth flow to connect."
+    ),
+}
+
+ACCESS_STATE_LABELS = {
+    "active": "Active",
+    "expired": "Expired (will refresh on next sync)",
+    "unknown": "Unknown",
+}
+
+
+def _format_local_datetime(epoch_seconds: int | float | None) -> str | None:
+    if not epoch_seconds:
+        return None
+    try:
+        ts = float(epoch_seconds)
+    except (TypeError, ValueError):
+        return None
+    try:
+        dt = datetime.fromtimestamp(ts, tz=dt_timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    try:
+        local_dt = dt.astimezone(get_business_timezone())
+    except Exception:
+        local_dt = dt
+    return local_dt.strftime("%Y-%m-%d %H:%M %Z").strip()
+
+
+def _format_relative(epoch_seconds: int | float | None) -> str | None:
+    if not epoch_seconds:
+        return None
+    try:
+        target = int(epoch_seconds)
+    except (TypeError, ValueError):
+        return None
+    now_ts = int(timezone.now().timestamp())
+    delta = target - now_ts
+    if delta == 0:
+        return "now"
+    if delta > 0:
+        return f"in {_format_duration(delta)}"
+    return f"{_format_duration(-delta)} ago"
+
+
+def _safe_fingerprint(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = str(value)
+    if len(text) <= 8:
+        return text
+    return f"{text[:6]}…"
+
+
+def _build_token_page_context(company: CompanyConfigRecord, *, tokens: dict | None) -> dict:
+    cfg = company.config_json or {}
+    qbo = cfg.get("qbo") or {}
+    realm_id = qbo.get("realm_id")
+    raw_environment = qbo.get("environment") or "production"
+    environment = normalize_qbo_environment(raw_environment, default="production")
+    if not realm_id:
+        tokens = None
+
+    health = _company_token_health(company, tokens=tokens)
+
+    access_expires_at = (tokens or {}).get("expires_at")
+    refresh_expires_at = (tokens or {}).get("refresh_expires_at")
+    updated_at = (tokens or {}).get("updated_at")
+    fingerprint = _safe_fingerprint((tokens or {}).get("client_fingerprint"))
+    token_environment = (tokens or {}).get("environment")
+
+    state = health.get("connection_state") or "missing_tokens"
+    access_state = health.get("access_state") or "unknown"
+
+    explanation = CONNECTION_STATE_EXPLAIN.get(state, health.get("display_subtext") or "")
+
+    environment_mismatch = bool(
+        token_environment
+        and normalize_qbo_environment(token_environment, default=environment) != environment
+    )
+
+    if environment_mismatch:
+        state_label = "Environment mismatch"
+        status_color = "red"
+        explanation = (
+            "Stored token environment does not match this company's configured environment. "
+            "The connection must be re-authorized in the correct environment before running sync."
+        )
+    else:
+        state_label = CONNECTION_STATE_LABELS.get(state, health.get("display_label") or "Unknown")
+        status_color = health.get("status_color") or "slate"
+
+    show_explanation = environment_mismatch or state in {
+        "missing_tokens",
+        "missing_refresh_token",
+        "refresh_expired",
+        "refresh_expiring",
+    }
+
+    return {
+        "company_key": company.company_key,
+        "display_name": company.display_name,
+        "is_active": company.is_active,
+        "realm_id": realm_id or "",
+        "environment": environment,
+        "environment_label": "Production" if environment == "production" else "Sandbox",
+        "connection_state": state,
+        "connection_state_label": state_label,
+        "status_color": status_color,
+        "access_state": access_state,
+        "access_state_label": ACCESS_STATE_LABELS.get(access_state, "Unknown"),
+        "access_expires_at_human": _format_local_datetime(access_expires_at),
+        "access_expires_relative": _format_relative(access_expires_at),
+        "refresh_expires_at_human": _format_local_datetime(refresh_expires_at),
+        "refresh_expires_relative": _format_relative(refresh_expires_at),
+        "updated_at_human": _format_local_datetime(updated_at),
+        "updated_at_relative": _format_relative(updated_at),
+        "client_fingerprint": fingerprint,
+        "explanation": explanation,
+        "show_explanation": show_explanation,
+        "has_tokens": bool(tokens),
+        "has_realm_id": bool(realm_id),
+        "environment_mismatch": environment_mismatch,
+        "needs_reauth": state in {"missing_tokens", "missing_refresh_token", "refresh_expired"} or environment_mismatch,
+        "expiring_soon": state == "refresh_expiring",
+    }
+
+
+def _qbo_test_query(company_key: str, realm_id: str, environment: str) -> tuple[bool, str]:
+    """Run a harmless CompanyInfo query and return (ok, message)."""
+    try:
+        access_token = get_access_token(company_key, realm_id)
+    except RuntimeError as exc:
+        return False, _humanize_token_error(str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        return False, f"Failed to obtain access token: {exc}"
+
+    base_url = get_qbo_api_base_url(environment)
+    url = f"{base_url}/v3/company/{realm_id}/query"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    params = {"query": "select CompanyName from CompanyInfo", "minorversion": "70"}
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=QBO_TEST_QUERY_TIMEOUT)
+    except requests.Timeout:
+        return False, "QuickBooks API call timed out."
+    except requests.RequestException as exc:
+        return False, f"Network error contacting QuickBooks: {exc}"
+
+    if resp.status_code == 200:
+        try:
+            payload = resp.json()
+            company_name = (
+                payload.get("QueryResponse", {})
+                .get("CompanyInfo", [{}])[0]
+                .get("CompanyName")
+            )
+        except (ValueError, IndexError, AttributeError):
+            company_name = None
+        if company_name:
+            return True, f"Connection OK — QuickBooks returned “{company_name}”."
+        return True, "Connection OK — QuickBooks responded successfully."
+
+    if resp.status_code == 401:
+        return False, "QuickBooks rejected the access token (401). Try refreshing the token or re-authorize."
+    if resp.status_code == 403:
+        return False, "QuickBooks denied access (403). Check that this realm is authorized for the configured app."
+    return False, f"QuickBooks returned HTTP {resp.status_code}."
+
+
+def _humanize_token_error(error_text: str) -> str:
+    text = (error_text or "").lower()
+    if "invalid_grant" in text:
+        return "Refresh token is invalid or expired. Re-authorize QuickBooks for this company."
+    if "invalid_client" in text:
+        return "QBO client ID/secret mismatch. Check the server environment configuration."
+    if "no tokens found" in text:
+        return "No tokens stored for this company. Run the OAuth flow to connect QuickBooks."
+    if "no refresh_token" in text:
+        return "No refresh token stored. Re-authorize QuickBooks for this company."
+    if "realm id mismatch" in text:
+        return "Realm ID mismatch — stored tokens belong to a different QuickBooks company. Re-authorize."
+    if "qbo environment mismatch" in text or "different qbo environment" in text:
+        return "QBO environment mismatch — stored tokens were created for a different environment."
+    if "different intuit client" in text:
+        return "Stored tokens were created with a different Intuit client ID. Re-run the OAuth flow."
+    return error_text or "Token operation failed."
+
+
+@login_required
+def api_tokens_page(request):
+    """QuickBooks Connections page: per-company token health and actions."""
+    try:
+        ensure_db_initialized()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    companies = list(CompanyConfigRecord.objects.filter(is_active=True).order_by("display_name"))
+    pairs: list[tuple[str, str]] = []
+    for c in companies:
+        cfg = c.config_json or {}
+        qbo = cfg.get("qbo") or {}
+        realm_id = qbo.get("realm_id")
+        if realm_id:
+            pairs.append((c.company_key, realm_id))
+
+    tokens_by_pair = {}
+    if pairs:
+        try:
+            tokens_by_pair = load_tokens_batch(pairs)
+        except Exception:  # pragma: no cover - defensive
+            tokens_by_pair = {}
+
+    company_views = []
+    for c in companies:
+        cfg = c.config_json or {}
+        qbo = cfg.get("qbo") or {}
+        realm_id = qbo.get("realm_id")
+        tokens = tokens_by_pair.get((c.company_key, realm_id)) if realm_id else None
+        company_views.append(_build_token_page_context(c, tokens=tokens))
+
+    summary = {
+        "total": len(company_views),
+        "connected": sum(1 for c in company_views if c["connection_state"] == "connected" and not c["environment_mismatch"]),
+        "expiring": sum(1 for c in company_views if c["expiring_soon"]),
+        "needs_reauth": sum(1 for c in company_views if c["needs_reauth"]),
+        "missing": sum(1 for c in company_views if c["connection_state"] in {"missing_tokens", "missing_refresh_token"}),
+    }
+
+    context = {
+        "page_title": "QuickBooks Connections",
+        "page_subtitle": "Monitor, refresh, and test QuickBooks Online API tokens for each configured company.",
+        "company_views": company_views,
+        "summary": summary,
+        "has_companies": bool(company_views),
+    }
+    context.update(_nav_context())
+    context.update(
+        _breadcrumb_context(
+            [
+                {"label": "Dashboard", "url": reverse("epos_qbo:overview")},
+                {"label": "QuickBooks Connections", "url": None},
+            ],
+            back_url=reverse("epos_qbo:overview"),
+            back_label="Overview",
+        )
+    )
+    return render(request, "epos_qbo/api_tokens.html", context)
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def api_tokens_test(request, company_key: str):
+    """Run a harmless QBO query to verify the connection."""
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key, is_active=True)
+    cfg = company.config_json or {}
+    qbo = cfg.get("qbo") or {}
+    realm_id = qbo.get("realm_id")
+    environment = normalize_qbo_environment(qbo.get("environment"), default="production")
+
+    if not realm_id:
+        messages.error(request, f"{company.display_name}: realm ID is not configured.")
+        return redirect("epos_qbo:api-tokens")
+
+    tokens = load_tokens(company.company_key, realm_id)
+    if not tokens:
+        messages.error(
+            request,
+            f"{company.display_name}: no QuickBooks tokens stored. Run the OAuth flow to connect.",
+        )
+        return redirect("epos_qbo:api-tokens")
+
+    ok, message = _qbo_test_query(company.company_key, realm_id, environment)
+    if ok:
+        messages.success(request, f"{company.display_name}: {message}")
+    else:
+        _TOKEN_PAGE_LOGGER.warning(
+            "QBO test connection failed for %s: %s", company.company_key, message
+        )
+        messages.error(request, f"{company.display_name}: {message}")
+    return redirect("epos_qbo:api-tokens")
+
+
+@login_required
+@permission_required("epos_qbo.can_trigger_runs", raise_exception=True)
+@require_POST
+def api_tokens_refresh(request, company_key: str):
+    """Force a refresh of the access token and verify it."""
+    company = get_object_or_404(CompanyConfigRecord, company_key=company_key, is_active=True)
+    cfg = company.config_json or {}
+    qbo = cfg.get("qbo") or {}
+    realm_id = qbo.get("realm_id")
+    environment = normalize_qbo_environment(qbo.get("environment"), default="production")
+
+    if not realm_id:
+        messages.error(request, f"{company.display_name}: realm ID is not configured.")
+        return redirect("epos_qbo:api-tokens")
+
+    try:
+        refresh_access_token(company.company_key, realm_id)
+    except RuntimeError as exc:
+        friendly = _humanize_token_error(str(exc))
+        _TOKEN_PAGE_LOGGER.warning(
+            "QBO refresh failed for %s: %s", company.company_key, friendly
+        )
+        messages.error(request, f"{company.display_name}: {friendly}")
+        return redirect("epos_qbo:api-tokens")
+    except Exception as exc:  # pragma: no cover - defensive
+        messages.error(request, f"{company.display_name}: refresh failed ({exc}).")
+        return redirect("epos_qbo:api-tokens")
+
+    ok, message = _qbo_test_query(company.company_key, realm_id, environment)
+    if ok:
+        messages.success(
+            request,
+            f"{company.display_name}: tokens refreshed. {message}",
+        )
+    else:
+        messages.warning(
+            request,
+            f"{company.display_name}: tokens refreshed, but health check reported: {message}",
+        )
+    return redirect("epos_qbo:api-tokens")

@@ -32,7 +32,7 @@ Those Caddy volumes do not strictly need to be migrated because Caddy can obtain
 1. Docker Desktop or Docker Engine with Compose support installed
 2. Tailscale installed and joined to the correct tailnet
 3. A stable Tailscale IP for the server
-4. The repo checked out on the `docker-build` branch
+4. The repo checked out on the intended release commit/branch
 5. A valid `.env` file on the server
 6. Cloudflare DNS record for `portal.oiatsolutions.com`
 7. Cloudflare API token in `.env`
@@ -76,8 +76,8 @@ docker compose up -d caddy web scheduler
 
 ```bash
 git fetch origin
-git switch docker-build
-git pull origin docker-build
+git switch <your-branch>
+git pull
 docker compose build
 docker compose run --rm --profile bootstrap bootstrap
 docker compose up -d caddy web scheduler

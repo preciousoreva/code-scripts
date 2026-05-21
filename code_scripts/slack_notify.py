@@ -17,6 +17,47 @@ except ImportError:  # pragma: no cover - best effort
 SLACK_TIMEOUT_SECS = 10
 
 
+def build_run_detail_url(run_job_id: Optional[str] = None) -> str:
+    explicit = os.getenv("OIAT_RUN_URL", "").strip()
+    if explicit:
+        return explicit
+    job_id = (run_job_id or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
+    base = os.getenv("OIAT_PORTAL_BASE_URL", "").strip().rstrip("/")
+    if not job_id or not base:
+        return ""
+    return f"{base}/epos-qbo/runs/{job_id}/"
+
+
+def _operator_run_id(*, scope: str, run_job_id: str, started_at: str) -> str:
+    prefix = "RUN"
+    if scope in {"single_company", "all_companies"}:
+        prefix = "SAL"
+    elif scope == "inventory_pipeline":
+        prefix = "INV"
+    elif scope == "inventory_sync":
+        prefix = "AUD"
+
+    suffix = (run_job_id.split("-", 1)[0][:4] if run_job_id else "").upper()
+    if not suffix:
+        return ""
+    raw = (started_at or "").strip()
+    if not raw:
+        return f"{prefix}-????-????-{suffix}"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return f"{prefix}-????-????-{suffix}"
+    return f"{prefix}-{dt.strftime('%m%d')}-{dt.strftime('%H%M')}-{suffix}"
+
+
+def _slack_run_link(*, url: str, scope: str, run_job_id: str) -> str:
+    started_at = os.getenv("OIAT_RUN_STARTED_AT", "").strip()
+    run_id = _operator_run_id(scope=scope, run_job_id=run_job_id, started_at=started_at)
+    workflow = "Sales" if scope in {"single_company", "all_companies"} else "Inventory"
+    label = f"{workflow} Run {run_id}" if run_id else f"{workflow} Run"
+    return f"<{url}|{label}>"
+
+
 def send_slack_success(message: str, webhook_url: str = None) -> None:
     """
     Send a Slack notification.
@@ -307,6 +348,16 @@ def _summarize_blockers_csv(repo_root: Path, company_key: str, target_date: str)
         return None
 
 
+def _inventory_start_date_blockers_summary(summary: Dict[str, Any]) -> Optional[str]:
+    """Return the current run's InvStartDate blocker summary when the report exists."""
+    target_date = str(summary.get("target_date") or "").strip()
+    company_key = str(summary.get("company_key") or "").strip()
+    if not target_date or not company_key:
+        return None
+    repo_root = Path(__file__).resolve().parent
+    return _summarize_blockers_csv(repo_root, company_key, target_date)
+
+
 def format_run_summary(
     pipeline_name: str,
     log_file: Path,
@@ -358,7 +409,11 @@ def format_run_summary(
     
     # Failure reason
     if status == "failure" and error:
-        reason = extract_error_reason(error)
+        blockers_summary = _inventory_start_date_blockers_summary(summary)
+        if blockers_summary:
+            reason = "QuickBooks rejected one or more receipts because an inventory item's InvStartDate is after the receipt date (QBO 6270)."
+        else:
+            reason = extract_error_reason(error)
         message += f"• Reason: {reason}\n"
     
     # Row statistics (for update / non-success)
@@ -483,6 +538,7 @@ def format_run_summary(
         items_patched = upload_stats.get("items_patched_count", 0)
         inventory_warnings = upload_stats.get("inventory_warnings_count", 0)
         inventory_rejections = upload_stats.get("inventory_rejections_count", 0)
+        inventory_start_date_issues = upload_stats.get("inventory_start_date_issues_count", 0)
         if items_created > 0 or items_patched > 0 or inventory_warnings > 0 or inventory_rejections > 0:
             parts = []
             if inventory_items_created > 0:
@@ -496,6 +552,12 @@ def format_run_summary(
             if inventory_rejections > 0:
                 parts.append(f"{inventory_rejections} rejections")
             message += f"• Items: {', '.join(parts)}\n"
+        target_date = summary.get("target_date", "")
+        if inventory_start_date_issues > 0 and target_date:
+            message += f"• InvStartDate: {inventory_start_date_issues} item(s) have InvStartDate after {target_date}\n"
+        blockers_summary = _inventory_start_date_blockers_summary(summary)
+        if blockers_summary:
+            message += f"• InvStartDate blockers (QBO 6270): {blockers_summary}\n"
     
     # Trading day boundary stats (if available)
     trading_day_stats = summary.get("trading_day_stats")
@@ -559,6 +621,12 @@ def format_run_summary(
         message += f"• Notes:\n"
         for warning in warnings[:6]:  # Limit to 6 warnings
             message += f"  – {warning}\n"
+
+    run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
+    run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
+    if run_url and run_job_id:
+        scope = str(summary.get("scope") or os.getenv("OIAT_RUN_SCOPE", "")).strip() or "all_companies"
+        message += f"• Run: {_slack_run_link(url=run_url, scope=scope, run_job_id=run_job_id)}\n"
     
     return message
 
@@ -597,6 +665,60 @@ def notify_pipeline_start(
     elif summary.get("date_range"):
         message += f"\n• Date Range: {summary['date_range']}"
     
+    send_slack_success(message, webhook_url)
+
+
+def notify_inventory_pipeline_start(
+    *,
+    company_name: str,
+    company_key: str,
+    categories: list[str] | None = None,
+    product_filter: str | None = None,
+    dry_run: bool = False,
+    webhook_url: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Send a Slack start notification for the unified Inventory pipeline.
+
+    Notification-only helper: best-effort and no-op when webhook is missing.
+    """
+    if not webhook_url:
+        logging.info("Slack webhook URL not set, skipping inventory pipeline start notification.")
+        return
+
+    safe_company_name = str(company_name or "").strip() or str(company_key or "").strip() or "Company"
+    safe_company_key = str(company_key or "").strip()
+
+    categories = [str(c).strip() for c in (categories or []) if str(c).strip()]
+    product_filter = str(product_filter or "").strip() or None
+
+    scope_bits: list[str] = []
+    if categories:
+        scope_bits.append(f"Category: {', '.join(categories)}")
+    if product_filter:
+        scope_bits.append(f"Product: {product_filter}")
+    if not scope_bits:
+        scope_bits.append("Scope: All products")
+
+    # Inventory pipeline applies safe catalog/quantity operations by default; avoid "checked only".
+    mode_label = "Preview only" if dry_run else "Sync pipeline"
+
+    parts = [
+        f"🚀 *{safe_company_name} → Inventory Sync started*",
+        f"• Time: {datetime.now().isoformat(timespec='seconds')}",
+        f"• Company: {safe_company_name} (`{safe_company_key}`)" if safe_company_key else f"• Company: {safe_company_name}",
+        *[f"• {bit}" for bit in scope_bits],
+        f"• Mode: {mode_label}",
+    ]
+
+    summary = dict(metadata or {})
+    run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "")).strip()
+    run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
+    if run_url and run_job_id:
+        parts.append(f"• Run: {_slack_run_link(url=run_url, scope='inventory_pipeline', run_job_id=run_job_id)}")
+
+    # Slack display: header line + newline bullets for readability.
+    message = "\n".join([p for p in parts if str(p).strip()])
     send_slack_success(message, webhook_url)
 
 
@@ -701,3 +823,260 @@ def notify_pipeline_failure(
     
     message = format_run_summary(pipeline_name, log_file, summary, status="failure", error=error)
     send_slack_success(message, webhook_url)
+
+
+# ---------------------------------------------------------------------------
+# Manual Inventory Review actions (portal-triggered inventory_pipeline jobs)
+# ---------------------------------------------------------------------------
+
+REVIEW_INTENT_CATALOG = "review_retry_catalog_cleanup"
+REVIEW_INTENT_QUANTITY = "review_retry_quantity_adjustments"
+REVIEW_INTENT_CREATE_MISSING = "review_create_missing_items"
+
+_INVENTORY_REVIEW_INTENT_LABELS = {
+    REVIEW_INTENT_CATALOG: "Catalog cleanup retry",
+    REVIEW_INTENT_QUANTITY: "Quantity adjustment retry",
+    REVIEW_INTENT_CREATE_MISSING: "Missing item creation",
+}
+
+
+def inventory_review_action_intent_label(intent: str | None) -> str:
+    key = str(intent or "").strip()
+    return _INVENTORY_REVIEW_INTENT_LABELS.get(key, key or "Inventory review action")
+
+
+def build_inventory_review_action_envelope(
+    inventory_options_json: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Build JSON-serializable metadata for manual Inventory Review pipeline jobs."""
+
+    opts = inventory_options_json if isinstance(inventory_options_json, dict) else {}
+    rr = opts.get("review_retry")
+    if isinstance(rr, dict) and rr:
+        raw_audit = str(rr.get("source_final_audit") or "").strip()
+        name = Path(raw_audit).name if raw_audit else ""
+        try:
+            row_count = int(rr.get("row_count"))
+        except (TypeError, ValueError):
+            row_count = 0
+        return {
+            "kind": "review_retry",
+            "intent": str(rr.get("intent") or "").strip(),
+            "source_final_audit_name": name,
+            "row_count": row_count,
+        }
+    rcm = opts.get("review_create_missing_items")
+    if isinstance(rcm, dict) and rcm:
+        raw_audit = str(rcm.get("source_final_audit") or "").strip()
+        name = Path(raw_audit).name if raw_audit else ""
+        txn = str(opts.get("txn_date") or rcm.get("item_inv_start_date") or "").strip()
+        try:
+            safe_count = int(rcm.get("safe_count"))
+        except (TypeError, ValueError):
+            safe_count = 0
+        try:
+            blocked_count = int(rcm.get("blocked_count"))
+        except (TypeError, ValueError):
+            blocked_count = 0
+        cat_label = str(rcm.get("category_label") or "All categories").strip() or "All categories"
+        return {
+            "kind": "review_create_missing",
+            "intent": str(rcm.get("intent") or REVIEW_INTENT_CREATE_MISSING),
+            "source_final_audit_name": name,
+            "safe_count": safe_count,
+            "blocked_count": blocked_count,
+            "category_label": cat_label,
+            "txn_date": txn,
+        }
+    return None
+
+
+def format_inventory_review_action_queued_message(
+    *,
+    envelope: Dict[str, Any],
+    company_display_name: str,
+    run_job_id: str,
+    run_url: str,
+    queued_by: str,
+) -> str:
+    """Slack text when an operator queues a manual Inventory Review pipeline job."""
+
+    safe_name = str(company_display_name or "").strip() or "Company"
+    intent = inventory_review_action_intent_label(str(envelope.get("intent") or ""))
+    lines = [
+        f"🟡 *Inventory Review Action Queued* — {safe_name}",
+        "",
+        f"• Action: {intent}",
+    ]
+    kind = str(envelope.get("kind") or "")
+    if kind == "review_retry":
+        try:
+            n = int(envelope.get("row_count") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        lines.append(f"• Affected items: {n}")
+        lines.append("• Scope: selected base names from latest final audit only")
+    elif kind == "review_create_missing":
+        lines.append(f"• Safe candidates: {int(envelope.get('safe_count') or 0)}")
+        lines.append(f"• Blocked: {int(envelope.get('blocked_count') or 0)}")
+        cat = str(envelope.get("category_label") or "All categories").strip()
+        lines.append(f"• Category scope: {cat}")
+        txn = str(envelope.get("txn_date") or "").strip()
+        if txn:
+            lines.append(f"• InvStartDate: {txn}")
+    audit = str(envelope.get("source_final_audit_name") or "").strip()
+    if audit:
+        lines.append(f"• Source audit: `{audit}`")
+    qb = str(queued_by or "").strip()
+    if qb:
+        lines.append(f"• Queued by: {qb}")
+    lines.append("• Note: QuickBooks changes apply when the job runs, not immediately.")
+    url = str(run_url or "").strip()
+    job_uuid = str(run_job_id or "").strip()
+    if url and job_uuid:
+        lines.append(f"• Run: {_slack_run_link(url=url, scope='inventory_pipeline', run_job_id=job_uuid)}")
+    elif job_uuid:
+        lines.append(f"• Run ID: `{job_uuid}`")
+    return "\n".join(lines)
+
+
+def format_inventory_review_action_pipeline_completed(
+    envelope: Dict[str, Any],
+    summary: Dict[str, Any],
+) -> str:
+    """Completion Slack for review_retry inventory_pipeline runs (full pipeline summary)."""
+
+    display = str(summary.get("display_name") or "").strip() or "Company"
+    intent_key = str(envelope.get("intent") or "")
+    action = inventory_review_action_intent_label(intent_key)
+    audit = str(envelope.get("source_final_audit_name") or "").strip()
+
+    blocked = int(summary.get("blocked_items", 0) or 0)
+    still_review = int(summary.get("still_needs_review", 0) or 0)
+    issues = blocked > 0 or still_review > 0
+    header = (
+        f"⚠️ *Inventory Review Action Completed with issues* — {display}"
+        if issues
+        else f"✅ *Inventory Review Action Completed* — {display}"
+    )
+
+    lines = [header, "", f"• Action: {action}"]
+    cat_fixes = int(summary.get("catalog_fixes_applied", 0) or 0)
+    qty_applied = int(summary.get("quantity_updates_applied", 0) or 0)
+    if intent_key == REVIEW_INTENT_CATALOG or cat_fixes:
+        lines.append(f"• Catalog fixes applied: {cat_fixes}")
+        lines.append(f"• Duplicate base items resolved: {int(summary.get('duplicate_base_items_resolved', 0) or 0)}")
+        lines.append(f"• Base items created (catalog): {int(summary.get('base_items_created', 0) or 0)}")
+    if intent_key == REVIEW_INTENT_QUANTITY or qty_applied:
+        lines.append(f"• Quantity updates applied: {qty_applied}")
+    qa_stats = summary.get("quantity_adjustment_stats")
+    if isinstance(qa_stats, dict) and intent_key == REVIEW_INTENT_QUANTITY:
+        try:
+            skipped_q = int(qa_stats.get("skipped", 0) or 0)
+        except (TypeError, ValueError):
+            skipped_q = 0
+        if skipped_q:
+            lines.append(f"• Quantity adjustments skipped: {skipped_q}")
+    lines.append(f"• Products still needing review (final audit): {still_review}")
+    lines.append(f"• Blocked items (final audit): {blocked}")
+    if audit:
+        lines.append(f"• Source audit: `{audit}`")
+    run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "") or "").strip()
+    run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
+    if run_url and run_job_id:
+        lines.extend(["", f"• Run: {_slack_run_link(url=run_url, scope='inventory_pipeline', run_job_id=run_job_id)}"])
+    return "\n".join(lines)
+
+
+def format_inventory_review_action_missing_create_completed(
+    envelope: Dict[str, Any],
+    summary: Dict[str, Any],
+) -> str:
+    """Completion Slack for --review-create-missing-items pipeline phase."""
+
+    display = str(summary.get("display_name") or "").strip() or "Company"
+    exec_stats = summary.get("review_missing_create_execution")
+    if not isinstance(exec_stats, dict):
+        exec_stats = {}
+    try:
+        created = int(exec_stats.get("created", 0) or 0)
+    except (TypeError, ValueError):
+        created = 0
+    try:
+        skipped = int(exec_stats.get("skipped", 0) or 0)
+    except (TypeError, ValueError):
+        skipped = 0
+    try:
+        failed = int(exec_stats.get("failed", 0) or 0)
+    except (TypeError, ValueError):
+        failed = 0
+
+    issues = failed > 0
+    header = (
+        f"⚠️ *Inventory Review Action Completed with issues* — {display}"
+        if issues
+        else f"✅ *Inventory Review Action Completed* — {display}"
+    )
+    txn = str(summary.get("inv_txn_date") or envelope.get("txn_date") or "").strip()
+    cat = str(envelope.get("category_label") or "All categories").strip()
+    audit = str(envelope.get("source_final_audit_name") or "").strip()
+    lines = [
+        header,
+        "",
+        "• Action: Missing item creation",
+        f"• Created: {created}",
+        f"• Skipped: {skipped}",
+        f"• Failed: {failed}",
+    ]
+    if txn:
+        lines.append(f"• InvStartDate: {txn}")
+    lines.append(f"• Category scope: {cat}")
+    if audit:
+        lines.append(f"• Source audit: `{audit}`")
+    report_csv = str(exec_stats.get("report_csv") or "").strip()
+    if report_csv:
+        lines.append(f"• Report: `{Path(report_csv).name}`")
+    run_job_id = str(summary.get("run_job_id") or os.getenv("OIAT_RUN_JOB_ID", "") or "").strip()
+    run_url = str(summary.get("run_url") or build_run_detail_url(run_job_id)).strip()
+    if run_url and run_job_id:
+        lines.extend(["", f"• Run: {_slack_run_link(url=run_url, scope='inventory_pipeline', run_job_id=run_job_id)}"])
+    return "\n".join(lines)
+
+
+def format_inventory_review_action_failed(
+    *,
+    envelope: Dict[str, Any],
+    company_display_name: str,
+    exit_code: int,
+    failure_reason: str,
+    run_url: str,
+    run_job_id: str,
+) -> str:
+    """Slack text when a manual Inventory Review pipeline job exits non-zero."""
+
+    safe_name = str(company_display_name or "").strip() or "Company"
+    action = inventory_review_action_intent_label(str(envelope.get("intent") or ""))
+    lines = [
+        f"❌ *Inventory Review Action Failed* — {safe_name}",
+        "",
+        f"• Action: {action}",
+    ]
+    kind = str(envelope.get("kind") or "")
+    if kind == "review_retry":
+        lines.append(f"• Affected items (queued scope): {int(envelope.get('row_count') or 0)}")
+    elif kind == "review_create_missing":
+        lines.append(f"• Safe candidates (queued scope): {int(envelope.get('safe_count') or 0)}")
+    audit = str(envelope.get("source_final_audit_name") or "").strip()
+    if audit:
+        lines.append(f"• Source audit: `{audit}`")
+    lines.append(f"• Exit code: {exit_code}")
+    reason = str(failure_reason or "").strip()
+    if reason:
+        short = reason[:400] + ("…" if len(reason) > 400 else "")
+        lines.append(f"• Detail: {short}")
+    lines.append("• Check logs / Run Detail.")
+    url = str(run_url or "").strip()
+    job_uuid = str(run_job_id or "").strip()
+    if url and job_uuid:
+        lines.append(f"• Run: {_slack_run_link(url=url, scope='inventory_pipeline', run_job_id=job_uuid)}")
+    return "\n".join(lines)

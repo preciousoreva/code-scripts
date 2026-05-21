@@ -174,10 +174,14 @@
         </dl>
     </section>
 
-    <!-- API tokens (coming soon) -->
+    <!-- API tokens -->
     <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
-        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">API tokens</h2>
-        <p class="text-sm text-slate-600 dark:text-slate-400">When implemented, API or personal access tokens will be managed here.</p>
+        <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-2">QuickBooks connections</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">Monitor, refresh, and test QuickBooks Online API tokens for each configured company.</p>
+        <a href="{% url 'epos_qbo:api-tokens' %}" class="btn btn-secondary inline-flex">
+            <iconify-icon icon="solar:key-minimalistic-linear" width="16"></iconify-icon>
+            Open QuickBooks Connections
+        </a>
     </section>
 </div>
 

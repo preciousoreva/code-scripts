@@ -1164,7 +1164,7 @@ def main(
             logging.info(f"Using provided target_date: {target_date}")
         date_range_str = target_date
     
-    pipeline_name = f"{config.display_name} -> QuickBooks Pipeline"
+    pipeline_name = f"{config.display_name} -> Sales Receipt Pipeline"
 
     logging.info(f"Starting {pipeline_name}...\n")
     
@@ -2100,7 +2100,7 @@ Examples:
         choices=["inline", "upload_fast"],
         help=(
             "Optional qbo_upload override for inventory sync mode. "
-            "Use for single-company canary runs; default is company config/env."
+            "Default is company config/env; use only when intentionally overriding."
         ),
     )
     args = parser.parse_args()
