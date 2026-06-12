@@ -53,6 +53,7 @@ from .models import (
     DashboardUserPreference,
     InventoryReviewAcknowledgement,
     PortalSettings,
+    QboWebhookEvent,
     RunArtifact,
     RunJob,
     RunSchedule,
@@ -1753,6 +1754,33 @@ def _scheduler_env_for_display():
     }
 
 
+def _qbo_webhook_status_context():
+    endpoint = "/epos-qbo/webhooks/quickbooks/"
+    base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or os.environ.get("PORTAL_DOMAIN", "")).strip()
+    if base and not base.startswith(("http://", "https://")):
+        base = f"https://{base}"
+    endpoint_url = f"{base.rstrip('/')}{endpoint}" if base else endpoint
+    active_companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key")
+    slack_destinations: list[dict[str, object]] = []
+    for company in active_companies:
+        env_key = f"QBO_WEBHOOK_SLACK_URL_{company.company_key.upper().replace('-', '_')}"
+        slack_destinations.append(
+            {
+                "company": company,
+                "env_key": env_key,
+                "configured": bool(os.environ.get(env_key, "").strip()),
+            }
+        )
+    return {
+        "endpoint_url": endpoint_url,
+        "verifier_configured": bool(os.environ.get("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip()),
+        "fallback_slack_configured": bool(os.environ.get("QBO_WEBHOOK_SLACK_URL", "").strip()),
+        "test_slack_configured": bool(os.environ.get("QBO_WEBHOOK_SLACK_URL_TEST", "").strip()),
+        "slack_destinations": slack_destinations,
+        "recent_events": list(QboWebhookEvent.objects.all()[:10]),
+    }
+
+
 @login_required
 def settings_page(request):
     """Settings page: portal defaults (editable with can_manage_portal_settings), my preferences, dashboard and scheduler read-only."""
@@ -1818,6 +1846,7 @@ def settings_page(request):
         "reconcile_diff_warning": portal_settings.get_reconcile_diff_warning(),
         "reauth_guidance": portal_settings.get_reauth_guidance(),
         "scheduler_env": _scheduler_env_for_display(),
+        "qbo_webhook_status": _qbo_webhook_status_context(),
     }
     context.update(_nav_context())
     context.update(

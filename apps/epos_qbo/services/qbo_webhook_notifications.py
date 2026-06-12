@@ -11,12 +11,13 @@ from code_scripts.company_config import get_qbo_api_base_url
 from code_scripts.slack_notify import send_slack_success
 from code_scripts.token_manager import get_access_token
 
-from ..models import CompanyConfigRecord
+from ..models import CompanyConfigRecord, QboWebhookEvent
 
 logger = logging.getLogger(__name__)
 
 QBO_MINOR_VERSION = "70"
 QBO_LOOKUP_TIMEOUT_SECS = 12
+INTUIT_TEST_REALM_ID = "310687"
 
 
 @dataclass(frozen=True)
@@ -43,18 +44,43 @@ def process_qbo_webhook_payload(payload: dict[str, Any]) -> int:
             logger.warning("QBO webhook notification skipped: missing realmId")
             continue
         company = _find_company_by_realm_id(realm_id)
-        if company is None:
-            logger.warning("QBO webhook notification skipped: unknown realmId=%s", realm_id)
-            continue
-        webhook_url = _company_slack_webhook(company.company_key)
-        if not webhook_url:
-            logger.info("QBO webhook Slack skipped for %s: no webhook configured", company.company_key)
-            continue
+        is_test_event = realm_id == INTUIT_TEST_REALM_ID
+        webhook_url = _company_slack_webhook(company.company_key if company else "", is_test_event=is_test_event)
 
         for entity in _iter_entities(notification):
-            message = _format_entity_notification(company=company, realm_id=realm_id, entity=entity)
-            send_slack_success(message, webhook_url)
-            sent_count += 1
+            event_log = _create_event_log(
+                notification=notification,
+                entity=entity,
+                realm_id=realm_id,
+                company=company,
+                is_test_event=is_test_event,
+                slack_webhook_configured=bool(webhook_url),
+            )
+            if company is None and not is_test_event:
+                logger.warning("QBO webhook notification skipped: unknown realmId=%s", realm_id)
+                _mark_event_skipped(event_log, f"Unknown realmId: {realm_id}")
+                continue
+            if not webhook_url:
+                target = company.company_key if company else "test event"
+                logger.info("QBO webhook Slack skipped for %s: no webhook configured", target)
+                _mark_event_skipped(event_log, "No QBO webhook Slack URL configured.")
+                continue
+
+            message = _format_entity_notification(
+                company=company,
+                realm_id=realm_id,
+                entity=entity,
+                is_test_event=is_test_event,
+            )
+            try:
+                send_slack_success(message, webhook_url)
+            except Exception as exc:  # pragma: no cover - send_slack_success currently swallows errors
+                _mark_event_failed(event_log, str(exc))
+            else:
+                event_log.status = QboWebhookEvent.STATUS_SENT
+                event_log.slack_sent = True
+                event_log.save(update_fields=["status", "slack_sent"])
+                sent_count += 1
     return sent_count
 
 
@@ -66,12 +92,66 @@ def _find_company_by_realm_id(realm_id: str) -> CompanyConfigRecord | None:
     return None
 
 
-def _company_slack_webhook(company_key: str) -> str:
-    key_suffix = company_key.upper().replace("-", "_")
-    company_specific = os.getenv(f"QBO_WEBHOOK_SLACK_URL_{key_suffix}", "").strip()
-    if company_specific:
-        return company_specific
+def _company_slack_webhook(company_key: str, *, is_test_event: bool = False) -> str:
+    if is_test_event:
+        test_webhook = os.getenv("QBO_WEBHOOK_SLACK_URL_TEST", "").strip()
+        if test_webhook:
+            return test_webhook
+        company_a_webhook = os.getenv("QBO_WEBHOOK_SLACK_URL_COMPANY_A", "").strip()
+        if company_a_webhook:
+            return company_a_webhook
+    if company_key:
+        key_suffix = company_key.upper().replace("-", "_")
+        company_specific = os.getenv(f"QBO_WEBHOOK_SLACK_URL_{key_suffix}", "").strip()
+        if company_specific:
+            return company_specific
     return os.getenv("QBO_WEBHOOK_SLACK_URL", "").strip()
+
+
+def _create_event_log(
+    *,
+    notification: dict[str, Any],
+    entity: WebhookEntity,
+    realm_id: str,
+    company: CompanyConfigRecord | None,
+    is_test_event: bool,
+    slack_webhook_configured: bool,
+) -> QboWebhookEvent:
+    return QboWebhookEvent.objects.create(
+        signature_valid=True,
+        realm_id=realm_id,
+        company_key=company.company_key if company else "",
+        company_display_name=company.display_name if company else ("Intuit test event" if is_test_event else ""),
+        entity_name=entity.name,
+        entity_id=entity.entity_id,
+        operation=entity.operation,
+        last_updated=entity.last_updated,
+        is_test_event=is_test_event,
+        status=QboWebhookEvent.STATUS_RECEIVED,
+        slack_webhook_configured=slack_webhook_configured,
+        payload_json=notification,
+    )
+
+
+def record_rejected_webhook(*, reason: str, payload: dict[str, Any] | None = None) -> None:
+    QboWebhookEvent.objects.create(
+        signature_valid=False,
+        status=QboWebhookEvent.STATUS_REJECTED,
+        skip_reason=reason,
+        payload_json=payload or {},
+    )
+
+
+def _mark_event_skipped(event_log: QboWebhookEvent, reason: str) -> None:
+    event_log.status = QboWebhookEvent.STATUS_SKIPPED
+    event_log.skip_reason = reason
+    event_log.save(update_fields=["status", "skip_reason"])
+
+
+def _mark_event_failed(event_log: QboWebhookEvent, message: str) -> None:
+    event_log.status = QboWebhookEvent.STATUS_FAILED
+    event_log.error_message = message
+    event_log.save(update_fields=["status", "error_message"])
 
 
 def _iter_entities(notification: dict[str, Any]) -> list[WebhookEntity]:
@@ -102,13 +182,29 @@ def _iter_entities(notification: dict[str, Any]) -> list[WebhookEntity]:
 
 def _format_entity_notification(
     *,
-    company: CompanyConfigRecord,
+    company: CompanyConfigRecord | None,
     realm_id: str,
     entity: WebhookEntity,
+    is_test_event: bool = False,
 ) -> str:
+    if is_test_event:
+        return _format_test_notification(realm_id=realm_id, entity=entity)
     if entity.name == "Item":
         return _format_item_notification(company=company, realm_id=realm_id, entity=entity)
     return _format_generic_notification(company=company, realm_id=realm_id, entity=entity)
+
+
+def _format_test_notification(*, realm_id: str, entity: WebhookEntity) -> str:
+    lines = [
+        f"*QuickBooks Test Event: {entity.name} {entity.operation}*",
+        "• Source: Intuit Developer send test events",
+        f"• Test Realm ID: `{realm_id}`",
+        f"• Entity ID: `{entity.entity_id}`",
+    ]
+    if entity.last_updated:
+        lines.append(f"• Updated: {entity.last_updated}")
+    lines.append("• Note: This is not a real company event.")
+    return "\n".join(lines)
 
 
 def _format_generic_notification(

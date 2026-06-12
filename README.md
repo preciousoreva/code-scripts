@@ -215,7 +215,7 @@ Retention/lifecycle plan: [`docs/ARTIFACT_RETENTION_PLAN.md`](docs/ARTIFACT_RETE
 - QBO: `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`
 - EPOS: credentials are referenced per-company via `epos.username_env_key` / `epos.password_env_key`
 - Portal: `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` (when behind TLS proxy)
-- QuickBooks webhooks: `QBO_WEBHOOK_VERIFIER_TOKEN`; register `https://<portal-domain>/epos-qbo/webhooks/quickbooks/` in Intuit; Slack destinations use `QBO_WEBHOOK_SLACK_URL_COMPANY_A/B`
+- QuickBooks webhooks: `QBO_WEBHOOK_VERIFIER_TOKEN`; register `https://<portal-domain>/epos-qbo/webhooks/quickbooks/` in Intuit; Slack destinations use `QBO_WEBHOOK_SLACK_URL_COMPANY_A/B` (`QBO_WEBHOOK_SLACK_URL_TEST` can override Intuit sample events)
 - Slack: webhook URL env keys are referenced per-company, e.g. `SLACK_WEBHOOK_URL_A`
 - Portal base URL/domain is used for run links in operator output (Docker uses `PORTAL_DOMAIN`)
 

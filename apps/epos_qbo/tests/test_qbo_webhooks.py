@@ -9,7 +9,7 @@ from unittest import mock
 from django.test import Client, TestCase
 from django.urls import reverse
 
-from apps.epos_qbo.models import CompanyConfigRecord
+from apps.epos_qbo.models import CompanyConfigRecord, QboWebhookEvent
 
 
 def _signature(body: bytes, token: str) -> str:
@@ -47,6 +47,10 @@ class QuickBooksWebhookViewTests(TestCase):
         response = self._post({"eventNotifications": []}, token="wrong-token")
         self.assertEqual(response.status_code, 401)
         process_payload.assert_not_called()
+        event = QboWebhookEvent.objects.get()
+        self.assertEqual(event.status, QboWebhookEvent.STATUS_REJECTED)
+        self.assertFalse(event.signature_valid)
+        self.assertIn("Invalid Intuit signature", event.skip_reason)
 
     @mock.patch.dict("os.environ", {}, clear=True)
     def test_missing_verifier_token_is_service_unavailable(self):
@@ -119,6 +123,13 @@ class QuickBooksWebhookNotificationTests(TestCase):
         self.assertIn("Coke 50CL", message)
         self.assertIn("Inventory", message)
         self.assertIn("Product Sales", message)
+        event = QboWebhookEvent.objects.get()
+        self.assertEqual(event.status, QboWebhookEvent.STATUS_SENT)
+        self.assertTrue(event.signature_valid)
+        self.assertTrue(event.slack_sent)
+        self.assertEqual(event.realm_id, "9341455406194328")
+        self.assertEqual(event.company_key, "company_a")
+        self.assertEqual(event.entity_name, "Item")
 
     @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.send_slack_success")
     @mock.patch.dict("os.environ", {"QBO_WEBHOOK_SLACK_URL": "https://hooks.slack.test/qbo-default"})
@@ -166,6 +177,10 @@ class QuickBooksWebhookNotificationTests(TestCase):
 
         self.assertEqual(process_qbo_webhook_payload(payload), 0)
         send_slack.assert_not_called()
+        event = QboWebhookEvent.objects.get()
+        self.assertEqual(event.status, QboWebhookEvent.STATUS_SKIPPED)
+        self.assertEqual(event.realm_id, "unknown")
+        self.assertIn("Unknown realmId", event.skip_reason)
 
     @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.send_slack_success")
     @mock.patch.dict("os.environ", {"SLACK_WEBHOOK_URL_A": "https://hooks.slack.test/pipeline"}, clear=True)
@@ -174,3 +189,42 @@ class QuickBooksWebhookNotificationTests(TestCase):
 
         self.assertEqual(process_qbo_webhook_payload(self.payload), 0)
         send_slack.assert_not_called()
+        event = QboWebhookEvent.objects.get()
+        self.assertEqual(event.status, QboWebhookEvent.STATUS_SKIPPED)
+        self.assertIn("No QBO webhook Slack URL", event.skip_reason)
+
+    @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.send_slack_success")
+    @mock.patch.dict(
+        "os.environ",
+        {"QBO_WEBHOOK_SLACK_URL_COMPANY_A": "https://hooks.slack.test/qbo-company-a"},
+    )
+    def test_intuit_sample_realm_is_logged_and_sent_as_test_event(self, send_slack):
+        payload = {
+            "eventNotifications": [
+                {
+                    "realmId": "310687",
+                    "dataChangeEvent": {
+                        "entities": [
+                            {
+                                "name": "Item",
+                                "id": "1234",
+                                "operation": "Create",
+                                "lastUpdated": "2026-06-12T15:08:10.491Z",
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+
+        from apps.epos_qbo.services.qbo_webhook_notifications import process_qbo_webhook_payload
+
+        self.assertEqual(process_qbo_webhook_payload(payload), 1)
+        message, webhook = send_slack.call_args.args
+        self.assertEqual(webhook, "https://hooks.slack.test/qbo-company-a")
+        self.assertIn("QuickBooks Test Event", message)
+        self.assertIn("TEST", message.upper())
+        event = QboWebhookEvent.objects.get()
+        self.assertTrue(event.is_test_event)
+        self.assertEqual(event.status, QboWebhookEvent.STATUS_SENT)
+        self.assertEqual(event.realm_id, "310687")

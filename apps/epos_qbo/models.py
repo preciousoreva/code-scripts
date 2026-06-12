@@ -246,6 +246,52 @@ class CompanyConfigRecord(models.Model):
         return f"{self.company_key} ({self.display_name})"
 
 
+class QboWebhookEvent(models.Model):
+    STATUS_RECEIVED = "received"
+    STATUS_SENT = "sent"
+    STATUS_SKIPPED = "skipped"
+    STATUS_FAILED = "failed"
+    STATUS_REJECTED = "rejected"
+    STATUS_CHOICES = [
+        (STATUS_RECEIVED, "Received"),
+        (STATUS_SENT, "Sent"),
+        (STATUS_SKIPPED, "Skipped"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    received_at = models.DateTimeField(default=timezone.now)
+    signature_valid = models.BooleanField(default=False)
+    realm_id = models.CharField(max_length=64, blank=True)
+    company_key = models.SlugField(max_length=64, blank=True)
+    company_display_name = models.CharField(max_length=255, blank=True)
+    entity_name = models.CharField(max_length=64, blank=True)
+    entity_id = models.CharField(max_length=64, blank=True)
+    operation = models.CharField(max_length=32, blank=True)
+    last_updated = models.CharField(max_length=64, blank=True)
+    is_test_event = models.BooleanField(default=False)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RECEIVED)
+    slack_webhook_configured = models.BooleanField(default=False)
+    slack_sent = models.BooleanField(default=False)
+    skip_reason = models.TextField(blank=True)
+    error_message = models.TextField(blank=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-received_at", "-id"]
+        indexes = [
+            models.Index(fields=["-received_at"]),
+            models.Index(fields=["realm_id", "-received_at"]),
+            models.Index(fields=["company_key", "-received_at"]),
+            models.Index(fields=["status", "-received_at"]),
+        ]
+
+    def __str__(self) -> str:
+        entity = self.entity_name or "Webhook"
+        operation = self.operation or self.status
+        return f"{entity} {operation} ({self.received_at:%Y-%m-%d %H:%M:%S})"
+
+
 class RunJob(models.Model):
     SCOPE_SINGLE = "single_company"
     SCOPE_ALL = "all_companies"

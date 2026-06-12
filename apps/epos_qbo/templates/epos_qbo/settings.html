@@ -124,6 +124,95 @@
         </form>
     </section>
 
+    <!-- QuickBooks event alerts -->
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between mb-4">
+            <div>
+                <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100">QuickBooks event alerts</h2>
+                <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Webhook receiver status and recent event deliveries.</p>
+            </div>
+            <span class="inline-flex w-fit items-center rounded-md px-2 py-1 text-xs font-medium {% if qbo_webhook_status.verifier_configured %}bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300{% else %}bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300{% endif %}">
+                {% if qbo_webhook_status.verifier_configured %}Verifier configured{% else %}Verifier missing{% endif %}
+            </span>
+        </div>
+
+        <dl class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Endpoint URL</dt>
+                <dd class="mt-1 text-sm text-slate-900 dark:text-slate-100 font-mono break-all">{{ qbo_webhook_status.endpoint_url }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Fallback Slack</dt>
+                <dd class="mt-1 text-sm {% if qbo_webhook_status.fallback_slack_configured %}text-emerald-700 dark:text-emerald-300{% else %}text-slate-600 dark:text-slate-300{% endif %}">
+                    {% if qbo_webhook_status.fallback_slack_configured %}Configured{% else %}Not configured{% endif %}
+                </dd>
+            </div>
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Test event Slack</dt>
+                <dd class="mt-1 text-sm {% if qbo_webhook_status.test_slack_configured %}text-emerald-700 dark:text-emerald-300{% else %}text-slate-600 dark:text-slate-300{% endif %}">
+                    {% if qbo_webhook_status.test_slack_configured %}Configured{% else %}Uses fallback or company webhook{% endif %}
+                </dd>
+            </div>
+            {% for destination in qbo_webhook_status.slack_destinations %}
+            <div>
+                <dt class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">{{ destination.company.display_name }}</dt>
+                <dd class="mt-1 text-sm">
+                    <span class="font-mono text-slate-700 dark:text-slate-200">{{ destination.env_key }}</span>
+                    <span class="ml-2 {% if destination.configured %}text-emerald-700 dark:text-emerald-300{% else %}text-slate-500 dark:text-slate-400{% endif %}">
+                        {% if destination.configured %}configured{% else %}not configured{% endif %}
+                    </span>
+                </dd>
+            </div>
+            {% endfor %}
+        </dl>
+
+        <div class="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-lg">
+            <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                <thead class="bg-slate-50 dark:bg-slate-900/40">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Received</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Event</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Company / realm</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Status</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Detail</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
+                    {% for event in qbo_webhook_status.recent_events %}
+                    <tr>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 whitespace-nowrap">{{ event.received_at|date:"M j, H:i:s" }}</td>
+                        <td class="px-4 py-3 text-sm text-slate-900 dark:text-slate-100">
+                            <div>{{ event.entity_name|default:"Webhook" }} {{ event.operation }}</div>
+                            {% if event.entity_id %}<div class="text-xs text-slate-500 dark:text-slate-400 font-mono">{{ event.entity_id }}</div>{% endif %}
+                            {% if event.is_test_event %}<div class="text-xs text-blue-600 dark:text-blue-300">TEST EVENT</div>{% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300">
+                            <div>{{ event.company_display_name|default:"—" }}</div>
+                            <div class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ event.realm_id|default:"—" }}</div>
+                        </td>
+                        <td class="px-4 py-3 text-sm">
+                            <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium
+                                {% if event.status == 'sent' %}bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300
+                                {% elif event.status == 'failed' or event.status == 'rejected' %}bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300
+                                {% elif event.status == 'skipped' %}bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300
+                                {% else %}bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200{% endif %}">
+                                {{ event.get_status_display }}
+                            </span>
+                        </td>
+                        <td class="px-4 py-3 text-sm text-slate-600 dark:text-slate-300 max-w-md">
+                            {{ event.skip_reason|default:event.error_message|default:"—" }}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="5" class="px-4 py-8 text-center text-sm text-slate-500 dark:text-slate-400">No QuickBooks webhook events received yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
     <!-- Dashboard (read-only effective values) -->
     <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl p-6 shadow-sm">
         <h2 class="text-lg font-medium text-slate-900 dark:text-slate-100 mb-4">Dashboard (effective values)</h2>
