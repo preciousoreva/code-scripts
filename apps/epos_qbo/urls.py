@@ -87,4 +87,5 @@ urlpatterns = [
     path("tools/qbo-query/", views.tools_qbo_query_api, name="tools-qbo-query"),
     path("tools/verify-mapping/", views.tools_verify_mapping_api, name="tools-verify-mapping"),
     path("webhooks/quickbooks/", webhooks.quickbooks_webhook, name="quickbooks-webhook"),
+    path("webhooks/quickbooks", webhooks.quickbooks_webhook, name="quickbooks-webhook-noslash"),
 ]

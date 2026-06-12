@@ -23,11 +23,11 @@ class QuickBooksWebhookViewTests(TestCase):
         self.url = reverse("epos_qbo:quickbooks-webhook")
         self.token = "test-verifier-token"
 
-    def _post(self, payload: dict, *, token: str | None = None):
+    def _post(self, payload: object, *, token: str | None = None, url: str | None = None):
         body = json.dumps(payload).encode("utf-8")
         verifier = token if token is not None else self.token
         return self.client.post(
-            self.url,
+            url or self.url,
             data=body,
             content_type="application/json",
             HTTP_INTUIT_SIGNATURE=_signature(body, verifier),
@@ -39,6 +39,14 @@ class QuickBooksWebhookViewTests(TestCase):
         response = self._post({"eventNotifications": []})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["notifications_sent"], 2)
+        process_payload.assert_called_once_with({"eventNotifications": []})
+
+    @mock.patch.dict("os.environ", {"QBO_WEBHOOK_VERIFIER_TOKEN": "test-verifier-token"})
+    @mock.patch("apps.epos_qbo.webhooks.process_qbo_webhook_body", return_value=1)
+    def test_no_slash_url_processes_payload_without_login(self, process_payload):
+        response = self._post({"eventNotifications": []}, url="/epos-qbo/webhooks/quickbooks")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["notifications_sent"], 1)
         process_payload.assert_called_once_with({"eventNotifications": []})
 
     @mock.patch.dict("os.environ", {"QBO_WEBHOOK_VERIFIER_TOKEN": "test-verifier-token"})
