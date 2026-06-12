@@ -11,7 +11,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from .services.qbo_webhook_notifications import process_qbo_webhook_payload, record_rejected_webhook
+from .services.qbo_webhook_notifications import process_qbo_webhook_body, record_rejected_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +38,11 @@ def quickbooks_webhook(request: HttpRequest) -> HttpResponse:
     except (UnicodeDecodeError, json.JSONDecodeError):
         record_rejected_webhook(reason="Invalid JSON payload.")
         return JsonResponse({"error": "invalid JSON"}, status=400)
-    if not isinstance(payload, dict):
-        record_rejected_webhook(reason="Payload was not a JSON object.")
-        return JsonResponse({"error": "payload must be a JSON object"}, status=400)
+    if not isinstance(payload, (dict, list)):
+        record_rejected_webhook(reason="Payload was not a supported JSON object or array.")
+        return JsonResponse({"error": "payload must be a supported JSON object or array"}, status=400)
 
-    sent_count = process_qbo_webhook_payload(payload)
+    sent_count = process_qbo_webhook_body(payload)
     return JsonResponse({"status": "ok", "notifications_sent": sent_count})
 
 

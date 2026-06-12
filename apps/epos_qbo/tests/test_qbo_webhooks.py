@@ -34,7 +34,7 @@ class QuickBooksWebhookViewTests(TestCase):
         )
 
     @mock.patch.dict("os.environ", {"QBO_WEBHOOK_VERIFIER_TOKEN": "test-verifier-token"})
-    @mock.patch("apps.epos_qbo.webhooks.process_qbo_webhook_payload", return_value=2)
+    @mock.patch("apps.epos_qbo.webhooks.process_qbo_webhook_body", return_value=2)
     def test_valid_signature_processes_payload_without_login(self, process_payload):
         response = self._post({"eventNotifications": []})
         self.assertEqual(response.status_code, 200)
@@ -42,7 +42,7 @@ class QuickBooksWebhookViewTests(TestCase):
         process_payload.assert_called_once_with({"eventNotifications": []})
 
     @mock.patch.dict("os.environ", {"QBO_WEBHOOK_VERIFIER_TOKEN": "test-verifier-token"})
-    @mock.patch("apps.epos_qbo.webhooks.process_qbo_webhook_payload")
+    @mock.patch("apps.epos_qbo.webhooks.process_qbo_webhook_body")
     def test_invalid_signature_rejected(self, process_payload):
         response = self._post({"eventNotifications": []}, token="wrong-token")
         self.assertEqual(response.status_code, 401)
@@ -56,6 +56,24 @@ class QuickBooksWebhookViewTests(TestCase):
     def test_missing_verifier_token_is_service_unavailable(self):
         response = self.client.post(self.url, data=b"{}", content_type="application/json")
         self.assertEqual(response.status_code, 503)
+
+    @mock.patch.dict("os.environ", {"QBO_WEBHOOK_VERIFIER_TOKEN": "test-verifier-token"})
+    @mock.patch("apps.epos_qbo.webhooks.process_qbo_webhook_body", return_value=1)
+    def test_cloudevents_array_payload_is_accepted(self, process_payload):
+        payload = [
+            {
+                "specversion": "1.0",
+                "id": "event-1",
+                "type": "qbo.item.created.v1",
+                "time": "2026-06-12T15:52:10Z",
+                "intuitentityid": "14895",
+                "intuitaccountid": "9341455406194328",
+                "data": {},
+            }
+        ]
+        response = self._post(payload)
+        self.assertEqual(response.status_code, 200)
+        process_payload.assert_called_once_with(payload)
 
 
 class QuickBooksWebhookNotificationTests(TestCase):
@@ -130,6 +148,49 @@ class QuickBooksWebhookNotificationTests(TestCase):
         self.assertEqual(event.realm_id, "9341455406194328")
         self.assertEqual(event.company_key, "company_a")
         self.assertEqual(event.entity_name, "Item")
+
+    @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.requests.get")
+    @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.get_access_token", return_value="access")
+    @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.send_slack_success")
+    @mock.patch.dict(
+        "os.environ",
+        {"QBO_WEBHOOK_SLACK_URL_COMPANY_A": "https://hooks.slack.test/qbo-company-a"},
+    )
+    def test_cloudevents_item_event_sends_enriched_slack(self, send_slack, _get_token, requests_get):
+        requests_get.return_value = mock.Mock(
+            status_code=200,
+            json=lambda: {
+                "Item": {
+                    "Name": "Test Product",
+                    "Type": "Inventory",
+                    "Active": True,
+                    "TrackQtyOnHand": True,
+                }
+            },
+        )
+        payload = [
+            {
+                "specversion": "1.0",
+                "id": "event-1",
+                "type": "qbo.item.created.v1",
+                "time": "2026-06-12T15:52:10Z",
+                "intuitentityid": "14895",
+                "intuitaccountid": "9341455406194328",
+                "data": {},
+            }
+        ]
+
+        from apps.epos_qbo.services.qbo_webhook_notifications import process_qbo_webhook_body
+
+        self.assertEqual(process_qbo_webhook_body(payload), 1)
+        message = send_slack.call_args.args[0]
+        self.assertIn("QuickBooks Item Create", message)
+        self.assertIn("Test Product", message)
+        event = QboWebhookEvent.objects.get()
+        self.assertEqual(event.realm_id, "9341455406194328")
+        self.assertEqual(event.entity_name, "Item")
+        self.assertEqual(event.operation, "Create")
+        self.assertEqual(event.entity_id, "14895")
 
     @mock.patch("apps.epos_qbo.services.qbo_webhook_notifications.send_slack_success")
     @mock.patch.dict("os.environ", {"QBO_WEBHOOK_SLACK_URL": "https://hooks.slack.test/qbo-default"})

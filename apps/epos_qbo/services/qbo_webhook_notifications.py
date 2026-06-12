@@ -26,15 +26,35 @@ class WebhookEntity:
     entity_id: str
     operation: str
     last_updated: str
+    raw_event_id: str = ""
 
 
 def process_qbo_webhook_payload(payload: dict[str, Any]) -> int:
     """Process Intuit data-change webhooks and forward Slack notifications."""
+    if _is_cloudevents_payload(payload):
+        return _process_cloudevents_payload([payload])
+
     notifications = payload.get("eventNotifications")
     if not isinstance(notifications, list):
         logger.warning("QBO webhook ignored: missing eventNotifications list")
         return 0
+    return _process_data_change_notifications(notifications)
 
+
+def process_qbo_webhook_body(payload: Any) -> int:
+    """Process any supported Intuit webhook body shape."""
+    if isinstance(payload, list):
+        if all(isinstance(item, dict) for item in payload):
+            return _process_cloudevents_payload(payload)
+        logger.warning("QBO webhook ignored: array payload contained non-object entries")
+        return 0
+    if isinstance(payload, dict):
+        return process_qbo_webhook_payload(payload)
+    logger.warning("QBO webhook ignored: unsupported payload type %s", type(payload).__name__)
+    return 0
+
+
+def _process_data_change_notifications(notifications: list[dict[str, Any]]) -> int:
     sent_count = 0
     for notification in notifications:
         if not isinstance(notification, dict):
@@ -43,45 +63,83 @@ def process_qbo_webhook_payload(payload: dict[str, Any]) -> int:
         if not realm_id:
             logger.warning("QBO webhook notification skipped: missing realmId")
             continue
-        company = _find_company_by_realm_id(realm_id)
-        is_test_event = realm_id == INTUIT_TEST_REALM_ID
-        webhook_url = _company_slack_webhook(company.company_key if company else "", is_test_event=is_test_event)
-
-        for entity in _iter_entities(notification):
-            event_log = _create_event_log(
-                notification=notification,
-                entity=entity,
-                realm_id=realm_id,
-                company=company,
-                is_test_event=is_test_event,
-                slack_webhook_configured=bool(webhook_url),
-            )
-            if company is None and not is_test_event:
-                logger.warning("QBO webhook notification skipped: unknown realmId=%s", realm_id)
-                _mark_event_skipped(event_log, f"Unknown realmId: {realm_id}")
-                continue
-            if not webhook_url:
-                target = company.company_key if company else "test event"
-                logger.info("QBO webhook Slack skipped for %s: no webhook configured", target)
-                _mark_event_skipped(event_log, "No QBO webhook Slack URL configured.")
-                continue
-
-            message = _format_entity_notification(
-                company=company,
-                realm_id=realm_id,
-                entity=entity,
-                is_test_event=is_test_event,
-            )
-            try:
-                send_slack_success(message, webhook_url)
-            except Exception as exc:  # pragma: no cover - send_slack_success currently swallows errors
-                _mark_event_failed(event_log, str(exc))
-            else:
-                event_log.status = QboWebhookEvent.STATUS_SENT
-                event_log.slack_sent = True
-                event_log.save(update_fields=["status", "slack_sent"])
-                sent_count += 1
+        sent_count += _process_realm_entities(
+            realm_id=realm_id,
+            entities=_iter_entities(notification),
+            payload_for_log=notification,
+        )
     return sent_count
+
+
+def _process_cloudevents_payload(events: list[dict[str, Any]]) -> int:
+    sent_count = 0
+    for event in events:
+        realm_id = str(event.get("intuitaccountid") or "").strip()
+        if not realm_id:
+            logger.warning("QBO webhook CloudEvent skipped: missing intuitaccountid")
+            continue
+        entity = _entity_from_cloudevent(event)
+        if entity is None:
+            logger.warning("QBO webhook CloudEvent skipped: missing entity details")
+            continue
+        sent_count += _process_realm_entities(
+            realm_id=realm_id,
+            entities=[entity],
+            payload_for_log=event,
+        )
+    return sent_count
+
+
+def _process_realm_entities(
+    *,
+    realm_id: str,
+    entities: list[WebhookEntity],
+    payload_for_log: dict[str, Any],
+) -> int:
+    sent_count = 0
+    company = _find_company_by_realm_id(realm_id)
+    is_test_event = realm_id == INTUIT_TEST_REALM_ID
+    webhook_url = _company_slack_webhook(company.company_key if company else "", is_test_event=is_test_event)
+
+    for entity in entities:
+        event_log = _create_event_log(
+            notification=payload_for_log,
+            entity=entity,
+            realm_id=realm_id,
+            company=company,
+            is_test_event=is_test_event,
+            slack_webhook_configured=bool(webhook_url),
+        )
+        if company is None and not is_test_event:
+            logger.warning("QBO webhook notification skipped: unknown realmId=%s", realm_id)
+            _mark_event_skipped(event_log, f"Unknown realmId: {realm_id}")
+            continue
+        if not webhook_url:
+            target = company.company_key if company else "test event"
+            logger.info("QBO webhook Slack skipped for %s: no webhook configured", target)
+            _mark_event_skipped(event_log, "No QBO webhook Slack URL configured.")
+            continue
+
+        message = _format_entity_notification(
+            company=company,
+            realm_id=realm_id,
+            entity=entity,
+            is_test_event=is_test_event,
+        )
+        try:
+            send_slack_success(message, webhook_url)
+        except Exception as exc:  # pragma: no cover - send_slack_success currently swallows errors
+            _mark_event_failed(event_log, str(exc))
+        else:
+            event_log.status = QboWebhookEvent.STATUS_SENT
+            event_log.slack_sent = True
+            event_log.save(update_fields=["status", "slack_sent"])
+            sent_count += 1
+    return sent_count
+
+
+def _is_cloudevents_payload(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("specversion") and payload.get("intuitaccountid"))
 
 
 def _find_company_by_realm_id(realm_id: str) -> CompanyConfigRecord | None:
@@ -178,6 +236,79 @@ def _iter_entities(notification: dict[str, Any]) -> list[WebhookEntity]:
             )
         )
     return out
+
+
+def _entity_from_cloudevent(event: dict[str, Any]) -> WebhookEntity | None:
+    entity_id = str(event.get("intuitentityid") or "").strip()
+    event_type = str(event.get("type") or "").strip()
+    entity_name, operation = _parse_cloudevent_type(event_type)
+    if not entity_id or not entity_name:
+        return None
+    return WebhookEntity(
+        name=entity_name,
+        entity_id=entity_id,
+        operation=operation or "Unknown",
+        last_updated=str(event.get("time") or "").strip(),
+        raw_event_id=str(event.get("id") or "").strip(),
+    )
+
+
+def _parse_cloudevent_type(event_type: str) -> tuple[str, str]:
+    # Expected shape: qbo.item.created.v1
+    parts = [p for p in event_type.split(".") if p]
+    if len(parts) < 4:
+        return "", ""
+    entity = _entity_name_from_slug(parts[1])
+    operation = _operation_from_slug(parts[2])
+    return entity, operation
+
+
+def _entity_name_from_slug(slug: str) -> str:
+    known = {
+        "account": "Account",
+        "bill": "Bill",
+        "billpayment": "BillPayment",
+        "budget": "Budget",
+        "class": "Class",
+        "creditmemo": "CreditMemo",
+        "currency": "Currency",
+        "customer": "Customer",
+        "department": "Department",
+        "deposit": "Deposit",
+        "employee": "Employee",
+        "estimate": "Estimate",
+        "invoice": "Invoice",
+        "item": "Item",
+        "journalcode": "JournalCode",
+        "journalentry": "JournalEntry",
+        "payment": "Payment",
+        "paymentmethod": "PaymentMethod",
+        "preferences": "Preferences",
+        "purchase": "Purchase",
+        "purchaseorder": "PurchaseOrder",
+        "refundreceipt": "RefundReceipt",
+        "salesreceipt": "SalesReceipt",
+        "taxagency": "TaxAgency",
+        "term": "Term",
+        "timeactivity": "TimeActivity",
+        "transfer": "Transfer",
+        "vendor": "Vendor",
+        "vendorcredit": "VendorCredit",
+    }
+    cleaned = slug.replace("_", "").replace("-", "").lower()
+    return known.get(cleaned, slug[:1].upper() + slug[1:])
+
+
+def _operation_from_slug(slug: str) -> str:
+    known = {
+        "created": "Create",
+        "updated": "Update",
+        "deleted": "Delete",
+        "merged": "Merge",
+        "voided": "Void",
+        "emailed": "Emailed",
+    }
+    return known.get(slug.lower(), slug[:1].upper() + slug[1:])
 
 
 def _format_entity_notification(
