@@ -17,6 +17,7 @@ class LoginRequiredMiddleware:
             "/logout/",
             "/admin/",  # Django admin handles its own auth
             "/static/",
+            "/epos-qbo/webhooks/quickbooks/",
         )
         path = request.path
         if not request.user.is_authenticated and not any(path.startswith(p) for p in public_prefixes):
