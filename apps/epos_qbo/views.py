@@ -1756,10 +1756,19 @@ def _scheduler_env_for_display():
 
 def _qbo_webhook_status_context():
     endpoint = "/epos-qbo/webhooks/quickbooks/"
-    base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or os.environ.get("PORTAL_DOMAIN", "")).strip()
-    if base and not base.startswith(("http://", "https://")):
-        base = f"https://{base}"
-    endpoint_url = f"{base.rstrip('/')}{endpoint}" if base else endpoint
+    # Intuit delivers to a public hostname (e.g. a Cloudflare Tunnel), which is not the
+    # same as the tailnet-only portal domain. Prefer an explicit public webhook URL/host
+    # when configured; otherwise fall back to the portal domain (older deployments).
+    public = os.environ.get("QBO_WEBHOOK_PUBLIC_URL", "").strip()
+    if public:
+        if not public.startswith(("http://", "https://")):
+            public = f"https://{public}"
+        endpoint_url = public if "/epos-qbo/webhooks/quickbooks" in public else f"{public.rstrip('/')}{endpoint}"
+    else:
+        base = str(getattr(settings, "OIAT_PORTAL_BASE_URL", "") or os.environ.get("PORTAL_DOMAIN", "")).strip()
+        if base and not base.startswith(("http://", "https://")):
+            base = f"https://{base}"
+        endpoint_url = f"{base.rstrip('/')}{endpoint}" if base else endpoint
     active_companies = CompanyConfigRecord.objects.filter(is_active=True).order_by("company_key")
     slack_destinations: list[dict[str, object]] = []
     for company in active_companies:
