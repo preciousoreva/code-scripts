@@ -215,7 +215,7 @@ Retention/lifecycle plan: [`docs/ARTIFACT_RETENTION_PLAN.md`](docs/ARTIFACT_RETE
 - QBO: `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`
 - EPOS: credentials are referenced per-company via `epos.username_env_key` / `epos.password_env_key`
 - Portal: `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` (when behind TLS proxy)
-- QuickBooks webhooks: `QBO_WEBHOOK_VERIFIER_TOKEN`; register `https://<portal-domain>/epos-qbo/webhooks/quickbooks/` in Intuit; Slack destinations use `QBO_WEBHOOK_SLACK_URL_COMPANY_A/B` (`QBO_WEBHOOK_SLACK_URL_TEST` can override Intuit sample events)
+- QuickBooks webhooks: `QBO_WEBHOOK_VERIFIER_TOKEN`; public ingress via Cloudflare Tunnel (`CLOUDFLARE_TUNNEL_TOKEN`, see [Webhook ingress](#webhook-ingress-cloudflare-tunnel)); register `https://qbo-webhooks.<your-domain>/epos-qbo/webhooks/quickbooks/` in Intuit; Slack destinations use `QBO_WEBHOOK_SLACK_URL_COMPANY_A/B` (`QBO_WEBHOOK_SLACK_URL_TEST` can override Intuit sample events)
 - Slack: webhook URL env keys are referenced per-company, e.g. `SLACK_WEBHOOK_URL_A`
 - Portal base URL/domain is used for run links in operator output (Docker uses `PORTAL_DOMAIN`)
 
@@ -240,19 +240,46 @@ Docker Compose services (see `docker-compose.yml`):
 - `caddy`: HTTPS reverse proxy (Cloudflare DNS challenge) bound to the host Tailscale IP
 - `web`: Django + Gunicorn (runs migrations on start)
 - `scheduler`: runs `python manage.py run_schedule_worker` (DB schedules → `RunJob`)
+- `cloudflared`: Cloudflare Tunnel exposing only the public webhook endpoint (see [Webhook ingress](#webhook-ingress-cloudflare-tunnel))
 
 Networking model:
 
 - Tailscale network gates access to the host
-- Cloudflare DNS record is **DNS-only** (no Cloudflare proxy/WAF)
+- The portal's Cloudflare DNS record is **DNS-only** (no Cloudflare proxy/WAF)
+- The webhook hostname is the exception: it is Cloudflare-proxied and served via the `cloudflared` tunnel, so inbound webhooks from the public internet can reach an otherwise tailnet-only host
 
 Update flow:
 
 ```bash
 git pull
 docker compose build
-docker compose up -d caddy web scheduler
+docker compose up -d caddy web scheduler cloudflared
 ```
+
+### Webhook ingress (Cloudflare Tunnel)
+
+The portal is reachable **only over Tailscale** (Caddy binds to the host's Tailscale IP in the `100.64.0.0/10` CGNAT range). That keeps the dashboard private — but QuickBooks Online webhooks are sent from Intuit's public servers, which cannot reach a Tailscale address. The `cloudflared` service gives the **webhook endpoint only** a public entry point.
+
+- **Service:** `cloudflared` — a Cloudflare Tunnel connector running in the compose network.
+- **What for:** exposes a single public hostname (e.g. `qbo-webhooks.<your-domain>`) that forwards just the webhook path to Django.
+- **Why a tunnel:** the connector makes an outbound-only connection to Cloudflare — no inbound firewall ports and no public IP on the host, and TLS terminates at Cloudflare's edge. The rest of the portal stays Tailscale-only.
+
+Request path: `Intuit → Cloudflare edge → cloudflared → web:8000`.
+
+Setup (one-time):
+
+1. In the Cloudflare Zero Trust dashboard (Networks → Tunnels), create a tunnel and copy its **token**.
+2. Add a **Public Hostname** to the tunnel:
+   - Hostname: `qbo-webhooks.<your-domain>`
+   - Path: `epos-qbo/webhooks/quickbooks` (restricts public access to the webhook only; everything else returns 404)
+   - Service: `HTTP` → `web:8000`
+
+   Cloudflare creates the proxied DNS record automatically.
+3. In `.env`, set `CLOUDFLARE_TUNNEL_TOKEN` and add the webhook hostname to `DJANGO_ALLOWED_HOSTS`.
+4. `docker compose up -d cloudflared` and recreate `web` so it picks up the new allowed host.
+5. Register the public URL in the Intuit app: `https://qbo-webhooks.<your-domain>/epos-qbo/webhooks/quickbooks/`.
+
+> On a Windows / Docker Desktop host, pull images from the interactive console before running `docker compose up` over SSH — the credential helper cannot run in a non-interactive session.
 
 ## Documentation
 
