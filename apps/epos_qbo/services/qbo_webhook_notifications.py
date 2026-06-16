@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from typing import Any
+
+import requests
+
+from code_scripts.company_config import get_qbo_api_base_url
+from code_scripts.slack_notify import send_slack_success
+from code_scripts.token_manager import get_access_token
+
+from ..models import CompanyConfigRecord, QboWebhookEvent
+
+logger = logging.getLogger(__name__)
+
+QBO_MINOR_VERSION = "70"
+QBO_LOOKUP_TIMEOUT_SECS = 12
+INTUIT_TEST_REALM_ID = "310687"
+
+
+@dataclass(frozen=True)
+class WebhookEntity:
+    name: str
+    entity_id: str
+    operation: str
+    last_updated: str
+    raw_event_id: str = ""
+
+
+def process_qbo_webhook_payload(payload: dict[str, Any]) -> int:
+    """Process Intuit data-change webhooks and forward Slack notifications."""
+    if _is_cloudevents_payload(payload):
+        return _process_cloudevents_payload([payload])
+
+    notifications = payload.get("eventNotifications")
+    if not isinstance(notifications, list):
+        logger.warning("QBO webhook ignored: missing eventNotifications list")
+        return 0
+    return _process_data_change_notifications(notifications)
+
+
+def process_qbo_webhook_body(payload: Any) -> int:
+    """Process any supported Intuit webhook body shape."""
+    if isinstance(payload, list):
+        if all(isinstance(item, dict) for item in payload):
+            return _process_cloudevents_payload(payload)
+        logger.warning("QBO webhook ignored: array payload contained non-object entries")
+        return 0
+    if isinstance(payload, dict):
+        return process_qbo_webhook_payload(payload)
+    logger.warning("QBO webhook ignored: unsupported payload type %s", type(payload).__name__)
+    return 0
+
+
+def _process_data_change_notifications(notifications: list[dict[str, Any]]) -> int:
+    sent_count = 0
+    for notification in notifications:
+        if not isinstance(notification, dict):
+            continue
+        realm_id = str(notification.get("realmId") or "").strip()
+        if not realm_id:
+            logger.warning("QBO webhook notification skipped: missing realmId")
+            continue
+        sent_count += _process_realm_entities(
+            realm_id=realm_id,
+            entities=_iter_entities(notification),
+            payload_for_log=notification,
+        )
+    return sent_count
+
+
+def _process_cloudevents_payload(events: list[dict[str, Any]]) -> int:
+    sent_count = 0
+    for event in events:
+        realm_id = str(event.get("intuitaccountid") or "").strip()
+        if not realm_id:
+            logger.warning("QBO webhook CloudEvent skipped: missing intuitaccountid")
+            continue
+        entity = _entity_from_cloudevent(event)
+        if entity is None:
+            logger.warning("QBO webhook CloudEvent skipped: missing entity details")
+            continue
+        sent_count += _process_realm_entities(
+            realm_id=realm_id,
+            entities=[entity],
+            payload_for_log=event,
+        )
+    return sent_count
+
+
+def _process_realm_entities(
+    *,
+    realm_id: str,
+    entities: list[WebhookEntity],
+    payload_for_log: dict[str, Any],
+) -> int:
+    sent_count = 0
+    company = _find_company_by_realm_id(realm_id)
+    is_test_event = realm_id == INTUIT_TEST_REALM_ID
+    webhook_url = _company_slack_webhook(company.company_key if company else "", is_test_event=is_test_event)
+
+    for entity in entities:
+        event_log = _create_event_log(
+            notification=payload_for_log,
+            entity=entity,
+            realm_id=realm_id,
+            company=company,
+            is_test_event=is_test_event,
+            slack_webhook_configured=bool(webhook_url),
+        )
+        if company is None and not is_test_event:
+            logger.warning("QBO webhook notification skipped: unknown realmId=%s", realm_id)
+            _mark_event_skipped(event_log, f"Unknown realmId: {realm_id}")
+            continue
+        if not webhook_url:
+            target = company.company_key if company else "test event"
+            logger.info("QBO webhook Slack skipped for %s: no webhook configured", target)
+            _mark_event_skipped(event_log, "No QBO webhook Slack URL configured.")
+            continue
+
+        message = _format_entity_notification(
+            company=company,
+            realm_id=realm_id,
+            entity=entity,
+            is_test_event=is_test_event,
+        )
+        try:
+            send_slack_success(message, webhook_url)
+        except Exception as exc:  # pragma: no cover - send_slack_success currently swallows errors
+            _mark_event_failed(event_log, str(exc))
+        else:
+            event_log.status = QboWebhookEvent.STATUS_SENT
+            event_log.slack_sent = True
+            event_log.save(update_fields=["status", "slack_sent"])
+            sent_count += 1
+    return sent_count
+
+
+def _is_cloudevents_payload(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("specversion") and payload.get("intuitaccountid"))
+
+
+def _find_company_by_realm_id(realm_id: str) -> CompanyConfigRecord | None:
+    for company in CompanyConfigRecord.objects.filter(is_active=True):
+        qbo = company.config_json.get("qbo") if isinstance(company.config_json, dict) else {}
+        if isinstance(qbo, dict) and str(qbo.get("realm_id") or "").strip() == realm_id:
+            return company
+    return None
+
+
+def _company_slack_webhook(company_key: str, *, is_test_event: bool = False) -> str:
+    if is_test_event:
+        test_webhook = os.getenv("QBO_WEBHOOK_SLACK_URL_TEST", "").strip()
+        if test_webhook:
+            return test_webhook
+        company_a_webhook = os.getenv("QBO_WEBHOOK_SLACK_URL_COMPANY_A", "").strip()
+        if company_a_webhook:
+            return company_a_webhook
+    if company_key:
+        key_suffix = company_key.upper().replace("-", "_")
+        company_specific = os.getenv(f"QBO_WEBHOOK_SLACK_URL_{key_suffix}", "").strip()
+        if company_specific:
+            return company_specific
+    return os.getenv("QBO_WEBHOOK_SLACK_URL", "").strip()
+
+
+def _create_event_log(
+    *,
+    notification: dict[str, Any],
+    entity: WebhookEntity,
+    realm_id: str,
+    company: CompanyConfigRecord | None,
+    is_test_event: bool,
+    slack_webhook_configured: bool,
+) -> QboWebhookEvent:
+    return QboWebhookEvent.objects.create(
+        signature_valid=True,
+        realm_id=realm_id,
+        company_key=company.company_key if company else "",
+        company_display_name=company.display_name if company else ("Intuit test event" if is_test_event else ""),
+        entity_name=entity.name,
+        entity_id=entity.entity_id,
+        operation=entity.operation,
+        last_updated=entity.last_updated,
+        is_test_event=is_test_event,
+        status=QboWebhookEvent.STATUS_RECEIVED,
+        slack_webhook_configured=slack_webhook_configured,
+        payload_json=notification,
+    )
+
+
+def record_rejected_webhook(*, reason: str, payload: dict[str, Any] | None = None) -> None:
+    QboWebhookEvent.objects.create(
+        signature_valid=False,
+        status=QboWebhookEvent.STATUS_REJECTED,
+        skip_reason=reason,
+        payload_json=payload or {},
+    )
+
+
+def _mark_event_skipped(event_log: QboWebhookEvent, reason: str) -> None:
+    event_log.status = QboWebhookEvent.STATUS_SKIPPED
+    event_log.skip_reason = reason
+    event_log.save(update_fields=["status", "skip_reason"])
+
+
+def _mark_event_failed(event_log: QboWebhookEvent, message: str) -> None:
+    event_log.status = QboWebhookEvent.STATUS_FAILED
+    event_log.error_message = message
+    event_log.save(update_fields=["status", "error_message"])
+
+
+def _iter_entities(notification: dict[str, Any]) -> list[WebhookEntity]:
+    data_change = notification.get("dataChangeEvent")
+    if not isinstance(data_change, dict):
+        return []
+    entities = data_change.get("entities")
+    if not isinstance(entities, list):
+        return []
+    out: list[WebhookEntity] = []
+    for raw in entities:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        entity_id = str(raw.get("id") or "").strip()
+        if not name or not entity_id:
+            continue
+        out.append(
+            WebhookEntity(
+                name=name,
+                entity_id=entity_id,
+                operation=str(raw.get("operation") or "").strip() or "Unknown",
+                last_updated=str(raw.get("lastUpdated") or "").strip(),
+            )
+        )
+    return out
+
+
+def _entity_from_cloudevent(event: dict[str, Any]) -> WebhookEntity | None:
+    entity_id = str(event.get("intuitentityid") or "").strip()
+    event_type = str(event.get("type") or "").strip()
+    entity_name, operation = _parse_cloudevent_type(event_type)
+    if not entity_id or not entity_name:
+        return None
+    return WebhookEntity(
+        name=entity_name,
+        entity_id=entity_id,
+        operation=operation or "Unknown",
+        last_updated=str(event.get("time") or "").strip(),
+        raw_event_id=str(event.get("id") or "").strip(),
+    )
+
+
+def _parse_cloudevent_type(event_type: str) -> tuple[str, str]:
+    # Expected shape: qbo.item.created.v1
+    parts = [p for p in event_type.split(".") if p]
+    if len(parts) < 4:
+        return "", ""
+    entity = _entity_name_from_slug(parts[1])
+    operation = _operation_from_slug(parts[2])
+    return entity, operation
+
+
+def _entity_name_from_slug(slug: str) -> str:
+    known = {
+        "account": "Account",
+        "bill": "Bill",
+        "billpayment": "BillPayment",
+        "budget": "Budget",
+        "class": "Class",
+        "creditmemo": "CreditMemo",
+        "currency": "Currency",
+        "customer": "Customer",
+        "department": "Department",
+        "deposit": "Deposit",
+        "employee": "Employee",
+        "estimate": "Estimate",
+        "invoice": "Invoice",
+        "item": "Item",
+        "journalcode": "JournalCode",
+        "journalentry": "JournalEntry",
+        "payment": "Payment",
+        "paymentmethod": "PaymentMethod",
+        "preferences": "Preferences",
+        "purchase": "Purchase",
+        "purchaseorder": "PurchaseOrder",
+        "refundreceipt": "RefundReceipt",
+        "salesreceipt": "SalesReceipt",
+        "taxagency": "TaxAgency",
+        "term": "Term",
+        "timeactivity": "TimeActivity",
+        "transfer": "Transfer",
+        "vendor": "Vendor",
+        "vendorcredit": "VendorCredit",
+    }
+    cleaned = slug.replace("_", "").replace("-", "").lower()
+    return known.get(cleaned, slug[:1].upper() + slug[1:])
+
+
+def _operation_from_slug(slug: str) -> str:
+    known = {
+        "created": "Create",
+        "updated": "Update",
+        "deleted": "Delete",
+        "merged": "Merge",
+        "voided": "Void",
+        "emailed": "Emailed",
+    }
+    return known.get(slug.lower(), slug[:1].upper() + slug[1:])
+
+
+def _format_entity_notification(
+    *,
+    company: CompanyConfigRecord | None,
+    realm_id: str,
+    entity: WebhookEntity,
+    is_test_event: bool = False,
+) -> str:
+    if is_test_event:
+        return _format_test_notification(realm_id=realm_id, entity=entity)
+    if entity.name == "Item":
+        return _format_item_notification(company=company, realm_id=realm_id, entity=entity)
+    return _format_generic_notification(company=company, realm_id=realm_id, entity=entity)
+
+
+def _format_test_notification(*, realm_id: str, entity: WebhookEntity) -> str:
+    lines = [
+        f"*QuickBooks Test Event: {entity.name} {entity.operation}*",
+        "• Source: Intuit Developer send test events",
+        f"• Test Realm ID: `{realm_id}`",
+        f"• Entity ID: `{entity.entity_id}`",
+    ]
+    if entity.last_updated:
+        lines.append(f"• Updated: {entity.last_updated}")
+    lines.append("• Note: This is not a real company event.")
+    return "\n".join(lines)
+
+
+def _format_generic_notification(
+    *,
+    company: CompanyConfigRecord,
+    realm_id: str,
+    entity: WebhookEntity,
+    detail_note: str = "",
+) -> str:
+    lines = [
+        f"*QuickBooks {entity.name} {entity.operation}*",
+        f"• Company: {company.display_name}",
+        f"• Realm ID: `{realm_id}`",
+        f"• Entity ID: `{entity.entity_id}`",
+    ]
+    if entity.last_updated:
+        lines.append(f"• Updated: {entity.last_updated}")
+    if detail_note:
+        lines.append(f"• Details: {detail_note}")
+    return "\n".join(lines)
+
+
+def _format_item_notification(
+    *,
+    company: CompanyConfigRecord,
+    realm_id: str,
+    entity: WebhookEntity,
+) -> str:
+    item, error = _fetch_qbo_item(company=company, realm_id=realm_id, item_id=entity.entity_id)
+    if error:
+        return _format_generic_notification(
+            company=company,
+            realm_id=realm_id,
+            entity=entity,
+            detail_note=f"Item lookup unavailable ({error}).",
+        )
+    if not item:
+        return _format_generic_notification(
+            company=company,
+            realm_id=realm_id,
+            entity=entity,
+            detail_note="QuickBooks returned no Item details.",
+        )
+
+    item_name = str(item.get("Name") or item.get("FullyQualifiedName") or entity.entity_id).strip()
+    item_type = str(item.get("Type") or "Unknown").strip()
+    lines = [
+        f"*QuickBooks Item {entity.operation}*",
+        f"• Company: {company.display_name}",
+        f"• Item: {item_name}",
+        f"• Type: {item_type}",
+        f"• Entity ID: `{entity.entity_id}`",
+    ]
+
+    for label, value in [
+        ("Fully qualified name", item.get("FullyQualifiedName")),
+        ("Active", _yes_no(item.get("Active"))),
+        ("Track quantity", _yes_no(item.get("TrackQtyOnHand"))),
+        ("Quantity on hand", item.get("QtyOnHand")),
+        ("Inventory start date", item.get("InvStartDate")),
+        ("Unit price", item.get("UnitPrice")),
+        ("Purchase cost", item.get("PurchaseCost")),
+        ("Parent", _ref_name(item.get("ParentRef"))),
+        ("Income account", _ref_name(item.get("IncomeAccountRef"))),
+        ("Asset account", _ref_name(item.get("AssetAccountRef"))),
+        ("Expense account", _ref_name(item.get("ExpenseAccountRef"))),
+    ]:
+        if value not in (None, ""):
+            lines.append(f"• {label}: {value}")
+    if entity.last_updated:
+        lines.append(f"• Updated: {entity.last_updated}")
+    return "\n".join(lines)
+
+
+def _fetch_qbo_item(
+    *,
+    company: CompanyConfigRecord,
+    realm_id: str,
+    item_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    config = company.config_json if isinstance(company.config_json, dict) else {}
+    qbo = config.get("qbo") if isinstance(config.get("qbo"), dict) else {}
+    environment = str(qbo.get("environment") or "production")
+    try:
+        access_token = get_access_token(company.company_key, realm_id)
+    except Exception as exc:
+        return None, str(exc)
+
+    base_url = get_qbo_api_base_url(environment)
+    url = f"{base_url}/v3/company/{realm_id}/item/{item_id}"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    params = {"minorversion": QBO_MINOR_VERSION}
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=QBO_LOOKUP_TIMEOUT_SECS)
+    except requests.Timeout:
+        return None, "QuickBooks item lookup timed out"
+    except requests.RequestException as exc:
+        return None, f"QuickBooks network error: {exc}"
+    if resp.status_code != 200:
+        return None, f"QuickBooks returned HTTP {resp.status_code}"
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None, "QuickBooks returned invalid JSON"
+    item = payload.get("Item")
+    return (item if isinstance(item, dict) else None), ""
+
+
+def _ref_name(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    name = str(value.get("name") or "").strip()
+    ref_id = str(value.get("value") or "").strip()
+    if name and ref_id:
+        return f"{name} (`{ref_id}`)"
+    return name or ref_id
+
+
+def _yes_no(value: Any) -> str:
+    if value is True:
+        return "Yes"
+    if value is False:
+        return "No"
+    return ""

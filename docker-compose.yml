@@ -43,7 +43,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - python manage.py migrate --noinput && exec gunicorn oiat_portal.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --timeout ${GUNICORN_TIMEOUT:-180}
+      - python manage.py migrate --noinput && exec gunicorn oiat_portal.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --timeout ${GUNICORN_TIMEOUT:-180} --access-logfile - --error-logfile -
     expose:
       - "8000"
 
@@ -83,6 +83,22 @@ services:
       - caddy_config:/config
     restart: unless-stopped
     init: true
+
+  # Public ingress for inbound QuickBooks Online webhooks only.
+  # The portal itself stays tailnet-only (Caddy binds to TAILSCALE_BIND_IP); Intuit
+  # cannot reach a Tailscale CGNAT address, so the webhook endpoint is exposed via a
+  # Cloudflare Tunnel on a dedicated public hostname (qbo-webhooks.oiatsolutions.com).
+  # This connector runs in the compose network and reaches Django directly at
+  # http://web:8000. The public-hostname route and path restriction
+  # (Path = epos-qbo/webhooks/quickbooks) are configured on the tunnel in the
+  # Cloudflare Zero Trust dashboard; this container only needs the tunnel token.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-oiat}-cloudflared
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env}"]
+    depends_on:
+      - web
+    restart: unless-stopped
 
 volumes:
   app-data:
