@@ -1,0 +1,58 @@
+{% extends "websites/base.html" %}
+
+{% block title %}Websites • OIAT Portal{% endblock %}
+{% block breadcrumb %}Dashboard / <span class="text-slate-900 dark:text-slate-100">Websites</span>{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Websites</h1>
+        <p class="mt-1 text-sm text-slate-600">Monitor built sites, Wix log ingestion, and website health from one workspace.</p>
+    </div>
+
+    <section class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <p class="text-xs text-slate-500 uppercase tracking-wider">Sites</p>
+            <p class="text-2xl font-semibold mt-1">{{ stats.website_count }}</p>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <p class="text-xs text-slate-500 uppercase tracking-wider">Active</p>
+            <p class="text-2xl font-semibold mt-1">{{ stats.active_count }}</p>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <p class="text-xs text-slate-500 uppercase tracking-wider">Logs (7d)</p>
+            <p class="text-2xl font-semibold mt-1">{{ stats.logs_7d }}</p>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <p class="text-xs text-slate-500 uppercase tracking-wider">Errors (7d)</p>
+            <p class="text-2xl font-semibold severity-error mt-1">{{ stats.errors_7d }}</p>
+        </div>
+    </section>
+
+    <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div class="p-4 border-b border-slate-200">
+            <h2 class="text-sm font-semibold">Monitored Websites</h2>
+        </div>
+        <div class="divide-y divide-slate-200">
+            {% for website in websites %}
+            <a href="{% url 'websites:detail' website.slug %}" class="block p-4 hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h3 class="font-semibold">{{ website.name }}</h3>
+                        <p class="text-sm text-slate-600">{{ website.domain }} • {{ website.get_platform_display }}</p>
+                    </div>
+                    <div class="text-sm text-right">
+                        <p class="{% if website.is_active %}text-emerald-700{% else %}text-slate-500{% endif %}">
+                            {% if website.is_active %}Active{% else %}Inactive{% endif %}
+                        </p>
+                        <p class="text-slate-500">{{ website.log_count }} stored log{{ website.log_count|pluralize }}</p>
+                    </div>
+                </div>
+            </a>
+            {% empty %}
+            <div class="p-4 text-sm text-slate-600">No websites are configured yet.</div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}
