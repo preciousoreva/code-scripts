@@ -1,0 +1,349 @@
+{% extends "websites/base.html" %}
+
+{% block title %}Logs • {{ website.name }}{% endblock %}
+{% block breadcrumb %}Dashboard / <a class="hover:text-slate-900 dark:hover:text-slate-100" href="{% url 'websites:index' %}">Websites</a> / <a class="hover:text-slate-900 dark:hover:text-slate-100" href="{% url 'websites:detail' website.slug %}">{{ website.name }}</a> / <span class="text-slate-900 dark:text-slate-100">Logs</span>{% endblock %}
+{% block topbar_action %}
+<a class="hidden sm:inline-flex text-sm text-blue-600 dark:text-blue-400 hover:underline" href="{% url 'websites:detail' website.slug %}">Back to {{ website.name }}</a>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div>
+        <h1 class="text-2xl font-semibold tracking-tight text-slate-900">{{ website.name }} Logs</h1>
+        <p class="mt-1 text-sm text-slate-600">Search Wix events, follow trace IDs, and inspect raw JSON payloads.</p>
+    </div>
+
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold mb-4">Filters</h2>
+        <form method="get" class="grid grid-cols-1 md:grid-cols-4 gap-4" id="website-log-filters">
+            <label class="text-xs text-slate-600">
+                Severity
+                <select name="severity" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+                    <option value="">All Severities</option>
+                    {% for value,label in severity_choices %}
+                    <option value="{{ value }}" {% if filters.severity == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="text-xs text-slate-600 md:col-span-2">
+                Search
+                <input type="search" name="q" value="{{ filters.q }}" placeholder="Message, request ID, path, function"
+                    class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+            </label>
+            <label class="text-xs text-slate-600">
+                Trace or Request ID
+                <input type="search" name="trace" value="{{ filters.trace }}" placeholder="requestId or traceId"
+                    class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+            </label>
+            <label class="text-xs text-slate-600">
+                From
+                <input type="date" name="date_from" value="{{ filters.date_from }}"
+                    class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+            </label>
+            <label class="text-xs text-slate-600">
+                To
+                <input type="date" name="date_to" value="{{ filters.date_to }}"
+                    class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+            </label>
+            <div class="flex items-end gap-2">
+                <button type="submit" class="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400">
+                    <iconify-icon icon="solar:filter-bold" width="16"></iconify-icon>
+                    Apply
+                </button>
+                <a href="{% url 'websites:logs' website.slug %}" class="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+                    <iconify-icon icon="solar:close-circle-linear" width="16"></iconify-icon>
+                    Clear
+                </a>
+            </div>
+        </form>
+    </section>
+
+    <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden"
+        data-log-table-url="{% url 'websites:logs-api' website.slug %}"
+        data-log-detail-base="/websites/sites/{{ website.slug }}/api/logs/">
+        <div class="p-4 border-b border-slate-200 flex items-center justify-between">
+            <h2 class="text-sm font-semibold">Log History</h2>
+            <span id="log-table-count" class="text-xs text-slate-500">{{ page_obj.paginator.count }} event{{ page_obj.paginator.count|pluralize }}</span>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 text-sm">
+                <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+                    <tr>
+                        <th class="px-4 py-3 text-left font-semibold">Received</th>
+                        <th class="px-4 py-3 text-left font-semibold">Severity</th>
+                        <th class="px-4 py-3 text-left font-semibold">Source</th>
+                        <th class="px-4 py-3 text-left font-semibold">Message</th>
+                        <th class="px-4 py-3 text-left font-semibold">Request</th>
+                        <th class="px-4 py-3 text-right font-semibold">Details</th>
+                    </tr>
+                </thead>
+                <tbody id="log-table-body" class="divide-y divide-slate-100">
+                    {% for log in logs %}
+                    <tr>
+                        <td class="px-4 py-3 whitespace-nowrap text-slate-600">{{ log.received_at }}</td>
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            <span class="severity-{{ log.severity }}">{{ log.get_severity_display }}</span>
+                        </td>
+                        <td class="px-4 py-3 text-slate-600">{{ log.source|default:"-" }}</td>
+                        <td class="px-4 py-3">
+                            <div class="max-w-xl">
+                                <p class="text-slate-900">{{ log.message|default:log.event_type|default:"No message" }}</p>
+                                {% if log.pathname %}<p class="mt-1 text-xs font-mono text-slate-500 break-all">{{ log.pathname }}</p>{% endif %}
+                            </div>
+                        </td>
+                        <td class="px-4 py-3 font-mono text-xs text-slate-500">{{ log.request_id|default:log.trace_id|default:"-" }}</td>
+                        <td class="px-4 py-3 text-right">
+                            <button type="button" class="inline-flex items-center rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium hover:bg-blue-700" data-log-view="{{ log.id }}">View</button>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="6" class="px-4 py-8 text-center text-slate-600">No logs match these filters.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if page_obj.has_other_pages %}
+        <div class="p-4 border-t border-slate-200 flex items-center justify-between text-sm">
+            {% if page_obj.has_previous %}
+            <a class="text-blue-600 hover:underline" href="?page={{ page_obj.previous_page_number }}&severity={{ filters.severity }}&q={{ filters.q }}&trace={{ filters.trace }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}">Previous</a>
+            {% else %}
+            <span></span>
+            {% endif %}
+            <span class="text-slate-500">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+            {% if page_obj.has_next %}
+            <a class="text-blue-600 hover:underline" href="?page={{ page_obj.next_page_number }}&severity={{ filters.severity }}&q={{ filters.q }}&trace={{ filters.trace }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}">Next</a>
+            {% else %}
+            <span></span>
+            {% endif %}
+        </div>
+        {% endif %}
+    </section>
+</div>
+
+<div id="log-detail-drawer" class="log-detail-drawer fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-slate-900/40" data-log-detail-close></div>
+    <aside class="absolute right-0 top-0 h-full w-full max-w-2xl bg-white dark:bg-slate-900 shadow-xl border-l border-slate-200 dark:border-slate-700 overflow-y-auto">
+        <div class="p-4 border-b border-slate-200 flex items-start justify-between gap-4">
+            <div>
+                <h2 class="text-lg font-semibold text-slate-900">Log details</h2>
+                <p id="log-detail-meta" class="mt-1 text-sm text-slate-600"></p>
+            </div>
+            <button type="button" class="text-slate-500 hover:text-slate-900 text-2xl leading-none" data-log-detail-close>&times;</button>
+        </div>
+        <div class="p-4 space-y-4">
+            <section>
+                <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Message</h3>
+                <p id="log-detail-message" class="mt-2 text-sm text-slate-900"></p>
+            </section>
+            <section class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                <div>
+                    <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Source</h3>
+                    <p id="log-detail-source" class="mt-1 font-mono text-xs text-slate-700 break-all"></p>
+                </div>
+                <div>
+                    <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Trace / Request</h3>
+                    <p id="log-detail-trace" class="mt-1 font-mono text-xs text-slate-700 break-all"></p>
+                </div>
+            </section>
+            <section>
+                <div class="flex items-center justify-between gap-3 border border-slate-200 rounded-t-lg p-3 bg-slate-50">
+                    <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">JSON</h3>
+                    <button type="button" id="log-detail-copy" class="text-sm text-blue-600 hover:underline">Copy</button>
+                </div>
+                <pre id="log-detail-json" class="border-x border-b border-slate-200 rounded-b-lg p-4 bg-white text-xs overflow-x-auto whitespace-pre-wrap"></pre>
+            </section>
+        </div>
+    </aside>
+</div>
+
+<div id="new-log-toast" class="new-log-toast fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-xl bg-slate-900 text-white shadow-lg border border-slate-700 px-4 py-3 text-sm">
+    <div class="flex items-center gap-3">
+        <span id="new-log-toast-label">New logs added</span>
+        <button type="button" id="new-log-toast-action" class="rounded-lg bg-white/10 px-3 py-1 font-medium hover:bg-white/20">View new logs</button>
+    </div>
+</div>
+
+<script>
+    (function () {
+        var section = document.querySelector('[data-log-table-url]');
+        if (!section) return;
+        var url = section.getAttribute('data-log-table-url');
+        var detailBase = section.getAttribute('data-log-detail-base');
+        var body = document.getElementById('log-table-body');
+        var count = document.getElementById('log-table-count');
+        var drawer = document.getElementById('log-detail-drawer');
+        var detailMeta = document.getElementById('log-detail-meta');
+        var detailMessage = document.getElementById('log-detail-message');
+        var detailSource = document.getElementById('log-detail-source');
+        var detailTrace = document.getElementById('log-detail-trace');
+        var detailJson = document.getElementById('log-detail-json');
+        var copyButton = document.getElementById('log-detail-copy');
+        var newLogToast = document.getElementById('new-log-toast');
+        var newLogToastLabel = document.getElementById('new-log-toast-label');
+        var newLogToastAction = document.getElementById('new-log-toast-action');
+        var currentParams = new URLSearchParams(window.location.search);
+        currentParams.delete('page');
+        currentParams.set('limit', '50');
+        var activeJson = '';
+        var currentTopLogId = null;
+        var drawerOpenTopLogId = null;
+
+        function severityClass(severity) {
+            return 'severity-' + (severity || 'unknown');
+        }
+
+        function cell(className, text) {
+            var td = document.createElement('td');
+            td.className = className;
+            td.textContent = text || '-';
+            return td;
+        }
+
+        function renderRows(logs) {
+            var previousTopLogId = currentTopLogId;
+            currentTopLogId = logs.length ? logs[0].id : null;
+            if (!drawer.classList.contains('hidden') && drawerOpenTopLogId && currentTopLogId && currentTopLogId > drawerOpenTopLogId) {
+                var added = logs.filter(function (log) { return log.id > drawerOpenTopLogId; }).length;
+                showNewLogToast(added);
+            } else if (!previousTopLogId || previousTopLogId === currentTopLogId) {
+                hideNewLogToast();
+            }
+            body.innerHTML = '';
+            if (!logs.length) {
+                var emptyRow = document.createElement('tr');
+                var empty = document.createElement('td');
+                empty.colSpan = 6;
+                empty.className = 'px-4 py-8 text-center text-slate-600';
+                empty.textContent = 'No logs match these filters.';
+                emptyRow.appendChild(empty);
+                body.appendChild(emptyRow);
+                return;
+            }
+            logs.forEach(function (log) {
+                var tr = document.createElement('tr');
+                tr.appendChild(cell('px-4 py-3 whitespace-nowrap text-slate-600', log.received_display));
+                var severity = document.createElement('td');
+                severity.className = 'px-4 py-3 whitespace-nowrap';
+                var severityText = document.createElement('span');
+                severityText.className = severityClass(log.severity);
+                severityText.textContent = log.severity_label;
+                severity.appendChild(severityText);
+                tr.appendChild(severity);
+                tr.appendChild(cell('px-4 py-3 text-slate-600', log.source));
+                var message = document.createElement('td');
+                message.className = 'px-4 py-3';
+                var wrap = document.createElement('div');
+                wrap.className = 'max-w-xl';
+                var msg = document.createElement('p');
+                msg.className = 'text-slate-900';
+                msg.textContent = log.message || 'No message';
+                wrap.appendChild(msg);
+                if (log.pathname) {
+                    var path = document.createElement('p');
+                    path.className = 'mt-1 text-xs font-mono text-slate-500 break-all';
+                    path.textContent = log.pathname;
+                    wrap.appendChild(path);
+                }
+                message.appendChild(wrap);
+                tr.appendChild(message);
+                tr.appendChild(cell('px-4 py-3 font-mono text-xs text-slate-500', log.trace_display));
+                var details = document.createElement('td');
+                details.className = 'px-4 py-3 text-right';
+                var button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'inline-flex items-center rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium hover:bg-blue-700';
+                button.setAttribute('data-log-view', log.id);
+                button.textContent = 'View';
+                details.appendChild(button);
+                tr.appendChild(details);
+                body.appendChild(tr);
+            });
+        }
+
+        function closeDrawer() {
+            drawer.classList.remove('is-open');
+            window.setTimeout(function () {
+                if (!drawer.classList.contains('is-open')) drawer.classList.add('hidden');
+            }, 220);
+            drawerOpenTopLogId = null;
+            hideNewLogToast();
+        }
+
+        function openDrawer(logId) {
+            fetch(detailBase + logId + '/', { headers: { 'Accept': 'application/json' } })
+                .then(function (response) { return response.ok ? response.json() : null; })
+                .then(function (data) {
+                    if (!data) return;
+                    var log = data.log || {};
+                    detailMeta.textContent = (log.received_display || '') + ' • ' + (log.severity_label || '');
+                    detailMessage.textContent = log.message || 'No message';
+                    detailSource.textContent = [log.source, log.function_name, log.pathname].filter(Boolean).join(' • ') || '-';
+                    detailTrace.textContent = [log.request_id, log.trace_id].filter(Boolean).join(' • ') || '-';
+                    activeJson = JSON.stringify({
+                        normalized: log,
+                        rawPayload: data.raw_payload || {},
+                        requestHeaders: data.request_headers || {},
+                        receivedFrom: data.received_from || {},
+                    }, null, 2);
+                    detailJson.textContent = activeJson;
+                    drawer.classList.remove('hidden');
+                    window.requestAnimationFrame(function () {
+                        drawer.classList.add('is-open');
+                    });
+                    drawerOpenTopLogId = currentTopLogId;
+                    hideNewLogToast();
+                })
+                .catch(function () {});
+        }
+
+        function showNewLogToast(count) {
+            if (!count || count < 1) return;
+            newLogToastLabel.textContent = count + ' new log' + (count === 1 ? '' : 's') + ' added';
+            newLogToast.classList.add('is-visible');
+        }
+
+        function hideNewLogToast() {
+            newLogToast.classList.remove('is-visible');
+        }
+
+        function refreshTable() {
+            fetch(url + '?' + currentParams.toString(), { headers: { 'Accept': 'application/json' } })
+                .then(function (response) { return response.ok ? response.json() : null; })
+                .then(function (data) {
+                    if (!data) return;
+                    renderRows(data.logs || []);
+                    if (count) count.textContent = data.total + ' event' + (data.total === 1 ? '' : 's');
+                })
+                .catch(function () {});
+        }
+
+        body.addEventListener('click', function (event) {
+            var button = event.target.closest('[data-log-view]');
+            if (!button) return;
+            openDrawer(button.getAttribute('data-log-view'));
+        });
+
+        document.querySelectorAll('[data-log-detail-close]').forEach(function (el) {
+            el.addEventListener('click', closeDrawer);
+        });
+
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') closeDrawer();
+        });
+
+        copyButton.addEventListener('click', function () {
+            if (!activeJson || !navigator.clipboard) return;
+            navigator.clipboard.writeText(activeJson);
+        });
+
+        newLogToastAction.addEventListener('click', function () {
+            closeDrawer();
+            refreshTable();
+        });
+
+        window.setInterval(refreshTable, 5000);
+    })();
+</script>
+{% endblock %}

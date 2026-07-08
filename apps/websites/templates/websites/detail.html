@@ -1,0 +1,124 @@
+{% extends "websites/base.html" %}
+
+{% block title %}{{ website.name }} • Websites{% endblock %}
+{% block breadcrumb %}Dashboard / <a class="hover:text-slate-900 dark:hover:text-slate-100" href="{% url 'websites:index' %}">Websites</a> / <span class="text-slate-900 dark:text-slate-100">{{ website.name }}</span>{% endblock %}
+{% block topbar_action %}
+<a class="hidden sm:inline-flex text-sm text-blue-600 dark:text-blue-400 hover:underline" href="{% url 'websites:index' %}">Back to Websites</a>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+            <h1 class="text-2xl font-semibold tracking-tight text-slate-900">{{ website.name }}</h1>
+            <p class="text-sm text-slate-600">{{ website.domain }} • {{ website.get_platform_display }}</p>
+            <a class="text-sm text-blue-600 hover:underline" href="{{ website.display_url }}" target="_blank" rel="noreferrer">{{ website.display_url }}</a>
+        </div>
+        <a href="{% url 'websites:logs' website.slug %}" class="inline-flex items-center rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium shadow-sm hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 dark:text-white">View Log History</a>
+    </div>
+
+    <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold">Wix Log Endpoint</h2>
+        <p class="text-sm text-slate-600 mt-1">Use this endpoint in Wix Studio's third-party logging tool settings.</p>
+        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs break-all">{{ website.wix_ingest_url }}</div>
+        {% if not website.is_active %}
+        <p class="mt-3 text-sm text-amber-700">This website is inactive, so incoming logs will be rejected.</p>
+        {% endif %}
+    </section>
+
+    <section class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4" id="severity-cards">
+        {% for item in severity_cards %}
+        <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <p class="text-xs text-slate-500 uppercase tracking-wider">{{ item.label }}</p>
+            <p data-severity-count="{{ item.severity }}" class="text-2xl font-semibold mt-1 severity-{{ item.severity }}">{{ item.count }}</p>
+        </div>
+        {% endfor %}
+    </section>
+
+    <section class="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden" data-live-logs-url="{% url 'websites:logs-api' website.slug %}">
+        <div class="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+            <h2 class="text-sm font-semibold">Recent Logs</h2>
+            {% if last_log %}
+            <span id="last-log-status" class="text-xs text-slate-500">Last received {{ last_log.received_at|timesince }} ago</span>
+            {% else %}
+            <span id="last-log-status" class="text-xs text-slate-500">No logs received yet</span>
+            {% endif %}
+        </div>
+        <div id="recent-log-list" class="divide-y divide-slate-200">
+            {% for log in recent_logs %}
+            <div class="p-4">
+                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span class="font-medium severity-{{ log.severity }}">{{ log.get_severity_display }}</span>
+                    <span>{{ log.received_at }}</span>
+                    {% if log.source %}<span>{{ log.source }}</span>{% endif %}
+                </div>
+                <p class="mt-1 text-sm text-slate-900">{{ log.message|default:log.event_type|default:"No message" }}</p>
+                {% if log.pathname %}<p class="mt-1 text-xs text-slate-500 font-mono break-all">{{ log.pathname }}</p>{% endif %}
+            </div>
+            {% empty %}
+            <div class="p-4 text-sm text-slate-600">No log events have been received for this website.</div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+<script>
+    (function () {
+        var section = document.querySelector('[data-live-logs-url]');
+        if (!section) return;
+        var url = section.getAttribute('data-live-logs-url');
+        var list = document.getElementById('recent-log-list');
+        var status = document.getElementById('last-log-status');
+
+        function severityClass(severity) {
+            return 'severity-' + (severity || 'unknown');
+        }
+
+        function textNode(tag, className, text) {
+            var el = document.createElement(tag);
+            if (className) el.className = className;
+            el.textContent = text || '';
+            return el;
+        }
+
+        function renderRows(logs) {
+            list.innerHTML = '';
+            if (!logs.length) {
+                list.appendChild(textNode('div', 'p-4 text-sm text-slate-600', 'No log events have been received for this website.'));
+                return;
+            }
+            logs.forEach(function (log) {
+                var row = document.createElement('div');
+                row.className = 'p-4';
+                var meta = document.createElement('div');
+                meta.className = 'flex flex-wrap items-center gap-2 text-xs text-slate-500';
+                meta.appendChild(textNode('span', 'font-medium ' + severityClass(log.severity), log.severity_label));
+                meta.appendChild(textNode('span', '', log.received_display));
+                if (log.source) meta.appendChild(textNode('span', '', log.source));
+                row.appendChild(meta);
+                row.appendChild(textNode('p', 'mt-1 text-sm text-slate-900', log.message));
+                if (log.pathname) row.appendChild(textNode('p', 'mt-1 text-xs text-slate-500 font-mono break-all', log.pathname));
+                list.appendChild(row);
+            });
+        }
+
+        function refreshLogs() {
+            fetch(url + '?limit=25', { headers: { 'Accept': 'application/json' } })
+                .then(function (response) { return response.ok ? response.json() : null; })
+                .then(function (data) {
+                    if (!data) return;
+                    renderRows(data.logs || []);
+                    if (status && data.last_received) status.textContent = data.last_received.label;
+                    if (data.severity_counts) {
+                        Object.keys(data.severity_counts).forEach(function (severity) {
+                            var el = document.querySelector('[data-severity-count="' + severity + '"]');
+                            if (el) el.textContent = data.severity_counts[severity];
+                        });
+                    }
+                })
+                .catch(function () {});
+        }
+
+        window.setInterval(refreshLogs, 5000);
+    })();
+</script>
+{% endblock %}

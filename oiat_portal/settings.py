@@ -86,6 +86,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "apps.core",
     "apps.epos_qbo",
+    "apps.websites",
     "apps.dashboard",
 ]
 
@@ -155,7 +156,12 @@ PORTAL_SOLUTIONS = [
         "name": "EPOS -> QBO",
         "description": "Monitor runs, manage companies, and trigger sync jobs.",
         "url_name": "epos_qbo:overview",
-    }
+    },
+    {
+        "name": "Websites",
+        "description": "Monitor website logs, endpoint health, and site operations.",
+        "url_name": "websites:index",
+    },
 ]
 
 # Dashboard operational knobs (can be overridden via env vars).
@@ -175,6 +181,10 @@ OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)
 # Public base URL for building operator-facing links (Slack, emails).
 # Keep empty by default; production should set via environment.
 OIAT_PORTAL_BASE_URL = os.getenv("OIAT_PORTAL_BASE_URL", "").strip().rstrip("/")
+
+# Public endpoint base for website log ingestion. Use a narrow Cloudflare Tunnel
+# host here; keep OIAT_PORTAL_BASE_URL tailnet-only for the private dashboard.
+WEBSITE_LOGS_PUBLIC_BASE_URL = os.getenv("WEBSITE_LOGS_PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 # Canonical business-day clock for overview KPIs and quick-sync defaults.
 OIAT_BUSINESS_TIMEZONE = os.getenv("OIAT_BUSINESS_TIMEZONE", "Africa/Lagos")

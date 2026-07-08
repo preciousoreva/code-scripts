@@ -19,6 +19,7 @@ class LoginRequiredMiddleware:
             "/static/",
             "/epos-qbo/webhooks/quickbooks/",
             "/epos-qbo/webhooks/quickbooks",
+            "/websites/webhooks/wix/",
         )
         path = request.path
         if not request.user.is_authenticated and not any(path.startswith(p) for p in public_prefixes):
