@@ -212,6 +212,71 @@
             background: #273549;
             color: #f8fafc;
         }
+
+        .website-log-table {
+            table-layout: fixed;
+            width: 100%;
+        }
+
+        .website-log-table th,
+        .website-log-table td {
+            vertical-align: middle;
+        }
+
+        .website-log-table .col-received {
+            width: 10rem;
+        }
+
+        .website-log-table .col-severity {
+            width: 7rem;
+        }
+
+        .website-log-table .col-source {
+            width: 13rem;
+        }
+
+        .website-log-table .col-request {
+            width: 13rem;
+        }
+
+        .website-log-table .col-details {
+            width: 6.5rem;
+        }
+
+        .log-source-text,
+        .log-request-text {
+            display: block;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .log-message-text {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            overflow-wrap: anywhere;
+        }
+
+        .log-path-text {
+            display: block;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .website-log-drawer-panel {
+            border-left: 2px solid #cbd5e1;
+            box-shadow: -24px 0 48px rgba(15, 23, 42, 0.22);
+        }
+
+        html.dark .website-log-drawer-panel {
+            border-left-color: #64748b;
+            box-shadow: -28px 0 56px rgba(2, 6, 23, 0.65);
+        }
     </style>
 </head>
 <body class="min-h-screen websites-surface">

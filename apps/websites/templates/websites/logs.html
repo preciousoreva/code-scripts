@@ -65,8 +65,16 @@
             <h2 class="text-sm font-semibold">Log History</h2>
             <span id="log-table-count" class="text-xs text-slate-500">{{ page_obj.paginator.count }} event{{ page_obj.paginator.count|pluralize }}</span>
         </div>
-        <div class="overflow-x-auto">
-            <table class="min-w-full divide-y divide-slate-200 text-sm">
+        <div>
+            <table class="website-log-table divide-y divide-slate-200 text-sm">
+                <colgroup>
+                    <col class="col-received">
+                    <col class="col-severity">
+                    <col class="col-source">
+                    <col>
+                    <col class="col-request">
+                    <col class="col-details">
+                </colgroup>
                 <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
                     <tr>
                         <th class="px-4 py-3 text-left font-semibold">Received</th>
@@ -84,14 +92,18 @@
                         <td class="px-4 py-3 whitespace-nowrap">
                             <span class="severity-{{ log.severity }}">{{ log.get_severity_display }}</span>
                         </td>
-                        <td class="px-4 py-3 text-slate-600">{{ log.source|default:"-" }}</td>
+                        <td class="px-4 py-3 text-slate-600">
+                            <span class="log-source-text" title="{{ log.source|default:'-' }}">{{ log.source|default:"-" }}</span>
+                        </td>
                         <td class="px-4 py-3">
-                            <div class="max-w-xl">
-                                <p class="text-slate-900">{{ log.message|default:log.event_type|default:"No message" }}</p>
-                                {% if log.pathname %}<p class="mt-1 text-xs font-mono text-slate-500 break-all">{{ log.pathname }}</p>{% endif %}
+                            <div>
+                                <p class="text-slate-900 log-message-text" title="{{ log.message|default:log.event_type|default:'No message' }}">{{ log.message|default:log.event_type|default:"No message" }}</p>
+                                {% if log.pathname %}<p class="mt-1 text-xs font-mono text-slate-500 log-path-text" title="{{ log.pathname }}">{{ log.pathname }}</p>{% endif %}
                             </div>
                         </td>
-                        <td class="px-4 py-3 font-mono text-xs text-slate-500">{{ log.request_id|default:log.trace_id|default:"-" }}</td>
+                        <td class="px-4 py-3 font-mono text-xs text-slate-500">
+                            <span class="log-request-text" title="{{ log.request_id|default:log.trace_id|default:'-' }}">{{ log.request_id|default:log.trace_id|default:"-" }}</span>
+                        </td>
                         <td class="px-4 py-3 text-right">
                             <button type="button" class="website-button-primary" data-log-view="{{ log.id }}">View</button>
                         </td>
@@ -124,7 +136,7 @@
 
 <div id="log-detail-drawer" class="log-detail-drawer fixed inset-0 z-50 hidden">
     <div class="absolute inset-0 bg-slate-900/40" data-log-detail-close></div>
-    <aside class="absolute right-0 top-0 h-full w-full max-w-2xl bg-white dark:bg-slate-900 shadow-xl border-l border-slate-200 dark:border-slate-700 overflow-y-auto">
+    <aside class="website-log-drawer-panel absolute right-0 top-0 h-full w-full max-w-2xl bg-white dark:bg-slate-900 overflow-y-auto">
         <div class="p-4 border-b border-slate-200 flex items-start justify-between gap-4">
             <div>
                 <h2 class="text-lg font-semibold text-slate-900">Log details</h2>
@@ -194,10 +206,14 @@
             return 'severity-' + (severity || 'unknown');
         }
 
-        function cell(className, text) {
+        function cell(className, text, title) {
             var td = document.createElement('td');
             td.className = className;
-            td.textContent = text || '-';
+            var span = document.createElement('span');
+            span.className = title ? title.className : '';
+            span.textContent = text || '-';
+            span.title = text || '-';
+            td.appendChild(span);
             return td;
         }
 
@@ -231,24 +247,25 @@
                 severityText.textContent = log.severity_label;
                 severity.appendChild(severityText);
                 tr.appendChild(severity);
-                tr.appendChild(cell('px-4 py-3 text-slate-600', log.source));
+                tr.appendChild(cell('px-4 py-3 text-slate-600', log.source, { className: 'log-source-text' }));
                 var message = document.createElement('td');
                 message.className = 'px-4 py-3';
                 var wrap = document.createElement('div');
-                wrap.className = 'max-w-xl';
                 var msg = document.createElement('p');
-                msg.className = 'text-slate-900';
+                msg.className = 'text-slate-900 log-message-text';
                 msg.textContent = log.message || 'No message';
+                msg.title = log.message || 'No message';
                 wrap.appendChild(msg);
                 if (log.pathname) {
                     var path = document.createElement('p');
-                    path.className = 'mt-1 text-xs font-mono text-slate-500 break-all';
+                    path.className = 'mt-1 text-xs font-mono text-slate-500 log-path-text';
                     path.textContent = log.pathname;
+                    path.title = log.pathname;
                     wrap.appendChild(path);
                 }
                 message.appendChild(wrap);
                 tr.appendChild(message);
-                tr.appendChild(cell('px-4 py-3 font-mono text-xs text-slate-500', log.trace_display));
+                tr.appendChild(cell('px-4 py-3 font-mono text-xs text-slate-500', log.trace_display, { className: 'log-request-text' }));
                 var details = document.createElement('td');
                 details.className = 'px-4 py-3 text-right';
                 var button = document.createElement('button');
