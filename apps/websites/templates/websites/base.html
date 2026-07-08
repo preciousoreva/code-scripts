@@ -147,6 +147,71 @@
         html.dark .severity-unknown {
             color: #94a3b8;
         }
+
+        .website-button-primary,
+        .website-button-secondary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            min-height: 2.25rem;
+            padding: 0 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            line-height: 1.25rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+            white-space: nowrap;
+        }
+
+        .website-button-primary {
+            border: 1px solid #2563eb;
+            background: #2563eb;
+            color: #ffffff;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+        }
+
+        .website-button-primary:hover {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #ffffff;
+        }
+
+        .website-button-secondary {
+            border: 1px solid #cbd5e1;
+            background: #ffffff;
+            color: #334155;
+        }
+
+        .website-button-secondary:hover {
+            background: #f8fafc;
+            color: #0f172a;
+        }
+
+        html.dark .website-button-primary {
+            border-color: #3b82f6;
+            background: #2563eb;
+            color: #ffffff;
+        }
+
+        html.dark .website-button-primary:hover {
+            border-color: #60a5fa;
+            background: #3b82f6;
+            color: #ffffff;
+        }
+
+        html.dark .website-button-secondary {
+            border-color: #334155;
+            background: #1e293b;
+            color: #cbd5e1;
+        }
+
+        html.dark .website-button-secondary:hover {
+            border-color: #475569;
+            background: #273549;
+            color: #f8fafc;
+        }
     </style>
 </head>
 <body class="min-h-screen websites-surface">

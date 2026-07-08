@@ -46,11 +46,11 @@
                     class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
             </label>
             <div class="flex items-end gap-2">
-                <button type="submit" class="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400">
+                <button type="submit" class="website-button-primary">
                     <iconify-icon icon="solar:filter-bold" width="16"></iconify-icon>
                     Apply
                 </button>
-                <a href="{% url 'websites:logs' website.slug %}" class="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+                <a href="{% url 'websites:logs' website.slug %}" class="website-button-secondary">
                     <iconify-icon icon="solar:close-circle-linear" width="16"></iconify-icon>
                     Clear
                 </a>
@@ -93,7 +93,7 @@
                         </td>
                         <td class="px-4 py-3 font-mono text-xs text-slate-500">{{ log.request_id|default:log.trace_id|default:"-" }}</td>
                         <td class="px-4 py-3 text-right">
-                            <button type="button" class="inline-flex items-center rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium hover:bg-blue-700" data-log-view="{{ log.id }}">View</button>
+                            <button type="button" class="website-button-primary" data-log-view="{{ log.id }}">View</button>
                         </td>
                     </tr>
                     {% empty %}
@@ -253,7 +253,7 @@
                 details.className = 'px-4 py-3 text-right';
                 var button = document.createElement('button');
                 button.type = 'button';
-                button.className = 'inline-flex items-center rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium hover:bg-blue-700';
+                button.className = 'website-button-primary';
                 button.setAttribute('data-log-view', log.id);
                 button.textContent = 'View';
                 details.appendChild(button);

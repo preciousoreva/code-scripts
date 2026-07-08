@@ -14,7 +14,7 @@
             <p class="text-sm text-slate-600">{{ website.domain }} • {{ website.get_platform_display }}</p>
             <a class="text-sm text-blue-600 hover:underline" href="{{ website.display_url }}" target="_blank" rel="noreferrer">{{ website.display_url }}</a>
         </div>
-        <a href="{% url 'websites:logs' website.slug %}" class="inline-flex items-center rounded-lg bg-blue-600 text-white px-4 py-2 text-sm font-medium shadow-sm hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 dark:text-white">View Log History</a>
+        <a href="{% url 'websites:logs' website.slug %}" class="website-button-primary">View Log History</a>
     </div>
 
     <section class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
