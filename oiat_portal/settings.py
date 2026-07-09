@@ -114,6 +114,7 @@ TEMPLATES = [
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
                 "apps.epos_qbo.context_processors.dashboard_timezone",
+                "apps.epos_qbo.context_processors.copilot",
             ],
         },
     },
@@ -175,6 +176,17 @@ OIAT_DASHBOARD_TIMEZONE = os.getenv("OIAT_DASHBOARD_TIMEZONE", TIME_ZONE)
 # Public base URL for building operator-facing links (Slack, emails).
 # Keep empty by default; production should set via environment.
 OIAT_PORTAL_BASE_URL = os.getenv("OIAT_PORTAL_BASE_URL", "").strip().rstrip("/")
+
+# Read-only AI Copilot. Disabled by default; production/staging must opt in via
+# environment and provide provider settings.
+OIAT_COPILOT_ENABLED = _env_bool("OIAT_COPILOT_ENABLED", False)
+OIAT_COPILOT_PROVIDER = os.getenv("OIAT_COPILOT_PROVIDER", "").strip().lower()
+OIAT_COPILOT_API_KEY = os.getenv("OIAT_COPILOT_API_KEY", "").strip()
+OIAT_COPILOT_API_URL = os.getenv("OIAT_COPILOT_API_URL", "").strip()
+OIAT_COPILOT_MODEL = os.getenv("OIAT_COPILOT_MODEL", "").strip()
+OIAT_COPILOT_TIMEOUT_SECONDS = _env_float("OIAT_COPILOT_TIMEOUT_SECONDS", 20.0, minimum=1.0)
+OIAT_COPILOT_MAX_QUESTION_CHARS = _env_int("OIAT_COPILOT_MAX_QUESTION_CHARS", 1000, minimum=100)
+OIAT_COPILOT_RATE_LIMIT_PER_MINUTE = _env_int("OIAT_COPILOT_RATE_LIMIT_PER_MINUTE", 20, minimum=0)
 
 # Canonical business-day clock for overview KPIs and quick-sync defaults.
 OIAT_BUSINESS_TIMEZONE = os.getenv("OIAT_BUSINESS_TIMEZONE", "Africa/Lagos")

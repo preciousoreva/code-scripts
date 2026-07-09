@@ -395,6 +395,53 @@
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container"></div>
 
+    {% if request.user.is_authenticated and copilot_enabled %}
+    <div id="copilot-root"
+        data-ask-url="{{ copilot_ask_url }}"
+        data-csrf-token="{{ csrf_token }}"
+        data-max-question-chars="{{ copilot_max_question_chars }}"
+        class="fixed bottom-5 right-5 z-50">
+        <button type="button" id="copilot-toggle"
+            class="h-12 w-12 rounded-full bg-slate-950 text-white shadow-lg shadow-slate-900/20 border border-slate-700 flex items-center justify-center hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-blue-600 dark:border-blue-500 dark:hover:bg-blue-500"
+            aria-label="Open AI Copilot" aria-expanded="false">
+            <iconify-icon icon="solar:chat-round-dots-bold" width="22" height="22" aria-hidden="true"></iconify-icon>
+        </button>
+        <section id="copilot-panel"
+            class="hidden absolute bottom-16 right-0 w-[min(24rem,calc(100vw-2.5rem))] rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+            aria-label="AI Copilot">
+            <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-700">
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">AI Copilot</h2>
+                    <p class="text-xs text-slate-500 dark:text-slate-400">Read-only portal analyst</p>
+                </div>
+                <button type="button" id="copilot-close"
+                    class="btn-icon h-8 w-8"
+                    aria-label="Close AI Copilot">
+                    <iconify-icon icon="solar:close-circle-linear" width="18" height="18" aria-hidden="true"></iconify-icon>
+                </button>
+            </div>
+            <div id="copilot-messages" class="max-h-96 min-h-48 overflow-y-auto p-4 space-y-3 text-sm">
+                <div class="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                    Ask about sync status, failed runs, token health, schedules, or inventory review.
+                </div>
+            </div>
+            <form id="copilot-form" class="border-t border-slate-200 p-3 dark:border-slate-700">
+                <label for="copilot-question" class="sr-only">Ask AI Copilot</label>
+                <textarea id="copilot-question" rows="3" maxlength="{{ copilot_max_question_chars }}"
+                    class="w-full resize-none rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                    placeholder="Ask about the portal..."></textarea>
+                <div class="mt-2 flex items-center justify-between gap-3">
+                    <span id="copilot-status" class="text-xs text-slate-500 dark:text-slate-400"></span>
+                    <button type="submit" class="btn btn-primary btn-sm">
+                        <iconify-icon icon="solar:plain-2-bold" width="14" height="14" aria-hidden="true"></iconify-icon>
+                        Ask
+                    </button>
+                </div>
+            </form>
+        </section>
+    </div>
+    {% endif %}
+
     <main class="flex-1 md:ml-64 overflow-y-auto h-screen bg-slate-50 dark:bg-slate-900">
         {% block topbar %}{% endblock %}
 
@@ -435,6 +482,10 @@
 
     <!-- Toast Notifications & Run Status Polling -->
     <script src="{% static 'js/toasts.js' %}"></script>
+
+    {% if request.user.is_authenticated and copilot_enabled %}
+    <script src="{% static 'js/copilot.js' %}"></script>
+    {% endif %}
 
     <!-- Theme: sync sr-only label on load and on themeChange (topbar) -->
     <script>

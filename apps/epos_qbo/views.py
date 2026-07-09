@@ -107,6 +107,7 @@ from .services.metrics import (
     extract_amount_hybrid,
     _format_currency as _metrics_format_currency,
 )
+from .services.copilot import answer_question as copilot_answer_question, result_to_json as copilot_result_to_json
 
 ACCESS_REFRESH_MARGIN_SECONDS = 60
 REVENUE_PERIOD_DAYS = {
@@ -2895,6 +2896,58 @@ def run_status_check(request):
             "failure_reason": job.failure_reason or None,
         }
     return JsonResponse(result)
+
+
+@login_required
+@require_POST
+def copilot_ask(request):
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JsonResponse({"success": False, "error": "Invalid JSON body."}, status=400)
+
+    retry_after = _copilot_retry_after_seconds(request)
+    if retry_after is not None:
+        return JsonResponse(
+            {
+                "success": False,
+                "answer": "",
+                "sources": [],
+                "warnings": [f"Copilot rate limit reached. Try again in {retry_after} second(s)."],
+                "request_id": "",
+            },
+            status=429,
+        )
+
+    question = payload.get("question", "")
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    result = copilot_answer_question(question=question, context=context, user=request.user)
+    return JsonResponse(copilot_result_to_json(result), status=result.status_code)
+
+
+def _copilot_retry_after_seconds(request) -> int | None:
+    limit = int(getattr(settings, "OIAT_COPILOT_RATE_LIMIT_PER_MINUTE", 20))
+    if limit <= 0:
+        return None
+
+    now_ts = int(timezone.now().timestamp())
+    window_start = now_ts - 60
+    raw_timestamps = request.session.get("copilot_request_timestamps", [])
+    timestamps = []
+    for value in raw_timestamps:
+        try:
+            timestamp = int(value)
+        except (TypeError, ValueError):
+            continue
+        if timestamp > window_start:
+            timestamps.append(timestamp)
+    if len(timestamps) >= limit:
+        return max(1, 60 - (now_ts - min(timestamps)))
+
+    timestamps.append(now_ts)
+    request.session["copilot_request_timestamps"] = timestamps
+    request.session.modified = True
+    return None
 
 
 @login_required
