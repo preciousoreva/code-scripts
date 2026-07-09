@@ -125,6 +125,9 @@ def _extract_severity(payload: dict[str, Any], *, context: dict[str, Any] | None
     structured_severity = _classify_structured_outcome(payload, context or _extract_context(payload))
     if structured_severity:
         return structured_severity
+    known_checkpoint_severity = _classify_known_success_checkpoint(payload)
+    if known_checkpoint_severity:
+        return known_checkpoint_severity
     if _looks_like_wix_runtime_info(payload):
         return WebsiteLogEvent.SEVERITY_INFO
     return WebsiteLogEvent.SEVERITY_UNKNOWN
@@ -282,6 +285,20 @@ def _classify_structured_outcome(payload: dict[str, Any], context: dict[str, Any
         return WebsiteLogEvent.SEVERITY_WARNING
     success_keys = ("primaryOk", "legacyMirrorOk", "mirrorOk", "emailSent", "finalized")
     if all(context.get(key) is True for key in success_keys):
+        return WebsiteLogEvent.SEVERITY_INFO
+    return ""
+
+
+def _classify_known_success_checkpoint(payload: dict[str, Any]) -> str:
+    message = _extract_message(payload)
+    if not message.startswith("Welcome email contact resolved:"):
+        return ""
+    parsed = _parse_json_candidate(message)
+    if not isinstance(parsed, dict):
+        return ""
+    contact_id = str(parsed.get("contactId") or "").strip()
+    source = str(parsed.get("source") or "").strip()
+    if contact_id and source == "appendOrCreateContact":
         return WebsiteLogEvent.SEVERITY_INFO
     return ""
 

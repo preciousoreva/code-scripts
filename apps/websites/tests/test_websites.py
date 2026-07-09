@@ -410,6 +410,40 @@ class WixLogIngestTests(TestCase):
         event = WebsiteLogEvent.objects.get()
         self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_ERROR)
 
+    def test_welcome_email_contact_resolved_is_info(self):
+        payload = {
+            "timestamp": "2026-07-09T14:38:13.663Z",
+            "labels": {"namespace": "Velo"},
+            "sourceLocation": {"file": "backend/membership-card.web.js", "line": 715},
+            "jsonPayload": {
+                "message": (
+                    "Welcome email contact resolved: "
+                    '{"intendedEmail":"adebajograce8@gmail.com",'
+                    '"contactId":"a56fff71-f0f0-43c2-9813-2fb1b77182bb",'
+                    '"source":"appendOrCreateContact"}'
+                ),
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_INFO)
+
+    def test_unresolved_welcome_email_contact_checkpoint_stays_unknown(self):
+        payload = {
+            "timestamp": "2026-07-09T14:38:13.663Z",
+            "jsonPayload": {
+                "message": (
+                    "Welcome email contact resolved: "
+                    '{"intendedEmail":"adebajograce8@gmail.com","source":"appendOrCreateContact"}'
+                ),
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_UNKNOWN)
+
     def test_array_payload_creates_multiple_logs(self):
         payload = [
             {"level": "info", "message": "A"},
