@@ -291,15 +291,32 @@ def _classify_structured_outcome(payload: dict[str, Any], context: dict[str, Any
 
 def _classify_known_success_checkpoint(payload: dict[str, Any]) -> str:
     message = _extract_message(payload)
-    if not message.startswith("Welcome email contact resolved:"):
+    if message.startswith("Welcome email contact resolved:"):
+        parsed = _parse_json_candidate(message)
+        if not isinstance(parsed, dict):
+            return ""
+        contact_id = str(parsed.get("contactId") or "").strip()
+        source = str(parsed.get("source") or "").strip()
+        if contact_id and source == "appendOrCreateContact":
+            return WebsiteLogEvent.SEVERITY_INFO
         return ""
-    parsed = _parse_json_candidate(message)
-    if not isinstance(parsed, dict):
+    if message.startswith("Registration primary write complete:"):
+        parsed = _parse_json_candidate(message)
+        if not isinstance(parsed, dict):
+            return ""
+        membership_id = str(parsed.get("membershipId") or "").strip()
+        if parsed.get("primaryOk") is True and membership_id:
+            return WebsiteLogEvent.SEVERITY_INFO
         return ""
-    contact_id = str(parsed.get("contactId") or "").strip()
-    source = str(parsed.get("source") or "").strip()
-    if contact_id and source == "appendOrCreateContact":
-        return WebsiteLogEvent.SEVERITY_INFO
+    if message.startswith("Membership card SVG served:"):
+        parsed = _parse_json_candidate(message)
+        if not isinstance(parsed, dict):
+            return ""
+        lookup_type = str(parsed.get("lookupType") or "").strip()
+        card_key = str(parsed.get("cardKey") or "").strip()
+        if lookup_type and card_key:
+            return WebsiteLogEvent.SEVERITY_INFO
+        return ""
     return ""
 
 

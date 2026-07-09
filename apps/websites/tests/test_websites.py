@@ -444,6 +444,43 @@ class WixLogIngestTests(TestCase):
         event = WebsiteLogEvent.objects.get()
         self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_UNKNOWN)
 
+    def test_registration_primary_write_complete_is_info(self):
+        payload = {
+            "timestamp": "2026-07-09T14:49:56.505Z",
+            "labels": {"namespace": "Velo"},
+            "sourceLocation": {"file": "backend/membership-card.web.js", "line": 2112},
+            "jsonPayload": {
+                "message": (
+                    "Registration primary write complete: "
+                    '{"primaryStore":"WoPU-AWS-Members/members","primaryOk":true,'
+                    '"membershipId":"WOPU-OGU-S84UW4Y3","finalizePending":true}'
+                ),
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_INFO)
+        self.assertEqual(event.context["membershipId"], "WOPU-OGU-S84UW4Y3")
+
+    def test_membership_card_svg_served_is_info(self):
+        payload = {
+            "timestamp": "2026-07-09T14:51:50.949Z",
+            "labels": {"namespace": "Velo"},
+            "sourceLocation": {"file": "backend/http-functions.js", "line": 938},
+            "jsonPayload": {
+                "message": (
+                    "Membership card SVG served: "
+                    '{"lookupType":"cardKey","cardKey":"4W4C...5BK2",'
+                    '"usedProfilePicture":true,"usedSeal":true}'
+                ),
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_INFO)
+
     def test_array_payload_creates_multiple_logs(self):
         payload = [
             {"level": "info", "message": "A"},
