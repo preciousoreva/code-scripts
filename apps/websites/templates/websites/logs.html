@@ -159,6 +159,10 @@
                     <p id="log-detail-trace" class="mt-1 font-mono text-xs text-slate-700 break-all"></p>
                 </div>
             </section>
+            <section id="log-detail-context-section" class="hidden">
+                <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Context</h3>
+                <dl id="log-detail-context" class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs"></dl>
+            </section>
             <section>
                 <div class="flex items-center justify-between gap-3 border border-slate-200 rounded-t-lg p-3 bg-slate-50">
                     <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">JSON</h3>
@@ -190,13 +194,16 @@
         var detailMessage = document.getElementById('log-detail-message');
         var detailSource = document.getElementById('log-detail-source');
         var detailTrace = document.getElementById('log-detail-trace');
+        var detailContextSection = document.getElementById('log-detail-context-section');
+        var detailContext = document.getElementById('log-detail-context');
         var detailJson = document.getElementById('log-detail-json');
         var copyButton = document.getElementById('log-detail-copy');
         var newLogToast = document.getElementById('new-log-toast');
         var newLogToastLabel = document.getElementById('new-log-toast-label');
         var newLogToastAction = document.getElementById('new-log-toast-action');
         var currentParams = new URLSearchParams(window.location.search);
-        currentParams.delete('page');
+        var livePollingEnabled = (currentParams.get('page') || '1') === '1';
+        if (livePollingEnabled) currentParams.delete('page');
         currentParams.set('limit', '50');
         var activeJson = '';
         var currentTopLogId = null;
@@ -263,6 +270,13 @@
                     path.title = log.pathname;
                     wrap.appendChild(path);
                 }
+                if (log.context_summary) {
+                    var context = document.createElement('p');
+                    context.className = 'mt-1 text-xs font-mono text-slate-500 log-path-text';
+                    context.textContent = log.context_summary;
+                    context.title = log.context_summary;
+                    wrap.appendChild(context);
+                }
                 message.appendChild(wrap);
                 tr.appendChild(message);
                 tr.appendChild(cell('px-4 py-3 font-mono text-xs text-slate-500', log.trace_display, { className: 'log-request-text' }));
@@ -298,6 +312,7 @@
                     detailMessage.textContent = log.message || 'No message';
                     detailSource.textContent = [log.source, log.function_name, log.pathname].filter(Boolean).join(' • ') || '-';
                     detailTrace.textContent = [log.request_id, log.trace_id].filter(Boolean).join(' • ') || '-';
+                    renderContext(log.context || {});
                     activeJson = JSON.stringify({
                         normalized: log,
                         rawPayload: data.raw_payload || {},
@@ -313,6 +328,29 @@
                     hideNewLogToast();
                 })
                 .catch(function () {});
+        }
+
+        function renderContext(context) {
+            detailContext.innerHTML = '';
+            var keys = Object.keys(context || {});
+            if (!keys.length) {
+                detailContextSection.classList.add('hidden');
+                return;
+            }
+            keys.sort().forEach(function (key) {
+                var item = document.createElement('div');
+                item.className = 'rounded-md border border-slate-200 bg-slate-50 p-2';
+                var dt = document.createElement('dt');
+                dt.className = 'font-semibold uppercase tracking-wider text-slate-500';
+                dt.textContent = key;
+                var dd = document.createElement('dd');
+                dd.className = 'mt-1 font-mono text-slate-800 break-all';
+                dd.textContent = String(context[key]);
+                item.appendChild(dt);
+                item.appendChild(dd);
+                detailContext.appendChild(item);
+            });
+            detailContextSection.classList.remove('hidden');
         }
 
         function showNewLogToast(count) {
@@ -360,7 +398,7 @@
             refreshTable();
         });
 
-        window.setInterval(refreshTable, 5000);
+        if (livePollingEnabled) window.setInterval(refreshTable, 5000);
     })();
 </script>
 {% endblock %}

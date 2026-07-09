@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone as dt_timezone
 from typing import Any
 
@@ -24,6 +25,35 @@ SEVERITY_ALIASES = {
     "fatal": WebsiteLogEvent.SEVERITY_CRITICAL,
 }
 
+CONTEXT_KEYS = {
+    "attempt",
+    "emailError",
+    "emailSent",
+    "finalized",
+    "finalizePending",
+    "hasFallbackSvgUrl",
+    "legacyMirrorDuplicate",
+    "legacyMirrorError",
+    "legacyMirrorOk",
+    "membershipId",
+    "mirrorDuplicate",
+    "mirrorError",
+    "mirrorOk",
+    "primaryError",
+    "primaryOk",
+    "primaryStore",
+}
+CONTEXT_KEY_LOOKUP = {key.lower(): key for key in CONTEXT_KEYS}
+SENSITIVE_CONTEXT_FRAGMENTS = (
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "authorization",
+)
+
 
 def create_wix_log_events(
     *,
@@ -39,6 +69,7 @@ def create_wix_log_events(
 
     for entry in entries:
         raw_entry = entry if isinstance(entry, dict) else {"value": entry}
+        context = _extract_context(raw_entry)
         events.append(
             WebsiteLogEvent.objects.create(
                 website=website,
@@ -55,14 +86,45 @@ def create_wix_log_events(
                 user_agent=user_agent,
                 raw_payload=raw_entry,
                 request_headers=headers,
+                context=context,
+                context_text=_context_search_text(context),
             )
         )
     return events
 
 
 def _extract_severity(payload: dict[str, Any]) -> str:
-    raw = _first_string(payload, "severity", "level", "logLevel", "log_level", "status")
-    return SEVERITY_ALIASES.get(raw.lower(), WebsiteLogEvent.SEVERITY_UNKNOWN) if raw else WebsiteLogEvent.SEVERITY_UNKNOWN
+    raw = _first_string(
+        payload,
+        "severity",
+        "level",
+        "logLevel",
+        "log_level",
+        "status",
+        "logging.googleapis.com/severity",
+    )
+    if not raw:
+        raw = _nested_first_string(
+            payload,
+            ("jsonPayload", "severity"),
+            ("jsonPayload", "level"),
+            ("jsonPayload", "logLevel"),
+            ("jsonPayload", "log_level"),
+            ("jsonPayload", "severityText"),
+            ("jsonPayload", "levelname"),
+            ("labels", "severity"),
+            ("labels", "level"),
+            ("labels", "logLevel"),
+            ("labels", "log_level"),
+            ("logging.googleapis.com", "severity"),
+        )
+    if raw:
+        normalized = SEVERITY_ALIASES.get(raw.lower())
+        if normalized:
+            return normalized
+    if _looks_like_wix_runtime_info(payload):
+        return WebsiteLogEvent.SEVERITY_INFO
+    return WebsiteLogEvent.SEVERITY_UNKNOWN
 
 
 def _extract_message(payload: dict[str, Any]) -> str:
@@ -123,6 +185,15 @@ def _extract_event_type(payload: dict[str, Any]) -> str:
     event_type = _first_string(payload, "type", "eventType", "event_type", "level", "severity")
     if event_type:
         return _trim(event_type, 255)
+    json_event_type = _nested_first_string(
+        payload,
+        ("jsonPayload", "type"),
+        ("jsonPayload", "eventType"),
+        ("jsonPayload", "level"),
+        ("jsonPayload", "severity"),
+    )
+    if json_event_type:
+        return _trim(json_event_type, 255)
     labels = payload.get("labels")
     if isinstance(labels, dict):
         return _trim(_first_string(labels, "namespace", "viewMode", "revision"), 255)
@@ -166,6 +237,109 @@ def _first_string(payload: dict[str, Any], *keys: str) -> str:
         if isinstance(value, (int, float, bool)):
             return str(value)
     return ""
+
+
+def _nested_first_string(payload: dict[str, Any], *paths: tuple[str, ...]) -> str:
+    for path in paths:
+        value: Any = payload
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+    return ""
+
+
+def _looks_like_wix_runtime_info(payload: dict[str, Any]) -> bool:
+    message = _extract_message(payload)
+    if not message.startswith("Running the code for "):
+        return False
+    labels = payload.get("labels")
+    source_location = payload.get("sourceLocation")
+    return (
+        isinstance(source_location, dict)
+        or (isinstance(labels, dict) and labels.get("namespace") == "Velo")
+    )
+
+
+def _extract_context(payload: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    _collect_context(payload, context, depth=0)
+    return context
+
+
+def _collect_context(value: Any, context: dict[str, Any], *, depth: int) -> None:
+    if depth > 5:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            canonical = CONTEXT_KEY_LOOKUP.get(key.lower())
+            if canonical and not _is_sensitive_context_key(key):
+                stored = _safe_context_value(item)
+                if stored is not None:
+                    context[canonical] = stored
+            _collect_context(item, context, depth=depth + 1)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_context(item, context, depth=depth + 1)
+        return
+    if isinstance(value, str):
+        parsed = _parse_json_candidate(value)
+        if parsed is not None:
+            _collect_context(parsed, context, depth=depth + 1)
+
+
+def _safe_context_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _trim(value.strip(), 300)
+    if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
+        return value
+    return None
+
+
+def _is_sensitive_context_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(fragment in lowered for fragment in SENSITIVE_CONTEXT_FRAGMENTS)
+
+
+def _parse_json_candidate(value: str) -> Any | None:
+    text = value.strip()
+    if not text:
+        return None
+    candidates = []
+    if text[0] in "[{":
+        candidates.append(text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _context_search_text(context: dict[str, Any]) -> str:
+    parts = []
+    for key in sorted(context):
+        value = context[key]
+        if value is None:
+            rendered = ""
+        elif isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value)
+        parts.append(f"{key}:{rendered}")
+    return " ".join(parts)
 
 
 def _remote_addr(request: HttpRequest) -> str | None:

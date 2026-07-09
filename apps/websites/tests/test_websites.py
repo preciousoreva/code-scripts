@@ -68,6 +68,28 @@ class WebsiteViewsTests(TestCase):
         self.assertContains(response, "Backend function failed")
         self.assertNotContains(response, "Page loaded")
 
+    def test_logs_filter_by_extracted_context(self):
+        WebsiteLogEvent.objects.create(
+            website=self.website,
+            severity=WebsiteLogEvent.SEVERITY_INFO,
+            message="Registration downstream outcome",
+            context={"membershipId": "WOPU-KAN-GPU4X84C", "emailSent": True},
+            context_text="membershipId:WOPU-KAN-GPU4X84C emailSent:true",
+        )
+        WebsiteLogEvent.objects.create(
+            website=self.website,
+            severity=WebsiteLogEvent.SEVERITY_INFO,
+            message="Page loaded",
+        )
+        self.client.login(username="operator", password="pw12345")
+        response = self.client.get(
+            reverse("websites:logs", kwargs={"site_slug": self.website.slug}),
+            {"q": "GPU4X84C"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Registration downstream outcome")
+        self.assertNotContains(response, "Page loaded")
+
     def test_logs_filter_by_trace_and_date_range(self):
         WebsiteLogEvent.objects.create(
             website=self.website,
@@ -133,6 +155,8 @@ class WebsiteViewsTests(TestCase):
             website=self.website,
             severity=WebsiteLogEvent.SEVERITY_INFO,
             message="Raw payload",
+            context={"membershipId": "WOPU-KAN-GPU4X84C"},
+            context_text="membershipId:WOPU-KAN-GPU4X84C",
             raw_payload={"jsonPayload": {"message": "Raw payload"}, "severity": "INFO"},
             request_headers={"HTTP_USER_AGENT": "Wix Logs"},
         )
@@ -146,6 +170,8 @@ class WebsiteViewsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["log"]["message"], "Raw payload")
+        self.assertEqual(data["log"]["context"]["membershipId"], "WOPU-KAN-GPU4X84C")
+        self.assertIn("membershipId=WOPU-KAN-GPU4X84C", data["log"]["context_summary"])
         self.assertEqual(data["raw_payload"]["jsonPayload"]["message"], "Raw payload")
         self.assertEqual(data["request_headers"]["HTTP_USER_AGENT"], "Wix Logs")
 
@@ -227,6 +253,94 @@ class WixLogIngestTests(TestCase):
         self.assertEqual(event.request_id, "9B_AHPZ6")
         self.assertEqual(event.pathname, "Registration")
         self.assertEqual(event.event_type, "INFO")
+
+    def test_wix_runtime_payload_without_severity_defaults_to_info(self):
+        payload = {
+            "timestamp": "2026-07-08T21:09:15.522Z",
+            "labels": {
+                "siteUrl": "https://www.workingpeopleunited.org",
+                "revision": "173",
+                "namespace": "Velo",
+                "tenantId": "f1f58ea8-5051-4190-9579-37b57fe17e67",
+                "viewMode": "Site",
+                "pageName": "Registration",
+            },
+            "insertId": "6RMZ3JVZK5pQQ08wVkt942",
+            "jsonPayload": {
+                "message": "Running the code for the Registration page. To debug this code in your browser's dev tools, open iebmg.js.",
+            },
+            "sourceLocation": {
+                "file": "pages/Registration.iebmg.js",
+            },
+            "operation": {
+                "id": "501SHLb1hBj7AMiClEGRAn",
+                "producer": "https://www.workingpeopleunited.org",
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_INFO)
+        self.assertEqual(event.message, payload["jsonPayload"]["message"])
+        self.assertEqual(event.source, "pages/Registration.iebmg.js")
+        self.assertEqual(event.request_id, "6RMZ3JVZK5pQQ08wVkt942")
+        self.assertEqual(event.pathname, "Registration")
+        self.assertEqual(event.event_type, "Velo")
+
+    def test_wix_nested_severity_is_normalized(self):
+        payload = {
+            "timestamp": "2026-07-08T21:09:16Z",
+            "jsonPayload": {
+                "level": "warn",
+                "message": "Membership update frontend call failed",
+            },
+            "sourceLocation": {
+                "file": "pages/Membership Update.g64dw.js",
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_WARNING)
+        self.assertEqual(event.event_type, "warn")
+
+    def test_wix_structured_context_is_extracted_and_searchable(self):
+        payload = {
+            "timestamp": "2026-07-08T21:12:04Z",
+            "jsonPayload": {
+                "message": (
+                    "Registration downstream outcome: "
+                    '{"primaryStore":"WoPU-AWS-Members/members","primaryOk":true,'
+                    '"legacyMirrorOk":true,"legacyMirrorDuplicate":false,'
+                    '"legacyMirrorError":"","membershipId":"WOPU-KAN-GPU4X84C",'
+                    '"mirrorOk":true,"mirrorError":"","emailSent":false,'
+                    '"emailError":"SMTP timeout","finalized":true}'
+                ),
+            },
+            "sourceLocation": {
+                "file": "backend/membership-card.web.js",
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.context["membershipId"], "WOPU-KAN-GPU4X84C")
+        self.assertTrue(event.context["primaryOk"])
+        self.assertFalse(event.context["emailSent"])
+        self.assertEqual(event.context["emailError"], "SMTP timeout")
+        self.assertIn("WOPU-KAN-GPU4X84C", event.context_text)
+
+        user = User.objects.create_user(username="context-user", password="pw12345")
+        self.client.force_login(user)
+        logs_response = self.client.get(
+            reverse("websites:logs-api", kwargs={"site_slug": self.website.slug}),
+            {"q": "SMTP timeout"},
+        )
+        self.assertEqual(logs_response.status_code, 200)
+        logs_data = logs_response.json()
+        self.assertEqual(logs_data["total"], 1)
+        self.assertEqual(logs_data["logs"][0]["context"]["membershipId"], "WOPU-KAN-GPU4X84C")
+        self.assertIn("emailError=SMTP timeout", logs_data["logs"][0]["context_summary"])
 
     def test_array_payload_creates_multiple_logs(self):
         payload = [
