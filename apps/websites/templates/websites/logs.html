@@ -31,9 +31,13 @@
                     class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
             </label>
             <label class="text-xs text-slate-600">
-                Trace or Request ID
-                <input type="search" name="trace" value="{{ filters.trace }}" placeholder="requestId or traceId"
-                    class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+                Source
+                <select name="source" class="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-sm bg-white">
+                    <option value="">All Sources</option>
+                    {% for source in source_choices %}
+                    <option value="{{ source }}" {% if filters.source == source %}selected{% endif %}>{{ source }}</option>
+                    {% endfor %}
+                </select>
             </label>
             <label class="text-xs text-slate-600">
                 From
@@ -119,13 +123,13 @@
         {% if page_obj.has_other_pages %}
         <div class="p-4 border-t border-slate-200 flex items-center justify-between text-sm">
             {% if page_obj.has_previous %}
-            <a class="text-blue-600 hover:underline" href="?page={{ page_obj.previous_page_number }}&severity={{ filters.severity }}&q={{ filters.q }}&trace={{ filters.trace }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}">Previous</a>
+            <a class="text-blue-600 hover:underline" href="?page={{ page_obj.previous_page_number }}&severity={{ filters.severity }}&q={{ filters.q }}&source={{ filters.source }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}">Previous</a>
             {% else %}
             <span></span>
             {% endif %}
             <span class="text-slate-500">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
             {% if page_obj.has_next %}
-            <a class="text-blue-600 hover:underline" href="?page={{ page_obj.next_page_number }}&severity={{ filters.severity }}&q={{ filters.q }}&trace={{ filters.trace }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}">Next</a>
+            <a class="text-blue-600 hover:underline" href="?page={{ page_obj.next_page_number }}&severity={{ filters.severity }}&q={{ filters.q }}&source={{ filters.source }}&date_from={{ filters.date_from }}&date_to={{ filters.date_to }}">Next</a>
             {% else %}
             <span></span>
             {% endif %}

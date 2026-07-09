@@ -71,12 +71,14 @@ def website_logs(request, site_slug: str):
     logs, filters = _filtered_logs(request, website)
     paginator = Paginator(logs, 50)
     page_obj = paginator.get_page(request.GET.get("page"))
+    source_choices = _source_choices(website)
     context = {
         "website": website,
         "logs": page_obj,
         "page_obj": page_obj,
         "filters": filters,
         "severity_choices": WebsiteLogEvent.SEVERITY_CHOICES,
+        "source_choices": source_choices,
     }
     return render(request, "websites/logs.html", context)
 
@@ -130,12 +132,15 @@ def _filtered_logs(request, website: Website):
     filters = {
         "severity": request.GET.get("severity", "").strip(),
         "q": request.GET.get("q", "").strip(),
+        "source": request.GET.get("source", "").strip(),
         "trace": request.GET.get("trace", "").strip(),
         "date_from": request.GET.get("date_from", "").strip(),
         "date_to": request.GET.get("date_to", "").strip(),
     }
     if filters["severity"]:
         logs = logs.filter(severity=filters["severity"])
+    if filters["source"]:
+        logs = logs.filter(source=filters["source"])
     if filters["q"]:
         q = filters["q"]
         logs = logs.filter(
@@ -166,6 +171,15 @@ def _filtered_logs(request, website: Website):
         )
         logs = logs.filter(received_at__lte=end)
     return logs, filters
+
+
+def _source_choices(website: Website) -> list[str]:
+    return list(
+        website.log_events.exclude(source="")
+        .order_by("source")
+        .values_list("source", flat=True)
+        .distinct()
+    )
 
 
 def _serialize_log_event(log: WebsiteLogEvent) -> dict[str, object]:

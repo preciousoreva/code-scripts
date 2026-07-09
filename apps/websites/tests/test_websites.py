@@ -122,6 +122,30 @@ class WebsiteViewsTests(TestCase):
         self.assertNotContains(response, "Wrong trace")
         self.assertNotContains(response, "Wrong day")
 
+    def test_logs_filter_by_dynamic_source(self):
+        WebsiteLogEvent.objects.create(
+            website=self.website,
+            severity=WebsiteLogEvent.SEVERITY_INFO,
+            message="Registration page loaded",
+            source="pages/Registration.iebmg.js",
+        )
+        WebsiteLogEvent.objects.create(
+            website=self.website,
+            severity=WebsiteLogEvent.SEVERITY_INFO,
+            message="Membership card backend",
+            source="backend/membership-card.web.js",
+        )
+        self.client.login(username="operator", password="pw12345")
+        response = self.client.get(
+            reverse("websites:logs", kwargs={"site_slug": self.website.slug}),
+            {"source": "backend/membership-card.web.js"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "backend/membership-card.web.js")
+        self.assertContains(response, "pages/Registration.iebmg.js")
+        self.assertContains(response, "Membership card backend")
+        self.assertNotContains(response, "Registration page loaded")
+
     def test_logs_api_returns_filtered_json(self):
         WebsiteLogEvent.objects.create(
             website=self.website,
