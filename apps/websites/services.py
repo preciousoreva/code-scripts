@@ -74,7 +74,7 @@ def create_wix_log_events(
             WebsiteLogEvent.objects.create(
                 website=website,
                 occurred_at=_extract_timestamp(raw_entry),
-                severity=_extract_severity(raw_entry),
+                severity=_extract_severity(raw_entry, context=context),
                 source=_extract_source(raw_entry),
                 event_type=_extract_event_type(raw_entry),
                 message=_extract_message(raw_entry),
@@ -93,7 +93,7 @@ def create_wix_log_events(
     return events
 
 
-def _extract_severity(payload: dict[str, Any]) -> str:
+def _extract_severity(payload: dict[str, Any], *, context: dict[str, Any] | None = None) -> str:
     raw = _first_string(
         payload,
         "severity",
@@ -122,6 +122,9 @@ def _extract_severity(payload: dict[str, Any]) -> str:
         normalized = SEVERITY_ALIASES.get(raw.lower())
         if normalized:
             return normalized
+    structured_severity = _classify_structured_outcome(payload, context or _extract_context(payload))
+    if structured_severity:
+        return structured_severity
     if _looks_like_wix_runtime_info(payload):
         return WebsiteLogEvent.SEVERITY_INFO
     return WebsiteLogEvent.SEVERITY_UNKNOWN
@@ -264,6 +267,28 @@ def _looks_like_wix_runtime_info(payload: dict[str, Any]) -> bool:
         isinstance(source_location, dict)
         or (isinstance(labels, dict) and labels.get("namespace") == "Velo")
     )
+
+
+def _classify_structured_outcome(payload: dict[str, Any], context: dict[str, Any]) -> str:
+    message = _extract_message(payload)
+    if not message.startswith("Registration downstream outcome:"):
+        return ""
+    failure_keys = ("primaryOk", "legacyMirrorOk", "mirrorOk")
+    if any(context.get(key) is False for key in failure_keys):
+        return WebsiteLogEvent.SEVERITY_ERROR
+    if _has_context_error_text(context):
+        return WebsiteLogEvent.SEVERITY_WARNING
+    if context.get("emailSent") is False:
+        return WebsiteLogEvent.SEVERITY_WARNING
+    success_keys = ("primaryOk", "legacyMirrorOk", "mirrorOk", "emailSent", "finalized")
+    if all(context.get(key) is True for key in success_keys):
+        return WebsiteLogEvent.SEVERITY_INFO
+    return ""
+
+
+def _has_context_error_text(context: dict[str, Any]) -> bool:
+    error_keys = ("primaryError", "legacyMirrorError", "mirrorError", "emailError")
+    return any(bool(str(context.get(key) or "").strip()) for key in error_keys)
 
 
 def _extract_context(payload: dict[str, Any]) -> dict[str, Any]:

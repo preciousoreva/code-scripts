@@ -324,6 +324,7 @@ class WixLogIngestTests(TestCase):
         response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
         self.assertEqual(response.status_code, 200)
         event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_WARNING)
         self.assertEqual(event.context["membershipId"], "WOPU-KAN-GPU4X84C")
         self.assertTrue(event.context["primaryOk"])
         self.assertFalse(event.context["emailSent"])
@@ -341,6 +342,49 @@ class WixLogIngestTests(TestCase):
         self.assertEqual(logs_data["total"], 1)
         self.assertEqual(logs_data["logs"][0]["context"]["membershipId"], "WOPU-KAN-GPU4X84C")
         self.assertIn("emailError=SMTP timeout", logs_data["logs"][0]["context_summary"])
+
+    def test_successful_registration_downstream_outcome_is_info(self):
+        payload = {
+            "timestamp": "2026-07-09T13:48:04.079Z",
+            "labels": {"namespace": "Velo"},
+            "insertId": "9VfqN",
+            "sourceLocation": {"file": "backend/membership-card.web.js", "line": 2190},
+            "jsonPayload": {
+                "message": (
+                    "Registration downstream outcome: "
+                    '{"primaryStore":"WoPU-AWS-Members/members","primaryOk":true,'
+                    '"primaryError":"","legacyMirrorOk":true,'
+                    '"legacyMirrorDuplicate":false,"legacyMirrorError":"",'
+                    '"membershipId":"WOPU-LAG-YB5QSMQT","mirrorOk":true,'
+                    '"mirrorDuplicate":false,"mirrorError":"","emailSent":true,'
+                    '"emailError":"","finalized":true,"alreadySent":false}'
+                ),
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_INFO)
+        self.assertEqual(event.context["membershipId"], "WOPU-LAG-YB5QSMQT")
+
+    def test_failed_registration_downstream_outcome_is_error(self):
+        payload = {
+            "timestamp": "2026-07-09T13:48:04.079Z",
+            "jsonPayload": {
+                "message": (
+                    "Registration downstream outcome: "
+                    '{"primaryOk":false,"primaryError":"primary write failed",'
+                    '"legacyMirrorOk":false,"legacyMirrorError":"",'
+                    '"membershipId":"WOPU-FAILED","mirrorOk":false,'
+                    '"mirrorError":"","emailSent":false,"emailError":"",'
+                    '"finalized":false}'
+                ),
+            },
+        }
+        response = self.client.post(self.url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        event = WebsiteLogEvent.objects.get()
+        self.assertEqual(event.severity, WebsiteLogEvent.SEVERITY_ERROR)
 
     def test_array_payload_creates_multiple_logs(self):
         payload = [
