@@ -138,25 +138,25 @@
     <div class="absolute inset-0 bg-slate-900/40" data-log-detail-close></div>
     <aside class="website-log-drawer-panel absolute right-0 top-0 h-full w-full max-w-2xl bg-white dark:bg-slate-900 overflow-y-auto">
         <div class="p-4 border-b border-slate-200 flex items-start justify-between gap-4">
-            <div>
+            <div class="min-w-0">
                 <h2 class="text-lg font-semibold text-slate-900">Log details</h2>
-                <p id="log-detail-meta" class="mt-1 text-sm text-slate-600"></p>
+                <p id="log-detail-meta" class="mt-1 text-sm text-slate-600 website-log-drawer-text"></p>
             </div>
             <button type="button" class="text-slate-500 hover:text-slate-900 text-2xl leading-none" data-log-detail-close>&times;</button>
         </div>
         <div class="p-4 space-y-4">
             <section>
                 <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Message</h3>
-                <p id="log-detail-message" class="mt-2 text-sm text-slate-900"></p>
+                <p id="log-detail-message" class="mt-2 text-sm text-slate-900 website-log-drawer-text"></p>
             </section>
             <section class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                <div>
+                <div class="min-w-0">
                     <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Source</h3>
-                    <p id="log-detail-source" class="mt-1 font-mono text-xs text-slate-700 break-all"></p>
+                    <p id="log-detail-source" class="mt-1 font-mono text-xs text-slate-700 website-log-drawer-text"></p>
                 </div>
-                <div>
+                <div class="min-w-0">
                     <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Trace / Request</h3>
-                    <p id="log-detail-trace" class="mt-1 font-mono text-xs text-slate-700 break-all"></p>
+                    <p id="log-detail-trace" class="mt-1 font-mono text-xs text-slate-700 website-log-drawer-text"></p>
                 </div>
             </section>
             <section id="log-detail-context-section" class="hidden">
@@ -168,7 +168,7 @@
                     <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">JSON</h3>
                     <button type="button" id="log-detail-copy" class="text-sm text-blue-600 hover:underline">Copy</button>
                 </div>
-                <pre id="log-detail-json" class="border-x border-b border-slate-200 rounded-b-lg p-4 bg-white text-xs overflow-x-auto whitespace-pre-wrap"></pre>
+                <pre id="log-detail-json" class="border-x border-b border-slate-200 rounded-b-lg p-4 bg-white text-xs overflow-x-auto whitespace-pre-wrap website-log-drawer-text"></pre>
             </section>
         </div>
     </aside>
@@ -339,12 +339,12 @@
             }
             keys.sort().forEach(function (key) {
                 var item = document.createElement('div');
-                item.className = 'rounded-md border border-slate-200 bg-slate-50 p-2';
+                item.className = 'website-log-context-card rounded-md p-2';
                 var dt = document.createElement('dt');
-                dt.className = 'font-semibold uppercase tracking-wider text-slate-500';
+                dt.className = 'website-log-context-label font-semibold uppercase tracking-wider website-log-drawer-text';
                 dt.textContent = key;
                 var dd = document.createElement('dd');
-                dd.className = 'mt-1 font-mono text-slate-800 break-all';
+                dd.className = 'website-log-context-value mt-1 font-mono website-log-drawer-text';
                 dd.textContent = String(context[key]);
                 item.appendChild(dt);
                 item.appendChild(dd);

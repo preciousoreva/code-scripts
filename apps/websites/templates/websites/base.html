@@ -271,11 +271,51 @@
         .website-log-drawer-panel {
             border-left: 2px solid #cbd5e1;
             box-shadow: -24px 0 48px rgba(15, 23, 42, 0.22);
+            max-width: min(42rem, 100vw);
+            overflow-x: hidden;
+        }
+
+        .website-log-drawer-panel * {
+            min-width: 0;
+        }
+
+        .website-log-drawer-text {
+            max-width: 100%;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .website-log-context-card {
+            border: 1px solid #cbd5e1;
+            background: #f8fafc;
+            color: #0f172a;
+        }
+
+        .website-log-context-label {
+            color: #64748b;
+        }
+
+        .website-log-context-value {
+            color: #1e293b;
         }
 
         html.dark .website-log-drawer-panel {
             border-left-color: #64748b;
             box-shadow: -28px 0 56px rgba(2, 6, 23, 0.65);
+        }
+
+        html.dark .website-log-context-card {
+            border-color: #475569;
+            background: #0f172a;
+            color: #e2e8f0;
+        }
+
+        html.dark .website-log-context-label {
+            color: #cbd5e1;
+        }
+
+        html.dark .website-log-context-value {
+            color: #f8fafc;
         }
     </style>
 </head>
