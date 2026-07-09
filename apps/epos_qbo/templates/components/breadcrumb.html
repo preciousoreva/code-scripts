@@ -1,0 +1,15 @@
+{% comment %}
+  Expects: breadcrumbs = list of { label, url } (url None = current page, not linked)
+{% endcomment %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  {% for crumb in breadcrumbs %}
+    {% if not forloop.first %}
+      <span class="text-slate-300 dark:text-slate-600 select-none" aria-hidden="true">/</span>
+    {% endif %}
+    {% if crumb.url %}
+      <a href="{{ crumb.url }}" class="text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors">{{ crumb.label }}</a>
+    {% else %}
+      <span class="font-medium text-slate-900 dark:text-slate-100">{{ crumb.label }}</span>
+    {% endif %}
+  {% endfor %}
+</nav>

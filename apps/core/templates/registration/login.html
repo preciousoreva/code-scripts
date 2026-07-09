@@ -1,0 +1,52 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login • OIAT Portal</title>
+    <link rel="stylesheet" href="{% static 'css/tailwind.css' %}">
+    <style>
+        /* Style Django-rendered form inputs to match Tailwind design */
+        form input[type="text"],
+        form input[type="password"] {
+            width: 100%;
+            border: 1px solid rgb(203 213 225);
+            border-radius: 0.25rem;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.875rem;
+        }
+        form input[type="text"]:focus,
+        form input[type="password"]:focus {
+            outline: 2px solid rgb(59 130 246);
+            outline-offset: -1px;
+            border-color: rgb(59 130 246);
+        }
+    </style>
+</head>
+<body class="bg-slate-100 min-h-screen flex items-center justify-center">
+    <form method="post" class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm w-full max-w-sm">
+        {% csrf_token %}
+        <h1 class="text-lg font-semibold mb-4">Sign In</h1>
+        {% if form.errors %}
+        <p class="text-sm text-red-600 mb-3">Invalid username or password.</p>
+        {% endif %}
+        <label class="block text-sm mb-1" for="id_username">Username</label>
+        {{ form.username }}
+        {% if form.username.errors %}
+        <p class="text-sm text-red-600 mt-1">{{ form.username.errors.0 }}</p>
+        {% endif %}
+        <div class="mb-3"></div>
+        <label class="block text-sm mb-1" for="id_password">Password</label>
+        {{ form.password }}
+        {% if form.password.errors %}
+        <p class="text-sm text-red-600 mt-1">{{ form.password.errors.0 }}</p>
+        {% endif %}
+        <div class="mb-4"></div>
+        {% if request.GET.next %}
+        <input type="hidden" name="next" value="{{ request.GET.next }}">
+        {% endif %}
+        <button class="w-full bg-slate-900 text-white rounded px-3 py-2" type="submit">Login</button>
+    </form>
+</body>
+</html>

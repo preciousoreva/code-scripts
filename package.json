@@ -1,0 +1,29 @@
+{
+  "name": "code-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "This repo contains an automation pipeline that:",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build:css": "npx tailwindcss -c ./tailwind.config.cjs -i ./apps/epos_qbo/static_src/css/tailwind.input.css -o ./apps/epos_qbo/static/css/tailwind.css --minify",
+    "watch:css": "npx tailwindcss -c ./tailwind.config.cjs -i ./apps/epos_qbo/static_src/css/tailwind.input.css -o ./apps/epos_qbo/static/css/tailwind.css --watch",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/preciousoreva/code-scripts.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/preciousoreva/code-scripts/issues"
+  },
+  "homepage": "https://github.com/preciousoreva/code-scripts#readme",
+  "dependencies": {
+    "tailwindcss": "^3.4.19"
+  }
+}

@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+
+{% block title %}Runs • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6" data-active-runs='{{ active_run_ids_json|safe }}'>
+    <div>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Runs</h1>
+    </div>
+
+    {% if perms.epos_qbo.can_trigger_runs %}
+    {% comment %}
+    Tabbed trigger panel — keeps the two operator workflows visually separated
+    without exposing low-level inventory remediation tools as separate actions.
+    {% endcomment %}
+    <div x-data="{ tab: 'sales' }">
+        <div role="tablist" aria-label="Run trigger" class="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-900 p-1 mb-4">
+            <button type="button" role="tab" aria-controls="sales-run-panel" :aria-selected="tab === 'sales'" :aria-current="tab === 'sales' ? 'page' : null" @click="tab = 'sales'"
+                :class="tab === 'sales' ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-slate-100 shadow-sm border border-slate-200 dark:border-slate-700' : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100 border border-transparent'"
+                class="min-w-24 rounded-md px-4 py-2 text-sm font-medium transition-colors">
+                Sales
+            </button>
+            <button type="button" role="tab" aria-controls="inventory-run-panel" :aria-selected="tab === 'inventory'" :aria-current="tab === 'inventory' ? 'page' : null" @click="tab = 'inventory'"
+                :class="tab === 'inventory' ? 'bg-white dark:bg-slate-800 text-slate-950 dark:text-slate-100 shadow-sm border border-slate-200 dark:border-slate-700' : 'text-slate-600 dark:text-slate-400 hover:text-slate-950 dark:hover:text-slate-100 border border-transparent'"
+                class="min-w-24 rounded-md px-4 py-2 text-sm font-medium transition-colors">
+                Inventory
+            </button>
+        </div>
+
+    <section id="sales-run-panel" role="tabpanel" x-show="tab === 'sales'" class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm" x-data="runTriggerForm()">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Sales Receipt Pipeline</h2>
+        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">Download EPOS sales, transform, upload to QBO, and reconcile totals.</p>
+        <form method="post" action="{% url 'epos_qbo:run-trigger' %}" class="space-y-4">
+            {% csrf_token %}
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Scope
+                    <select name="scope" x-model="scope" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                        <option value="all_companies">All Companies</option>
+                        <option value="single_company">Single Company</option>
+                    </select>
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400" x-show="scope === 'single_company'" x-cloak>
+                    Company
+                    <select name="company_key" :required="scope === 'single_company'" :disabled="scope !== 'single_company'" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                        <option value="">Select company</option>
+                        {% for company in companies %}
+                        <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Date Mode
+                    <select name="date_mode" x-model="dateMode" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                        <option value="yesterday">Yesterday</option>
+                        <option value="target_date">Target Date</option>
+                        <option value="range">Range</option>
+                    </select>
+                </label>
+                <div class="flex items-end">
+                    <button type="submit" class="btn btn-primary w-full justify-center">
+                        Trigger
+                    </button>
+                </div>
+            </div>
+
+            <p class="text-xs text-slate-500 dark:text-slate-400" x-text="summaryText"></p>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="dateMode === 'target_date'" x-cloak>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Target Date
+                    <input type="date" name="target_date" :required="dateMode === 'target_date'" :disabled="dateMode !== 'target_date'"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                </label>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="dateMode === 'range'" x-cloak>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    From Date
+                    <input type="date" name="from_date" :required="dateMode === 'range'" :disabled="dateMode !== 'range'"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    To Date
+                    <input type="date" name="to_date" :required="dateMode === 'range'" :disabled="dateMode !== 'range'"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2 mt-6">
+                    <input type="checkbox" name="skip_download" :disabled="dateMode !== 'range'">
+                    Skip download
+                </label>
+            </div>
+
+            <details class="border border-slate-200 dark:border-slate-600 rounded-lg p-3" x-show="scope === 'all_companies'" x-cloak>
+                <summary class="cursor-pointer text-sm font-medium text-slate-700 dark:text-slate-300 select-none">Advanced options (all companies)</summary>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
+                    <label class="text-xs text-slate-600 dark:text-slate-400">
+                        Parallel workers
+                        <input type="number" name="parallel" min="1" value="{{ default_parallel }}" :disabled="scope !== 'all_companies'"
+                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                    </label>
+                    <label class="text-xs text-slate-600 dark:text-slate-400">
+                        Stagger seconds
+                        <input type="number" name="stagger_seconds" min="0" value="{{ default_stagger_seconds }}" :disabled="scope !== 'all_companies'"
+                            class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                    </label>
+                    <label class="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-2 mt-6">
+                        <input type="checkbox" name="continue_on_failure" :disabled="scope !== 'all_companies'">
+                        Continue on failure
+                    </label>
+                </div>
+            </details>
+        </form>
+    </section>
+
+    <section id="inventory-run-panel" role="tabpanel" x-show="tab === 'inventory'" x-cloak class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm"
+             x-data="inventoryForm()">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-1">Inventory</h2>
+        <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">
+            Run one read-only inventory review. Results are shown in the company Inventory Review page; no QBO inventory writes are made.
+        </p>
+        {% if inventory_companies %}
+        <form method="post" action="{% url 'epos_qbo:run-trigger-inventory' %}" class="space-y-4">
+            {% csrf_token %}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Company
+                    <select name="company_key" required x-model="companyKey" @change="category = ''" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                        <option value="">Select company</option>
+                        {% for company in inventory_companies %}
+                        <option value="{{ company.company_key }}">{{ company.display_name }} ({{ company.company_key }})</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Category
+                    <select name="category" x-model="category" class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 disabled:opacity-60">
+                        <option value="">All categories</option>
+                        <template x-for="c in availableCategories" :key="c">
+                            <option :value="c" x-text="c"></option>
+                        </template>
+                    </select>
+                    <span x-show="companyKey && availableCategories.length === 0" x-cloak class="mt-1 block text-[11px] text-slate-500 dark:text-slate-400">
+                        No saved category list found for this company.
+                    </span>
+                </label>
+                <label class="text-xs text-slate-600 dark:text-slate-400">
+                    Product filter
+                    <input type="text" name="product_filter"
+                        class="mt-1 w-full border border-slate-200 dark:border-slate-600 rounded-md px-2 py-1.5 text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100">
+                </label>
+            </div>
+
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2">
+                <button type="submit" name="mode" value="audit_only" class="btn btn-primary justify-center">
+                    <iconify-icon icon="solar:clipboard-check-linear" width="18"></iconify-icon>
+                    Run Inventory Review
+                </button>
+            </div>
+        </form>
+        {% else %}
+        <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-700/40 px-4 py-3 text-sm text-slate-600 dark:text-slate-300">
+            No companies currently have inventory enabled.
+        </div>
+        {% endif %}
+    </section>
+    </div>
+    {% endif %}
+
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-sm overflow-hidden">
+        {% comment %}
+        Responsive run history. On md+ screens the table fills the container; on
+        narrow screens it scrolls horizontally as a fallback, and lower-priority
+        columns (Scope, Exit) are hidden first to prevent the Reconciliation
+        and Action columns from being clipped behind the scroll edge.
+        {% endcomment %}
+        <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
+                <tr>
+                    <th class="text-left px-4 py-3 whitespace-nowrap">Created</th>
+                    <th class="text-left px-4 py-3 whitespace-nowrap">Run</th>
+                    <th class="text-left px-4 py-3 hidden md:table-cell">Workflow</th>
+                    <th class="text-left px-4 py-3 hidden md:table-cell">Scope</th>
+                    <th class="text-left px-4 py-3">Company</th>
+                    <th class="text-left px-4 py-3">Status</th>
+                    <th class="text-left px-4 py-3 hidden lg:table-cell">Reconciliation</th>
+                    <th class="text-left px-4 py-3 hidden lg:table-cell">Exit</th>
+                    <th class="text-left px-4 py-3">Action</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 dark:divide-slate-700 text-slate-900 dark:text-slate-200">
+                {% for row in run_rows %}
+                <tr>
+                    <td class="px-4 py-3 whitespace-nowrap">{{ row.job.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        <a href="{% url 'epos_qbo:run-detail' job_id=row.job.id %}" class="font-mono text-blue-600 dark:text-blue-400 hover:underline">{{ row.job.friendly_id }}</a>
+                    </td>
+                    <td class="px-4 py-3 hidden md:table-cell">
+                        <span class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium
+                            {% if row.job.workflow_label == 'Sales' %}bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300
+                            {% elif row.job.workflow_label == 'Inventory' %}bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300
+                            {% else %}bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200{% endif %}">
+                            {{ row.job.workflow_label }}
+                        </span>
+                    </td>
+                    <td class="px-4 py-3 hidden md:table-cell">{{ row.job.scope_label }}</td>
+                    <td class="px-4 py-3">{{ row.job.company_key|default:"all" }}</td>
+                    <td class="px-4 py-3">
+                        {% if row.job.status == 'succeeded' %}
+                        <span class="text-emerald-600 dark:text-emerald-400">{{ row.job.status }}</span>
+                        {% elif row.job.status == 'failed' %}
+                        <span class="text-red-600 dark:text-red-400">{{ row.job.status }}</span>
+                        {% elif row.job.status == 'running' %}
+                        <span class="text-blue-600 dark:text-blue-400">{{ row.job.status }}</span>
+                        {% elif row.job.status == 'queued' %}
+                        <span class="text-slate-500 dark:text-slate-400">{{ row.job.status }}</span>
+                        {% else %}
+                        <span class="text-slate-500 dark:text-slate-400">{{ row.job.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 hidden lg:table-cell">
+                        {% if row.reconciliation_label == "Match" %}
+                        <span class="text-emerald-600 dark:text-emerald-400">Match</span>
+                        {% elif row.reconciliation_label == "Mismatch" %}
+                        <span class="text-amber-600 dark:text-amber-400">Mismatch</span>
+                        {% else %}
+                        <span class="text-slate-500 dark:text-slate-400">Not reconciled</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-4 py-3 hidden lg:table-cell">{{ row.job.exit_code|default:"-" }}</td>
+                    <td class="px-4 py-3">
+                        <a href="{% url 'epos_qbo:run-detail' job_id=row.job.id %}"
+                            class="text-blue-600 dark:text-blue-400 hover:underline">View</a>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="9" class="px-4 py-6 text-slate-500 dark:text-slate-400">No runs yet.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+{% load static %}
+{{ categories_by_company|json_script:"inventory-categories-by-company" }}
+<script>
+    function runTriggerForm() {
+        return {
+            scope: "all_companies",
+            dateMode: "yesterday",
+            get summaryText() {
+                const scopeText = this.scope === "all_companies" ? "all active companies" : "one selected company";
+                if (this.dateMode === "yesterday") {
+                    return `This will run for ${scopeText} using yesterday's business date.`;
+                }
+                if (this.dateMode === "target_date") {
+                    return `This will run for ${scopeText} using one specific target date.`;
+                }
+                return `This will run for ${scopeText} across a date range.`;
+            },
+        };
+    }
+
+    function inventoryForm() {
+        const dataEl = document.getElementById("inventory-categories-by-company");
+        return {
+            companyKey: "",
+            category: "",
+            categoriesByCompany: dataEl ? JSON.parse(dataEl.textContent) : {},
+            get availableCategories() {
+                if (!this.companyKey) return [];
+                const list = this.categoriesByCompany[this.companyKey];
+                return Array.isArray(list) ? list : [];
+            },
+        };
+    }
+</script>
+<script src="{% static 'js/runs.js' %}"></script>
+{% endblock %}

@@ -1,0 +1,349 @@
+{% extends "base.html" %}
+
+{% block title %}{{ job.friendly_title }} • EPOS → QBO{% endblock %}
+
+{% block topbar %}
+{% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6" data-run-id="{{ job.id }}" data-run-status="{{ job.status }}">
+    <div>
+        <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ job.friendly_title }}</h1>
+        <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400">Internal ID: {{ job.id }}</p>
+    </div>
+
+    {% if inventory_review_action %}
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm space-y-4">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory Review Action</h2>
+        {% if inventory_review_action.action_type == "create_missing" %}
+        <p class="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">This run was queued from the Missing Item Creation flow. Only safe missing QBO candidates are in scope.</p>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.intent_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Safe candidates</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.safe_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Blocked candidates</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.blocked_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.scope_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Category scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.category_scope_label }}</dd>
+            </div>
+            {% if inventory_review_action.total_candidates_in_scope is not None %}
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Candidates in scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.total_candidates_in_scope }}</dd>
+            </div>
+            {% endif %}
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Source final audit</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100 break-all">{{ inventory_review_action.source_final_audit_name }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Mapping source</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.mapping_source }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Quantity policy</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.create_qty_policy_label }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">InvStartDate (queued)</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">
+                    <span class="font-mono">{{ inventory_review_action.item_inv_start_date }}</span>
+                    {% if inventory_review_action.txn_date_source %}
+                    <span class="text-xs font-sans text-slate-500 dark:text-slate-400">({{ inventory_review_action.txn_date_source }})</span>
+                    {% endif %}
+                </dd>
+            </div>
+            {% if inventory_review_action.missing_create_report_url %}
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Per-item report</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100"><a href="{{ inventory_review_action.missing_create_report_url }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ inventory_review_action.missing_create_report_label }}</a> (CSV)</dd>
+            </div>
+            {% endif %}
+        </dl>
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-1">Limits</p>
+            <ul class="list-disc list-inside text-slate-900 dark:text-slate-100 space-y-0.5">
+                <li>Catalog fixes: {{ inventory_review_action.max_catalog_fixes }}</li>
+                <li>Quantity adjustments: {{ inventory_review_action.max_quantity_adjustments }}</li>
+            </ul>
+        </div>
+        {% else %}
+        <p class="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">This run was queued from the Inventory Review page and is scoped to the listed base names.</p>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.intent_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Affected items</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.affected_count }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Scope</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_review_action.scope_label }}</dd>
+            </div>
+            <div class="sm:col-span-2">
+                <dt class="text-slate-500 dark:text-slate-400">Source final audit</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100 break-all">{{ inventory_review_action.source_final_audit_name }}</dd>
+            </div>
+        </dl>
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-1">Limits</p>
+            <ul class="list-disc list-inside text-slate-900 dark:text-slate-100 space-y-0.5">
+                <li>Catalog fixes: {{ inventory_review_action.max_catalog_fixes }}</li>
+                <li>Quantity adjustments: {{ inventory_review_action.max_quantity_adjustments }}</li>
+            </ul>
+        </div>
+        {% endif %}
+        {% if inventory_review_action.preview_base_names %}
+        <div class="text-sm">
+            <p class="text-slate-500 dark:text-slate-400 mb-2">Affected base names</p>
+            <ul class="border border-slate-200 dark:border-slate-600 rounded-lg divide-y divide-slate-100 dark:divide-slate-700 bg-slate-50/50 dark:bg-slate-900/30">
+                {% for name in inventory_review_action.preview_base_names %}
+                <li class="px-3 py-1.5 text-slate-900 dark:text-slate-100">{{ name }}</li>
+                {% endfor %}
+            </ul>
+            {% if inventory_review_action.has_more_base_names %}
+            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">and {{ inventory_review_action.more_base_names_count }} more</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    {% if inventory_mode_context %}
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm space-y-3">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Inventory Mode</h2>
+        <dl class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-3 text-sm">
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Mode</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.mode_label }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Write intent</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.write_intent }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">QBO write attempted</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.qbo_write_attempted|yesno:"Yes,No" }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">QBO write blocked</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.qbo_write_blocked|yesno:"Yes,No" }}</dd>
+            </div>
+            <div>
+                <dt class="text-slate-500 dark:text-slate-400">Missing item create enabled</dt>
+                <dd class="font-medium text-slate-900 dark:text-slate-100">{{ inventory_mode_context.missing_item_create_enabled|yesno:"Yes,No" }}</dd>
+            </div>
+        </dl>
+    </section>
+    {% endif %}
+
+    <section
+        class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+        <div><span class="text-slate-500 dark:text-slate-400 block">Status</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.status }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Workflow</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.workflow_label }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Target</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ target_label }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Company</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.company_key|default:"all" }}</span></div>
+        <div>
+            <span class="text-slate-500 dark:text-slate-400 block">Exit Code</span>
+            <span class="font-medium text-slate-900 dark:text-slate-100">{{ job.exit_code|default:"-" }}</span>
+            {% if exit_code_info %}
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ exit_code_info.label }}: {{ exit_code_info.description }}</p>
+            {% endif %}
+        </div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Started</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.started_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
+        <div><span class="text-slate-500 dark:text-slate-400 block">Finished</span><span class="font-medium text-slate-900 dark:text-slate-100">{{ job.finished_at|date:"Y-m-d H:i:s"|default:"-" }}</span></div>
+        <div class="md:col-span-2 lg:col-span-2">
+            <span class="text-slate-500 dark:text-slate-400 block">Command</span>
+            <code class="font-mono text-xs break-all text-slate-900 dark:text-slate-200">{{ job.command_display|default:"-" }}</code>
+        </div>
+        {% if job.failure_reason %}
+        <div class="md:col-span-2 lg:col-span-4 text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-md p-3">
+            {{ job.failure_reason }}
+        </div>
+        {% endif %}
+        {% if run_attention_message %}
+        <div class="md:col-span-2 lg:col-span-4 rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 flex items-start gap-3">
+            <iconify-icon icon="solar:danger-triangle-linear" class="text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" width="20"></iconify-icon>
+            <p class="text-sm text-amber-800 dark:text-amber-200">{{ run_attention_message }}</p>
+        </div>
+        {% endif %}
+        {% if job.exit_code != None and job.exit_code != 0 %}
+        <div class="md:col-span-2 lg:col-span-4 text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-600 rounded-md p-3">
+            <p class="text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-400 mb-2">Exit Code Guide</p>
+            <ul class="text-xs space-y-1">
+                {% for item in exit_code_reference %}
+                <li><span class="font-mono text-slate-900 dark:text-slate-100">{{ item.code }}</span>: {{ item.message }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+    </section>
+
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Live Log</h2>
+        <pre id="run-log"
+            class="bg-slate-900 text-slate-100 text-xs p-4 rounded-md h-80 overflow-auto whitespace-pre-wrap"></pre>
+    </section>
+
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-3">Artifacts</h2>
+        {% if run_upload_summary_message %}
+        <div class="mb-3 rounded-md border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/50 px-4 py-3 text-sm text-slate-700 dark:text-slate-300">
+            {{ run_upload_summary_message }}
+        </div>
+        {% endif %}
+        <div class="overflow-x-auto">
+            <table class="w-full text-sm min-w-max">
+                <thead class="bg-slate-50 dark:bg-slate-700/50 text-slate-600 dark:text-slate-300">
+                    <tr>
+                        <th class="text-left px-3 py-2">Company</th>
+                        {% if job.workflow_label == 'Sales' %}
+                        <th class="text-left px-3 py-2">Target Date</th>
+                        {% endif %}
+                        <th class="text-left px-3 py-2">Processed</th>
+                        <th class="text-left px-3 py-2">Metrics</th>
+                        <th class="text-left px-3 py-2">Reports</th>
+                        <th class="text-left px-3 py-2">Metadata Source</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-700 text-slate-900 dark:text-slate-200">
+                    {% for artifact in artifacts %}
+                    <tr>
+                        <td class="px-3 py-2">{{ artifact.company_key }}</td>
+                        {% if job.workflow_label == 'Sales' %}
+                        <td class="px-3 py-2">{{ artifact.target_date|default:"-" }}</td>
+                        {% endif %}
+                        <td class="px-3 py-2">{{ artifact.processed_at|date:"Y-m-d H:i:s"|default:"-" }}</td>
+                        <td class="px-3 py-2">
+                            {% if artifact.upload_stats_json.report_type == 'inventory_pipeline' %}
+                            <div class="space-y-1.5 text-xs min-w-[28rem]">
+                                <div class="flex flex-wrap gap-x-2 gap-y-1">
+                                    <span><span class="text-slate-500 dark:text-slate-400">Products:</span> <span class="font-medium">{{ artifact.upload_stats_json.products_checked|default:"0" }}</span> checked</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{% if artifact.upload_stats_json.in_sync != None %}{{ artifact.upload_stats_json.in_sync }}{% elif artifact.upload_stats_json.already_correct != None %}{{ artifact.upload_stats_json.already_correct }}{% else %}0{% endif %}</span> in sync</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.blocked_items|default:"0" }}</span> blocked</span>
+                                </div>
+                                <div class="flex flex-wrap gap-x-2 gap-y-1">
+                                    <span><span class="text-slate-500 dark:text-slate-400">Updates:</span> <span class="font-medium">{{ artifact.upload_stats_json.quantity_updates_applied|default:"0" }}</span> quantity</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.catalog_fixes_applied|default:"0" }}</span> catalog</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.base_items_created|default:"0" }}</span> base items</span>
+                                    <span class="text-slate-300 dark:text-slate-600">·</span>
+                                    <span><span class="font-medium">{{ artifact.upload_stats_json.duplicate_base_items_resolved|default:"0" }}</span> duplicate bases</span>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="grid grid-cols-2 lg:grid-cols-5 gap-x-4 gap-y-1 text-xs">
+                                <div><span class="text-slate-500 dark:text-slate-400">Rows kept:</span> <span class="font-medium">{{ artifact.rows_kept|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO attempted:</span> <span class="font-medium">{{ artifact.upload_stats_json.attempted|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO uploaded:</span> <span class="font-medium">{{ artifact.upload_stats_json.uploaded|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO skipped:</span> <span class="font-medium">{{ artifact.upload_stats_json.skipped|default:"-" }}</span></div>
+                                <div><span class="text-slate-500 dark:text-slate-400">QBO failed:</span> <span class="font-medium">{{ artifact.upload_stats_json.failed|default:"-" }}</span></div>
+                            </div>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 py-2 align-top">
+                            {% if artifact.report_links %}
+                            {% if artifact.report_links|length == 1 %}
+                            {% with report=artifact.report_links.0 %}
+                            <a href="{{ report.url }}"
+                               download
+                               title="{{ report.path }}"
+                               class="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 py-1 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">
+                                <iconify-icon icon="solar:download-minimalistic-linear" width="14" aria-hidden="true"></iconify-icon>
+                                {{ report.label }}
+                            </a>
+                            {% endwith %}
+                            {% else %}
+                            <div x-data="{ selectedReport: '{{ artifact.report_links.0.url }}' }" class="flex items-center gap-2 min-w-[18rem]">
+                                <select x-model="selectedReport"
+                                        aria-label="Select report"
+                                        class="h-8 min-w-0 flex-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 text-xs text-slate-700 dark:text-slate-200">
+                                    {% for report in artifact.report_links %}
+                                    <option value="{{ report.url }}">{{ report.label }}</option>
+                                    {% endfor %}
+                                </select>
+                                <a href="{{ artifact.report_links.0.url }}"
+                                   :href="selectedReport"
+                                   download
+                                   class="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-2 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                                   :class="selectedReport ? '' : 'pointer-events-none opacity-50'">
+                                    <iconify-icon icon="solar:download-minimalistic-linear" width="14" aria-hidden="true"></iconify-icon>
+                                    Download
+                                </a>
+                            </div>
+                            {% endif %}
+                            {% else %}
+                            <span class="text-slate-400 dark:text-slate-500">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-3 py-2">
+                            {% if artifact.operator_label_color == 'emerald' %}
+                            <span class="inline-flex px-2 py-0.5 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
+                            {% elif artifact.operator_label_color == 'amber' %}
+                            <span class="inline-flex px-2 py-0.5 bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
+                            {% elif artifact.operator_label_color == 'blue' %}
+                            <span class="inline-flex px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
+                            {% else %}
+                            <span class="inline-flex px-2 py-0.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium rounded-full">{{ artifact.operator_label }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="{% if job.workflow_label == 'Sales' %}6{% else %}5{% endif %}" class="px-3 py-4 text-slate-500 dark:text-slate-400">No artifacts linked yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+{% load static %}
+<script src="{% static 'js/run_detail.js' %}"></script>
+<script>
+    (function () {
+        const logEl = document.getElementById("run-log");
+        if (!logEl) return;
+        let offset = 0;
+        const logsUrl = "{% url 'epos_qbo:run-logs' job_id=job.id %}";
+
+        const tick = () => {
+            fetch(`${logsUrl}?offset=${offset}`, { credentials: "same-origin" })
+                .then((res) => res.json())
+                .then((data) => {
+                    if (data.chunk) {
+                        logEl.textContent += data.chunk;
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+                    offset = data.next_offset;
+                    if (data.status === "running" || data.status === "queued") {
+                        setTimeout(tick, 1500);
+                    }
+                })
+                .catch(() => setTimeout(tick, 3000));
+        };
+        tick();
+    })();
+</script>
+{% endblock %}

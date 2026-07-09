@@ -1,0 +1,17 @@
+# Developer override for docker-compose.yml.
+#
+# Usage:
+#   OIAT_ENV_FILE=.oiat/env/marvin-dev.env \
+#     docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Purpose:
+#   - Expose the web container on localhost (skip Caddy/Tailscale).
+#   - Keep caddy service present but gated behind a profile so it is not started
+#     by default in dev.
+services:
+  web:
+    ports:
+      - "${WEB_BIND_HOST:-127.0.0.1}:${WEB_BIND_PORT:-8000}:8000"
+
+  caddy:
+    profiles: ["caddy"]

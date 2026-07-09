@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}Missing QuickBooks Inventory Items • {{ company.display_name }}{% endblock %}
+
+{% block topbar %}
+    {% include "components/topbar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+        <div>
+            <div class="flex flex-wrap items-center gap-3 mb-2">
+                <h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">Missing QuickBooks Inventory Items</h1>
+                <span class="px-3 py-1 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm font-medium rounded-full flex items-center gap-2">
+                    <span class="w-2 h-2 bg-slate-400 rounded-full"></span>
+                    Preview &amp; queue
+                </span>
+            </div>
+            <p class="text-sm text-slate-500 dark:text-slate-400">{{ company.display_name }}</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Source: {{ final_audit_filename }}
+            </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+            <a href="{{ review_url }}" class="btn btn-secondary">
+                <iconify-icon icon="solar:arrow-left-linear" width="16"></iconify-icon>
+                Back to Inventory Review
+            </a>
+        </div>
+    </div>
+
+    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+        Preview only. No QuickBooks items are created from this page until you confirm and queue. Confirm and queue creates a background job for server-classified safe candidates only.
+    </div>
+
+    <div class="rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 p-4 text-sm text-slate-700 dark:text-slate-200 space-y-4">
+        <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+            <div class="flex-1 space-y-3">
+                <div>
+                    <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category scope</p>
+                    <form method="get" action="{{ category_filter_url }}" class="mt-2 max-w-md">
+                        <input type="hidden" name="txn_date" value="{{ picker_date }}">
+                        <label for="missing-category" class="sr-only">Category filter</label>
+                        <select id="missing-category" name="category" class="w-full h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-200" onchange="this.form.submit()">
+                            <option value="" {% if not selected_category %}selected{% endif %}>All categories</option>
+                            {% for key, label in category_options %}
+                            <option value="{{ label }}" {% if selected_category == label %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </form>
+                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Filter rows for review. Queue actions always recompute candidates server-side for the selected scope.</p>
+                </div>
+                <div>
+                    <label for="missing-inv-start-date" class="block text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Inventory start date</label>
+                    <form method="get" action="{{ category_filter_url }}" class="mt-2 flex flex-wrap items-center gap-2 max-w-md">
+                        <input type="hidden" name="category" value="{{ selected_category }}">
+                        <input id="missing-inv-start-date" type="date" name="txn_date" value="{{ picker_date }}" max="{{ date_input_max }}" {% if date_input_min %}min="{{ date_input_min }}"{% endif %} class="h-10 px-3 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-200" onchange="this.form.submit()">
+                        <span class="text-xs text-slate-500 dark:text-slate-400">Used as QuickBooks InvStartDate and pipeline <span class="font-mono">--txn-date</span>.</span>
+                    </form>
+                </div>
+            </div>
+            <div class="flex flex-col items-stretch lg:items-end gap-2 text-right">
+                {% if preview.safe_count > 0 and missing_item_queue_allowed %}
+                <p class="text-sm text-slate-700 dark:text-slate-200">
+                    {% if queue_category_label != "All categories" %}
+                    Will queue {{ preview.safe_count }} safe candidate{% if preview.safe_count != 1 %}s{% endif %} in {{ queue_category_label }} using InvStartDate <span class="font-mono">{{ picker_date }}</span>.
+                    {% else %}
+                    Will queue {{ preview.safe_count }} safe candidate{% if preview.safe_count != 1 %}s{% endif %} using InvStartDate <span class="font-mono">{{ picker_date }}</span>.
+                    {% endif %}
+                </p>
+                <form method="post" action="{{ confirm_post_url }}" class="flex justify-end">
+                    {% csrf_token %}
+                    <input type="hidden" name="category_scope" value="{{ selected_category }}">
+                    <input type="hidden" name="inventory_start_date" value="{{ picker_date }}">
+                    <button type="submit" class="btn btn-primary">Confirm and queue</button>
+                </form>
+                {% elif preview.safe_count > 0 %}
+                <p class="text-xs text-red-700 dark:text-red-300 text-right">Confirm and queue is unavailable until the QBO inventory snapshot loads. Refresh inventory data, then reopen this page.</p>
+                <span class="btn btn-primary opacity-50 cursor-not-allowed pointer-events-none self-end" aria-disabled="true">Confirm and queue</span>
+                {% else %}
+                <p class="text-xs text-slate-500 dark:text-slate-400 text-right">No safe candidates in this scope — nothing to queue.</p>
+                <span class="btn btn-primary opacity-50 cursor-not-allowed pointer-events-none self-end" aria-disabled="true">Confirm and queue</span>
+                {% endif %}
+            </div>
+        </div>
+        <div class="border-t border-slate-100 dark:border-slate-700 pt-3 text-xs text-slate-500 dark:text-slate-400">
+            <p>Resolved InvStartDate default: <span class="font-mono text-slate-700 dark:text-slate-200">{{ resolved_item_inv_start_date }}</span> ({{ txn_date_source }}). Adjust the date picker above if needed.</p>
+            {% if preview_full.rows %}
+            <p class="mt-1">Overall (all categories): {{ preview_full.safe_count }} safe of {{ preview_full.rows|length }} candidate row{{ preview_full.rows|length|pluralize }}.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if preview.mapping_error %}
+    <div class="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4 text-sm text-amber-800 dark:text-amber-300">
+        Product mapping warning: {{ preview.mapping_error }}
+    </div>
+    {% endif %}
+    {% if preview.qbo_base_names_error %}
+    <div class="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/25 p-4 text-sm text-red-900 dark:text-red-200">
+        <p class="font-medium">{{ snapshot_pack_guard_message }}</p>
+        <p class="mt-2 text-xs text-red-800 dark:text-red-300">Detail: {{ preview.qbo_base_names_error }}</p>
+    </div>
+    {% endif %}
+
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Total candidates (scope)</p>
+            <p class="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{{ preview.rows|length }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Safe to create (scope)</p>
+            <p class="mt-2 text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{{ preview.safe_count }}</p>
+        </div>
+        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+            <p class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">Blocked (scope)</p>
+            <p class="mt-2 text-2xl font-semibold text-amber-600 dark:text-amber-400">{{ preview.blocked_count }}</p>
+        </div>
+    </div>
+
+    {% if preview.rows %}
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+            <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">Missing QuickBooks Inventory Items</h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Review EPOS products that can be created as QuickBooks Inventory items.</p>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">{{ preview.rows|length }} row{{ preview.rows|length|pluralize }} in the selected scope from the latest final audit.</p>
+        </div>
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
+                <thead class="bg-slate-50 dark:bg-slate-700/50">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Product</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Suggested QBO Name</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Category</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Initial Qty</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Safety</th>
+                        <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Mapping</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
+                    {% for row in preview.rows %}
+                    <tr class="hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                        <td class="px-4 py-4 text-sm font-medium text-slate-900 dark:text-slate-100 min-w-56 align-top">{{ row.product }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-700 dark:text-slate-300 min-w-48 align-top">{{ row.suggested_qbo_name|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 align-top">{{ row.category|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 align-top whitespace-nowrap tabular-nums">{{ row.epos_expected_qty|default:"—" }}</td>
+                        <td class="px-4 py-4 text-sm align-top whitespace-nowrap">
+                            {% if row.is_safe %}
+                            <span class="inline-flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                Safe
+                            </span>
+                            {% else %}
+                            <span class="inline-flex items-center gap-2 text-xs font-medium text-amber-700 dark:text-amber-300">
+                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                                Blocked
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-4 text-sm text-slate-600 dark:text-slate-300 min-w-80 align-top">
+                            {% if not row.is_safe and row.block_reason %}
+                            <p class="text-sm text-amber-800 dark:text-amber-200">{{ row.block_reason }}</p>
+                            {% else %}
+                            <p class="text-sm text-slate-600 dark:text-slate-300">{% if row.safety_status and row.safety_status != "Safe candidate" %}{{ row.safety_status }}{% else %}Mapped from Product.Mapping.csv{% endif %}</p>
+                            {% endif %}
+
+                            {% if row.inventory_account or row.revenue_account or row.cogs_account %}
+                            <details class="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                                <summary class="cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-200">View accounts</summary>
+                                <div class="mt-2 space-y-1">
+                                    {% if row.inventory_account %}<div><span class="font-medium text-slate-600 dark:text-slate-300">Inventory:</span> {{ row.inventory_account }}</div>{% endif %}
+                                    {% if row.revenue_account %}<div><span class="font-medium text-slate-600 dark:text-slate-300">Revenue:</span> {{ row.revenue_account }}</div>{% endif %}
+                                    {% if row.cogs_account %}<div><span class="font-medium text-slate-600 dark:text-slate-300">COGS:</span> {{ row.cogs_account }}</div>{% endif %}
+                                </div>
+                            </details>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if preview.safe_count > 0 and missing_item_queue_allowed %}
+        <div class="px-6 py-4 border-t border-slate-200 dark:border-slate-700 flex justify-end">
+            <form method="post" action="{{ confirm_post_url }}">
+                {% csrf_token %}
+                <input type="hidden" name="category_scope" value="{{ selected_category }}">
+                <input type="hidden" name="inventory_start_date" value="{{ picker_date }}">
+                <button type="submit" class="btn btn-primary">Confirm and queue</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+        <p class="text-sm text-slate-700 dark:text-slate-200">No missing-from-QuickBooks rows in the selected scope for the latest final audit.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

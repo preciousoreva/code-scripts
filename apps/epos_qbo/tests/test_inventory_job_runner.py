@@ -1,0 +1,410 @@
+from __future__ import annotations
+
+from datetime import date
+
+from django.test import TestCase
+
+from apps.epos_qbo.models import RunJob, RunSchedule
+from apps.epos_qbo.services.job_runner import build_command, build_command_for_job
+from apps.epos_qbo.services.schedule_worker import enqueue_run_for_schedule
+
+
+class InventoryPipelineBuildCommandTests(TestCase):
+    def _base_cleaned(self, **overrides) -> dict:
+        cleaned = {
+            "scope": RunJob.SCOPE_INVENTORY_PIPELINE,
+            "company_key": "company_a",
+            "date_mode": "yesterday",
+            "inventory_options": {},
+        }
+        cleaned.update(overrides)
+        return cleaned
+
+    def test_minimum_required_args_emits_unified_pipeline(self):
+        cmd = build_command(self._base_cleaned())
+        flat = " ".join(cmd)
+        self.assertIn("-m", cmd)
+        self.assertIn("code_scripts.inventory_pipeline", cmd)
+        self.assertIn("--company", cmd)
+        self.assertIn("company_a", cmd)
+        self.assertIn("--auto-download", cmd)
+        self.assertIn("--auto-fetch-qbo", cmd)
+        self.assertIn("--qbo-force-refresh", cmd)
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "audit_only")
+        self.assertNotIn("--max-catalog-fixes", cmd)
+        self.assertNotIn("--max-quantity-adjustments", cmd)
+        self.assertNotIn("code_scripts.inventory_catalog_cleanup", flat)
+        self.assertNotIn("code_scripts.inventory_sync --apply", flat)
+
+    def test_category_and_product_become_cli_args_without_caps(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "categories": ["ALCOHOLS & SPIRITS"],
+                    "product_filter": "TROPHY",
+                }
+            )
+        )
+        self.assertIn("--category", cmd)
+        self.assertIn("ALCOHOLS & SPIRITS", cmd)
+        self.assertIn("--product", cmd)
+        self.assertIn("TROPHY", cmd)
+        self.assertNotIn("--max-catalog-fixes", cmd)
+        self.assertNotIn("--max-quantity-adjustments", cmd)
+
+    def test_explicit_caps_become_cli_args_for_internal_callers(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "max_catalog_fixes": 3,
+                    "max_quantity_adjustments": 7,
+                }
+            )
+        )
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "3")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "7")
+
+    def test_quantity_risk_thresholds_become_cli_args_for_internal_callers(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "max_apply_qty_delta": 25,
+                    "max_apply_value_impact": 1000,
+                    "allow_zero_cost_apply": True,
+                    "allow_negative_qbo_qty_apply": True,
+                }
+            )
+        )
+
+        self.assertEqual(cmd[cmd.index("--max-apply-qty-delta") + 1], "25")
+        self.assertEqual(cmd[cmd.index("--max-apply-value-impact") + 1], "1000")
+        self.assertIn("--allow-zero-cost-apply", cmd)
+        self.assertIn("--allow-negative-qbo-qty-apply", cmd)
+
+    def test_product_filter_without_caps_omits_limit_flags(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "product_filter": "TROPHY",
+                }
+            )
+        )
+        self.assertIn("--product", cmd)
+        self.assertIn("TROPHY", cmd)
+        self.assertNotIn("--max-catalog-fixes", cmd)
+        self.assertNotIn("--max-quantity-adjustments", cmd)
+
+    def test_build_command_for_job_uses_pipeline_options(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "max_catalog_fixes": 2,
+                "max_quantity_adjustments": 4,
+            },
+        )
+        cmd = build_command_for_job(job)
+        self.assertIn("code_scripts.inventory_pipeline", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("2", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("4", cmd)
+
+    def test_mode_option_becomes_cli_arg(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "mode": "quantity_preview",
+                }
+            )
+        )
+
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "quantity_preview")
+
+    def test_build_command_for_job_supports_base_name_scope_and_zero_caps(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["Pack Conflict", "BENSON & HEDGES CIGARETTES"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 2,
+            },
+        )
+        cmd = build_command_for_job(job)
+        flat = " ".join(cmd)
+        self.assertIn("code_scripts.inventory_pipeline", flat)
+        self.assertIn("--base-name", cmd)
+        self.assertIn("Pack Conflict", cmd)
+        self.assertIn("BENSON & HEDGES CIGARETTES", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("0", cmd)
+        self.assertIn("--max-quantity-adjustments", cmd)
+        self.assertIn("2", cmd)
+
+    def test_review_retry_catalog_command_remains_scoped_and_capped(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["Pack Conflict"],
+                "max_catalog_fixes": 1,
+                "max_quantity_adjustments": 0,
+                "review_retry": {
+                    "intent": "review_retry_catalog_cleanup",
+                    "row_count": 1,
+                    "affected_base_names": ["Pack Conflict"],
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+
+        self.assertEqual(cmd[cmd.index("--base-name") + 1], "Pack Conflict")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "catalog_plan_only")
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "1")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "0")
+        self.assertNotIn("--dry-run", cmd)
+
+    def test_review_retry_quantity_command_remains_scoped_and_capped(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["BENSON & HEDGES CIGARETTES"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 1,
+                "review_retry": {
+                    "intent": "review_retry_quantity_adjustments",
+                    "row_count": 1,
+                    "affected_base_names": ["BENSON & HEDGES CIGARETTES"],
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+
+        self.assertEqual(cmd[cmd.index("--base-name") + 1], "BENSON & HEDGES CIGARETTES")
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "opening_balance_correction_preview")
+        self.assertEqual(cmd[cmd.index("--max-catalog-fixes") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--max-quantity-adjustments") + 1], "1")
+        self.assertNotIn("--dry-run", cmd)
+
+    def test_review_retry_command_rejects_unscoped_full_catalog_apply(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "max_catalog_fixes": 10,
+                "max_quantity_adjustments": 0,
+                "review_retry": {
+                    "intent": "review_retry_catalog_cleanup",
+                    "row_count": 1,
+                    "affected_base_names": ["Pack Conflict"],
+                },
+            },
+        )
+
+        with self.assertRaises(ValueError):
+            build_command_for_job(job)
+
+    def test_build_command_for_job_includes_review_create_missing_items_flag(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            inventory_options_json={
+                "base_names": ["WIDGET A"],
+                "max_catalog_fixes": 0,
+                "max_quantity_adjustments": 0,
+                "txn_date": "2026-04-28",
+                "review_create_missing_items": {
+                    "intent": "review_create_missing_items",
+                    "source_final_audit": "/tmp/final.csv",
+                    "affected_base_names": ["WIDGET A"],
+                    "row_count": 1,
+                    "safe_count": 1,
+                    "blocked_count": 0,
+                    "item_inv_start_date": "2026-04-28",
+                    "txn_date_source": "test",
+                },
+            },
+        )
+        cmd = build_command_for_job(job)
+        self.assertIn("--review-create-missing-items", cmd)
+        self.assertIn("--base-name", cmd)
+        self.assertIn("WIDGET A", cmd)
+        self.assertIn("--max-catalog-fixes", cmd)
+        self.assertIn("0", cmd)
+        self.assertIn("--txn-date", cmd)
+        self.assertIn("2026-04-28", cmd)
+
+    def test_default_inventory_schedule_builds_all_products_pipeline_command(self):
+        schedule = RunSchedule.objects.create(
+            name="Weekly Inventory Sync",
+            enabled=False,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            cron_expr="0 20 * * 0",
+            timezone_name="Africa/Lagos",
+            inventory_options_json={},
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+
+        job, result = enqueue_run_for_schedule(schedule)
+
+        self.assertEqual(result, "queued")
+        assert job is not None
+        cmd = build_command_for_job(job)
+        self.assertEqual(
+            cmd[1:],
+            [
+                "-m",
+                "code_scripts.inventory_pipeline",
+                "--company",
+                "company_a",
+                "--mode",
+                "audit_only",
+                "--auto-download",
+                "--auto-fetch-qbo",
+                "--qbo-force-refresh",
+            ],
+        )
+        self.assertNotIn("--category", cmd)
+        self.assertNotIn("--product", cmd)
+
+    def test_inventory_schedule_with_category_includes_category_arg(self):
+        schedule = RunSchedule.objects.create(
+            name="Weekly Inventory Sync - Alcohols",
+            enabled=False,
+            scope=RunJob.SCOPE_INVENTORY_PIPELINE,
+            company_key="company_a",
+            cron_expr="0 20 * * 0",
+            timezone_name="Africa/Lagos",
+            inventory_options_json={"categories": ["ALCOHOLS & SPIRITS"]},
+            target_date_mode=RunSchedule.TARGET_DATE_MODE_TRADING_DATE,
+        )
+
+        job, result = enqueue_run_for_schedule(schedule)
+
+        self.assertEqual(result, "queued")
+        assert job is not None
+        cmd = build_command_for_job(job)
+        self.assertIn("--category", cmd)
+        self.assertIn("ALCOHOLS & SPIRITS", cmd)
+
+
+class InventoryBuildCommandTests(TestCase):
+    def _base_cleaned(self, **overrides) -> dict:
+        cleaned = {
+            "scope": RunJob.SCOPE_INVENTORY_SYNC,
+            "company_key": "company_a",
+            "date_mode": "yesterday",
+            "inventory_options": {},
+        }
+        cleaned.update(overrides)
+        return cleaned
+
+    def test_minimum_required_args_emits_auto_download(self):
+        """Portal-triggered audits never carry a stock_csv path; we always
+        auto-download a fresh EPOS Stock Report."""
+        cmd = build_command(self._base_cleaned())
+        flat = " ".join(cmd)
+        self.assertIn("-m", cmd)
+        self.assertIn("code_scripts.inventory_sync", cmd)
+        self.assertIn("--company", cmd)
+        self.assertIn("company_a", cmd)
+        self.assertIn("--auto-download", cmd)
+        self.assertNotIn("--stock-csv", cmd)
+        # Should NOT include any optional flags we didn't set
+        self.assertNotIn("--apply", flat)
+        self.assertNotIn("--dry-run", flat)
+        self.assertNotIn("--allow-ambiguous", flat)
+        self.assertNotIn("--allow-fallback-picks", flat)
+
+    def test_explicit_stock_csv_overrides_auto_download(self):
+        """Advanced callers can pre-populate inventory_options['stock_csv']
+        to point at an existing CSV; --auto-download is suppressed."""
+        cmd = build_command(
+            self._base_cleaned(inventory_options={"stock_csv": "/path/to/stock.csv"})
+        )
+        self.assertIn("--stock-csv", cmd)
+        self.assertIn("/path/to/stock.csv", cmd)
+        self.assertNotIn("--auto-download", cmd)
+
+    def test_all_optional_flags_propagate(self):
+        cleaned = self._base_cleaned(
+            inventory_options={
+                "qbo_csv": "/p/qbo.csv",
+                "product_filter": "WIDGET",
+                "categories": ["Beverages"],
+                "tolerance": 0.5,
+                "dry_run": True,
+                "allow_ambiguous": True,
+                "max_adjustments": 5,
+                "max_qty_delta": 100,
+                "adjust_account_id": "99",
+                "txn_date": "2026-04-14",
+            }
+        )
+        cmd = build_command(cleaned)
+        self.assertIn("--auto-download", cmd)
+        self.assertIn("--qbo-csv", cmd)
+        self.assertIn("/p/qbo.csv", cmd)
+        self.assertIn("--product", cmd)
+        self.assertIn("WIDGET", cmd)
+        self.assertIn("--category", cmd)
+        self.assertIn("Beverages", cmd)
+        self.assertIn("--tolerance", cmd)
+        self.assertIn("0.5", cmd)
+        self.assertNotIn("--apply", cmd)
+        self.assertIn("--dry-run", cmd)
+        self.assertIn("--allow-ambiguous", cmd)
+        self.assertNotIn("--allow-fallback-picks", cmd)
+        self.assertIn("--max-adjustments", cmd)
+        self.assertIn("5", cmd)
+        self.assertIn("--max-qty-delta", cmd)
+        self.assertIn("100", cmd)
+        self.assertIn("--adjust-account-id", cmd)
+        self.assertIn("99", cmd)
+        self.assertIn("--txn-date", cmd)
+        self.assertIn("2026-04-14", cmd)
+
+    def test_dry_run_mutually_exclusive_with_apply_is_not_enforced_here(self):
+        """build_command trusts the caller; the form validates the combination."""
+        cleaned = self._base_cleaned(inventory_options={"dry_run": True})
+        cmd = build_command(cleaned)
+        self.assertIn("--dry-run", cmd)
+
+    def test_category_product_mode_and_cap_become_cli_args(self):
+        cmd = build_command(
+            self._base_cleaned(
+                inventory_options={
+                    "categories": ["ALCOHOLS & SPIRITS"],
+                    "product_filter": "TROPHY",
+                    "dry_run": True,
+                    "max_adjustments": 3,
+                }
+            )
+        )
+        self.assertIn("--auto-download", cmd)
+        self.assertIn("--category", cmd)
+        self.assertIn("ALCOHOLS & SPIRITS", cmd)
+        self.assertIn("--product", cmd)
+        self.assertIn("TROPHY", cmd)
+        self.assertIn("--dry-run", cmd)
+        self.assertIn("--max-adjustments", cmd)
+        self.assertIn("3", cmd)
+
+    def test_build_command_for_job_rejects_removed_apply_option(self):
+        job = RunJob.objects.create(
+            scope=RunJob.SCOPE_INVENTORY_SYNC,
+            company_key="company_a",
+            inventory_options_json={
+                "apply": True,
+                "max_qty_delta": 50,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "apply mode has been removed"):
+            build_command_for_job(job)
+
+    def test_missing_company_key_raises(self):
+        with self.assertRaises(ValueError):
+            build_command(self._base_cleaned(company_key=""))

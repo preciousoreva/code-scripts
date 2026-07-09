@@ -1,0 +1,321 @@
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from code_scripts.inventory_notifications import (
+    format_inventory_audit_summary,
+    format_pack_variant_apply_summary,
+    format_scope,
+)
+from code_scripts.slack_notify import format_run_summary
+
+
+class FormatScopeTest(unittest.TestCase):
+    def test_no_filters_returns_empty_string(self):
+        self.assertEqual(format_scope(), "")
+        self.assertEqual(format_scope(category=[], product=""), "")
+
+    def test_category_string(self):
+        self.assertEqual(
+            format_scope(category="ALCOHOLS & SPIRITS"),
+            "category=ALCOHOLS & SPIRITS",
+        )
+
+    def test_category_list_joins_with_comma(self):
+        self.assertEqual(
+            format_scope(category=["ALCOHOLS & SPIRITS", "DRINKS & BEVERAGES"]),
+            "category=ALCOHOLS & SPIRITS, DRINKS & BEVERAGES",
+        )
+
+    def test_product_only(self):
+        self.assertEqual(format_scope(product="TROPHY"), "product=TROPHY")
+
+    def test_both_separated_by_semicolon(self):
+        self.assertEqual(
+            format_scope(category=["X"], product="Y"),
+            "category=X; product=Y",
+        )
+
+
+class InventoryAuditSummaryTest(unittest.TestCase):
+    def test_audit_summary_includes_required_fields(self):
+        msg = format_inventory_audit_summary(
+            company_display_name="AKPONORA VENTURES LTD.",
+            company_key="company_a",
+            mode="audit",
+            scope="category=ALCOHOLS & SPIRITS",
+            counts={
+                "total_groups": 134,
+                "in_sync": 41,
+                "needs_adjustment": 12,
+                "ambiguous_in_qbo": 60,
+                "missing_in_qbo": 8,
+                "posted": 0,
+                "skipped": 0,
+                "txn_date": "2026-04-28",
+            },
+            report_path="/data/.../inventory_audit_company_a_120000.csv",
+            warnings_count=68,
+            manual_review_examples=[
+                "BACARDI WHITE RUM 750ml — only pack variant exists in QuickBooks: BACARDI WHITE RUM 750ml*12",
+            ],
+        )
+        self.assertIn("Inventory sync completed", msg)
+        self.assertIn("AKPONORA VENTURES LTD. (company_a)", msg)
+        self.assertIn("Mode: Audit only", msg)
+        self.assertIn("Scope: ALCOHOLS & SPIRITS", msg)
+        self.assertIn("Products checked: 134", msg)
+        self.assertIn("Already correct: 41", msg)
+        self.assertIn("Need quantity update: 12", msg)
+        self.assertIn("Updated in QuickBooks: 0", msg)
+        self.assertIn("Skipped safely: 0", msg)
+        self.assertIn("Missing in QuickBooks: 8", msg)
+        self.assertIn("Catalog cleanup needed before update: 68", msg)
+        self.assertIn("Transaction date: 2026-04-28", msg)
+        self.assertIn("Needs review:", msg)
+        self.assertIn("BACARDI WHITE RUM 750ml", msg)
+        self.assertIn("only pack variant exists in QuickBooks", msg)
+        self.assertIn("Report:", msg)
+        self.assertIn("inventory_audit_company_a_120000.csv", msg)
+        # Ensure technical labels do not leak into Slack output.
+        self.assertNotIn("total_groups", msg)
+        self.assertNotIn("in_sync", msg)
+        self.assertNotIn("needs_adjustment", msg)
+        self.assertNotIn("ambiguous_in_qbo", msg)
+        self.assertNotIn("missing_in_qbo", msg)
+        self.assertNotIn("fallback_largest_qty", msg)
+        self.assertNotIn("non_exact_pick_not_allowed", msg)
+
+    def test_catalog_cleanup_line_is_not_duplicated_when_warnings_match_counts(self):
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="apply",
+            counts={
+                "total_groups": 147,
+                "in_sync": 7,
+                "needs_adjustment": 31,
+                "ambiguous_in_qbo": 100,
+                "missing_in_qbo": 9,
+                "posted": 5,
+                "skipped": 2,
+                "txn_date": "2026-04-28",
+            },
+            warnings_count=109,  # equals ambiguous + missing
+            manual_review_examples=[
+                "BACARDI WHITE RUM 750ml — only pack variant exists in QuickBooks: BACARDI WHITE RUM 750ml*12",
+            ],
+            report_path="/r.csv",
+        )
+        self.assertEqual(msg.count("Catalog cleanup needed before update: 109"), 1)
+
+    def test_epos_negative_clamp_line_only_renders_when_nonzero(self):
+        base_counts = {
+            "total_groups": 1,
+            "in_sync": 1,
+            "needs_adjustment": 0,
+            "ambiguous_in_qbo": 0,
+            "missing_in_qbo": 0,
+        }
+        msg_without_clamps = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="audit",
+            counts={**base_counts, "epos_negative_rows_clamped": 0},
+        )
+        self.assertNotIn("EPOS negative rows clamped to zero", msg_without_clamps)
+
+        msg_with_clamps = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="audit",
+            counts={**base_counts, "epos_negative_rows_clamped": 1},
+        )
+        self.assertIn("EPOS negative rows clamped to zero: 1", msg_with_clamps)
+
+    def test_manual_review_examples_are_capped_at_10(self):
+        examples = [f"ITEM {i} — missing_in_qbo / example" for i in range(25)]
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A",
+            company_key="company_a",
+            mode="apply",
+            counts={"posted": 1, "skipped": 2, "total_groups": 1, "in_sync": 0, "needs_adjustment": 1},
+            report_path="/r.csv",
+            warnings_count=12,
+            manual_review_examples=examples,
+        )
+        self.assertIn("Needs review:", msg)
+        self.assertIn("ITEM 0", msg)
+        self.assertIn("ITEM 9", msg)
+        self.assertNotIn("ITEM 10", msg)
+        self.assertIn("... see report for full list", msg)
+
+    def test_dry_run_label_renders_as_preview(self):
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A", company_key="company_a",
+            mode="dry-run",
+            counts={"posted": 5, "skipped": 0},
+        )
+        self.assertIn("Inventory sync preview", msg)
+        self.assertIn("Mode: Preview only", msg)
+
+    def test_sales_run_summary_includes_portal_run_link_when_configured(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "OIAT_RUN_JOB_ID": "job-123",
+                "OIAT_PORTAL_BASE_URL": "https://portal.oiatsolutions.com",
+                "OIAT_RUN_SCOPE": "all_companies",
+                "OIAT_RUN_STARTED_AT": "2026-04-28T18:00:00+00:00",
+            },
+            clear=True,
+        ):
+            msg = format_run_summary(
+                "Sales Receipt Pipeline",
+                Path("/tmp/pipeline.log"),
+                {"rows_total": 1, "rows_kept": 1},
+                status="success",
+            )
+
+        self.assertIn(
+            "Run: <https://portal.oiatsolutions.com/epos-qbo/runs/job-123/|Sales Run SAL-0428-1800-JOB>",
+            msg,
+        )
+
+    def test_sales_run_summary_omits_run_link_without_config(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            msg = format_run_summary(
+                "Sales Receipt Pipeline",
+                Path("/tmp/pipeline.log"),
+                {"rows_total": 1, "rows_kept": 1},
+                status="success",
+            )
+
+        self.assertNotIn("Run: http", msg)
+
+    def test_sales_failure_surfaces_invstart_blockers_when_report_exists(self):
+        blockers = "1 blocker row(s) — e.g. WAW MULTI-USE DETERGENT800g (2026-05-02)\n  Report: `reports/inventory_start_date_blockers_company_a_2026-05-01.csv`"
+        with mock.patch("code_scripts.slack_notify._summarize_blockers_csv", return_value=blockers):
+            msg = format_run_summary(
+                "AKPONORA VENTURES LTD. -> Sales Receipt Pipeline",
+                Path("/tmp/pipeline.log"),
+                {
+                    "target_date": "2026-05-01",
+                    "company_key": "company_a",
+                    "rows_total": 1569,
+                    "rows_kept": 1569,
+                    "rows_spilled": 0,
+                    "upload_stats": {
+                        "attempted": 5,
+                        "uploaded": 3,
+                        "skipped": 0,
+                        "failed": 2,
+                        "inventory_items_created_count": 1,
+                        "items_created_count": 1,
+                    },
+                },
+                status="failure",
+                error="[ERROR] Phase 3: Upload to QBO (qbo_upload) failed with exit code 1",
+            )
+
+        self.assertIn("QBO 6270", msg)
+        self.assertIn("InvStartDate is after the receipt date", msg)
+        self.assertIn("WAW MULTI-USE DETERGENT800g", msg)
+        self.assertNotIn("Check API credentials and data format", msg)
+
+    def test_failure_branch_includes_error_and_red_x(self):
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A", company_key="company_a",
+            mode="apply",
+            counts={"posted": 2, "skipped": 1},
+            error="HTTP 400: validation",
+            report_path="/r.csv",
+        )
+        self.assertTrue(msg.startswith("❌"))
+        self.assertIn("Inventory sync failed", msg)
+        self.assertIn("Error: HTTP 400: validation", msg)
+
+    def test_zero_counts_are_kept_but_none_is_skipped(self):
+        msg = format_inventory_audit_summary(
+            company_display_name="Co A", company_key="company_a",
+            mode="audit",
+            counts={"in_sync": 0, "needs_adjustment": None, "missing_in_qbo": ""},
+        )
+        self.assertIn("Already correct: 0", msg)
+        # Should not render a broken raw key=value section.
+        self.assertNotIn("needs_adjustment=", msg)
+        self.assertNotIn("missing_in_qbo=", msg)
+
+
+class PackVariantApplySummaryTest(unittest.TestCase):
+    def test_consolidation_summary_includes_required_fields(self):
+        msg = format_pack_variant_apply_summary(
+            kind="pack_variant_consolidation",
+            company_display_name="AKPONORA VENTURES LTD.",
+            company_key="company_a",
+            mode="apply",
+            scope="product=TROPHY",
+            counts={
+                "attempted": 3,
+                "succeeded": 3,
+                "failed": 0,
+                "no_op": 0,
+                "blocked": 1,
+                "skipped_due_to_cap": 5,
+            },
+            report_path="/data/.../report.csv",
+        )
+        self.assertIn("Pack-variant consolidation completed", msg)
+        self.assertIn("AKPONORA VENTURES LTD. (company_a)", msg)
+        self.assertIn("Mode: apply", msg)
+        self.assertIn("Scope: product=TROPHY", msg)
+        self.assertIn("attempted=3", msg)
+        self.assertIn("succeeded=3", msg)
+        self.assertIn("blocked=1", msg)
+        self.assertIn("skipped_due_to_cap=5", msg)
+        self.assertTrue(msg.startswith("✅"))
+
+    def test_cleanup_summary_uses_cleanup_title(self):
+        msg = format_pack_variant_apply_summary(
+            kind="pack_variant_cleanup",
+            company_display_name="Co A", company_key="company_a",
+            mode="apply",
+            counts={"attempted": 5, "succeeded": 5, "failed": 0,
+                    "skipped_due_to_cap": 0},
+            report_path="/r.csv",
+        )
+        self.assertIn("Pack-variant cleanup completed", msg)
+
+    def test_invalid_kind_rejected(self):
+        with self.assertRaises(ValueError):
+            format_pack_variant_apply_summary(
+                kind="inventory_audit",  # wrong helper for this kind
+                company_display_name="X", company_key="x",
+                mode="apply",
+            )
+
+    def test_failure_branch_includes_error_and_red_x(self):
+        msg = format_pack_variant_apply_summary(
+            kind="pack_variant_consolidation",
+            company_display_name="Co A", company_key="company_a",
+            mode="apply",
+            counts={"attempted": 1, "succeeded": 0, "failed": 1},
+            error="HTTP 401",
+        )
+        self.assertTrue(msg.startswith("❌"))
+        self.assertIn("Pack-variant consolidation failed", msg)
+        self.assertIn("Error: HTTP 401", msg)
+
+    def test_some_failed_uses_warning_emoji_when_no_top_level_error(self):
+        msg = format_pack_variant_apply_summary(
+            kind="pack_variant_consolidation",
+            company_display_name="Co A", company_key="company_a",
+            mode="apply",
+            counts={"attempted": 3, "succeeded": 2, "failed": 1},
+        )
+        # No top-level `error=...`, but failed > 0 -> warning emoji.
+        self.assertTrue(msg.startswith("⚠️"))
+
+
+if __name__ == "__main__":
+    unittest.main()
