@@ -146,6 +146,7 @@ def _filtered_logs(request, website: Website):
             | Q(trace_id__icontains=q)
             | Q(pathname__icontains=q)
             | Q(function_name__icontains=q)
+            | Q(context_text__icontains=q)
         )
     if filters["trace"]:
         trace = filters["trace"]
@@ -185,6 +186,8 @@ def _serialize_log_event(log: WebsiteLogEvent) -> dict[str, object]:
         "trace_display": log.request_id or log.trace_id or "",
         "pathname": log.pathname,
         "function_name": log.function_name,
+        "context": log.context,
+        "context_summary": _context_summary(log.context),
     }
 
 
@@ -203,3 +206,28 @@ def _bounded_int(value: str | None, *, default: int, minimum: int, maximum: int)
     except (TypeError, ValueError):
         parsed = default
     return min(max(parsed, minimum), maximum)
+
+
+def _context_summary(context: dict[str, object]) -> str:
+    priority = [
+        "membershipId",
+        "emailError",
+        "mirrorError",
+        "legacyMirrorError",
+        "primaryOk",
+        "legacyMirrorOk",
+        "mirrorOk",
+        "emailSent",
+        "attempt",
+    ]
+    parts = []
+    for key in priority:
+        value = context.get(key)
+        if value in ("", None):
+            continue
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        parts.append(f"{key}={value}")
+        if len(parts) == 3:
+            break
+    return " · ".join(parts)

@@ -97,6 +97,8 @@ class WebsiteLogEvent(models.Model):
     user_agent = models.TextField(blank=True)
     raw_payload = models.JSONField(default=dict, blank=True)
     request_headers = models.JSONField(default=dict, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+    context_text = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-received_at", "-id"]
